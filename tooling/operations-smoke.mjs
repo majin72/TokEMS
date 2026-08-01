@@ -747,7 +747,9 @@ try {
     headers,
   });
   assert(
-    csv.includes('# 导出人') && csv.includes('# 数据范围') && csv.includes('dietary_preference'),
+    csv.includes('# 导出用户 ID') &&
+      csv.includes('# 数据范围') &&
+      csv.includes('dietary_preference'),
     'Registration export watermark is missing',
   );
   const { body: auditLogs } = await request(`/admin/audit-logs?eventId=${eventId}`, { headers });
