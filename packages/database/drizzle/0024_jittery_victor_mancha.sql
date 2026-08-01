@@ -1,0 +1,2 @@
+DROP INDEX "template_html_documents_org_digest_unique";--> statement-breakpoint
+CREATE INDEX "template_html_documents_org_digest_idx" ON "template_html_documents" USING btree ("organization_id","sanitized_digest");

@@ -1,0 +1,99 @@
+:root {
+  --conference-bg: #ffffff;
+  --conference-bg-soft: #fafafa;
+  --conference-bg-muted: #f5f5f4;
+  --conference-ink: #171717;
+  --conference-ink-soft: #52525b;
+  --conference-ink-muted: #71717a;
+  --conference-line: #e4e4e7;
+  --conference-primary: #2563eb;
+  --conference-primary-dark: #1d4ed8;
+  --conference-primary-soft: #eff6ff;
+  --conference-navy: #183e6e;
+  --conference-navy-deep: #112f54;
+  --conference-red: #c9483a;
+  --conference-success: #2f7d64;
+  --conference-warning: #a77a1d;
+  --conference-danger: #c44738;
+  --conference-radius-xs: 4px;
+  --conference-radius-sm: 8px;
+  --conference-radius-md: 10px;
+  --conference-radius-lg: 14px;
+  --conference-radius-pill: 999px;
+  --conference-shadow-sm: 0 1px 3px rgb(0 0 0 / 6%), 0 8px 24px rgb(0 0 0 / 6%);
+  --conference-shadow-lg: 0 4px 6px rgb(0 0 0 / 4%), 0 16px 48px rgb(0 0 0 / 8%);
+  --conference-font-sans: -apple-system, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --conference-font-serif: 'Iowan Old Style', 'Baskerville', 'Songti SC', 'Noto Serif SC', serif;
+  --conference-font-mono: 'SFMono-Regular', 'Cascadia Code', 'Roboto Mono', monospace;
+  --conference-content-width: 1240px;
+  --conference-space-1: 4px;
+  --conference-space-2: 8px;
+  --conference-space-3: 12px;
+  --conference-space-4: 16px;
+  --conference-space-5: 24px;
+  --conference-space-6: 32px;
+  --conference-space-7: 48px;
+  --conference-space-8: 64px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  color: var(--conference-ink);
+  font-family: var(--conference-font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+a {
+  touch-action: manipulation;
+}
+
+:focus-visible {
+  outline: 2px solid var(--conference-primary);
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 9999;
+  top: 8px;
+  left: 8px;
+  transform: translateY(-150%);
+  padding: 10px 14px;
+  border-radius: var(--conference-radius-sm);
+  background: var(--conference-navy);
+  color: white;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

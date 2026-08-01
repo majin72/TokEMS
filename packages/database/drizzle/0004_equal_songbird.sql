@@ -1,0 +1,1 @@
+ALTER TABLE "registrations" ADD COLUMN "form_answers" jsonb DEFAULT '{}'::jsonb NOT NULL;

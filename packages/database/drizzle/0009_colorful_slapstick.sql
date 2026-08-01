@@ -1,0 +1,2 @@
+ALTER TABLE "invoice_requests" ADD COLUMN "delivery_status" varchar(32) DEFAULT 'not_sent' NOT NULL;--> statement-breakpoint
+ALTER TABLE "invoice_requests" ADD COLUMN "last_sent_at" timestamp with time zone;

@@ -1,0 +1,1 @@
+ALTER TABLE "template_html_imports" ADD COLUMN "scan_lease_token" uuid;

@@ -1,0 +1,35 @@
+{
+  "name": "@conference/html-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@conference/contracts": "workspace:*",
+    "dompurify": "3.4.12",
+    "ipaddr.js": "2.4.0",
+    "jsdom": "30.0.1",
+    "liquidjs": "10.27.2",
+    "parse5": "8.0.1",
+    "postcss": "8.5.25"
+  },
+  "devDependencies": {
+    "@types/jsdom": "28.0.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

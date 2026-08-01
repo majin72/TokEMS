@@ -1,0 +1,2 @@
+ALTER TABLE "conference_templates" ADD CONSTRAINT "conference_templates_current_published_version_id_conference_template_versions_id_fk" FOREIGN KEY ("current_published_version_id") REFERENCES "public"."conference_template_versions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "invoice_documents" ADD CONSTRAINT "invoice_documents_replaces_document_id_invoice_documents_id_fk" FOREIGN KEY ("replaces_document_id") REFERENCES "public"."invoice_documents"("id") ON DELETE set null ON UPDATE no action;

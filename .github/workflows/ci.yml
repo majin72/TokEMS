@@ -1,0 +1,159 @@
+name: tokems-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality-and-flows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_DB: conference
+          POSTGRES_USER: conference
+          POSTGRES_PASSWORD: conference
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conference -d conference"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DEPLOYMENT_MODE: local
+      DATABASE_URL: postgresql://conference:conference@localhost:5432/conference
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: conference-ci-verification-secret-at-least-32
+      CUSTOMER_OTP_PEPPER: conference-ci-otp-pepper-at-least-32-characters
+      CUSTOMER_SESSION_SECRET: conference-ci-session-secret-at-least-32-characters
+      NOTIFICATION_PAYLOAD_ENCRYPTION_SECRET: conference-ci-notification-secret-at-least-32-characters
+      INVOICE_DOWNLOAD_SIGNING_SECRET: conference-ci-invoice-secret-at-least-32-characters
+      PAYMENT_WEBHOOK_SECRET: conference-ci-payment-webhook-secret-at-least-32-characters
+      ADMIN_EMAIL: admin@tokems.local
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: Conference2026
+      PUBLIC_WEB_URL: http://localhost:3000
+      ADMIN_WEB_URL: http://localhost:3200
+      NUXT_PUBLIC_API_BASE: http://localhost:4100/api/v1
+      VITE_API_BASE: http://localhost:4100/api/v1
+      S3_ENDPOINT: http://localhost:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_ACCESS_KEY: conference-ci
+      S3_SECRET_KEY: conference-ci-secret
+      S3_BUCKET: conference-assets
+      S3_REGION: us-east-1
+      NOTIFICATION_WEBHOOK_URL: http://localhost:4080/notifications
+      NOTIFICATION_WEBHOOK_TOKEN: conference-ci-notification-token
+      NOTIFICATION_SINK_TOKEN: conference-ci-notification-token
+      CHROMIUM_PATH: /usr/bin/google-chrome
+      BUILD_SHA: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository for secrets
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Record build metadata
+        run: |
+          echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "BUILD_MIGRATION=$(find packages/database/drizzle -maxdepth 1 -name '*.sql' -print | sort | tail -1 | xargs basename)" >> "$GITHUB_ENV"
+      - name: Start object storage
+        id: object_storage
+        run: |
+          docker run --detach --name tokems-ci-minio --publish 9000:9000 \
+            --env MINIO_ROOT_USER="$S3_ACCESS_KEY" \
+            --env MINIO_ROOT_PASSWORD="$S3_SECRET_KEY" \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://localhost:9000/minio/health/live > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://localhost:9000/minio/health/live > /dev/null
+          docker run --rm --network host \
+            --env S3_ACCESS_KEY --env S3_SECRET_KEY --env S3_BUCKET \
+            --entrypoint /bin/sh minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 -ec '
+              mc alias set local http://127.0.0.1:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
+              mc mb --ignore-existing "local/$S3_BUCKET"
+            '
+      - name: Migrate and seed
+        id: migrate_seed
+        run: pnpm db:migrate && pnpm db:seed
+      - name: Quality gate
+        id: quality_gate
+        run: pnpm check
+      - name: Start built services
+        id: start_services
+        run: |
+          node apps/api/dist/main.js > /tmp/tokems-api.log 2>&1 &
+          node apps/worker/dist/main.js > /tmp/tokems-worker.log 2>&1 &
+          node apps/web/.output/server/index.mjs > /tmp/tokems-web.log 2>&1 &
+          node tooling/local-notification-sink.mjs > /tmp/tokems-notification-sink.log 2>&1 &
+          pnpm --filter @conference/admin exec vite preview --host 0.0.0.0 --port 3200 > /tmp/tokems-admin.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://localhost:4100/api/v1/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/tokems-api.log
+          exit 1
+      - name: Persistent and operations flows
+        id: business_flows
+        run: |
+          pnpm test:persistent
+          pnpm test:operations
+          pnpm test:waitlist
+          pnpm test:invoice-export
+          pnpm test:admin-upgrade
+          pnpm test:security-config
+          pnpm test:checkin-load
+          pnpm test:tooling
+          pnpm test:visual
+      - name: Dependency audit
+        id: dependency_audit
+        run: pnpm audit --registry=https://registry.npmjs.org
+      - name: Generate release evidence manifest
+        if: always()
+        run: >-
+          pnpm release:manifest --
+          --output test-results/remediation/ci/manifest.json
+          --test-result object-storage=${{ steps.object_storage.outcome }}
+          --test-result migrate-seed=${{ steps.migrate_seed.outcome }}
+          --test-result quality-gate=${{ steps.quality_gate.outcome }}
+          --test-result start-services=${{ steps.start_services.outcome }}
+          --test-result business-flows=${{ steps.business_flows.outcome }}
+          --test-result dependency-audit=${{ steps.dependency_audit.outcome }}
+      - name: Upload release evidence manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tokems-release-evidence-${{ github.sha }}
+          path: test-results/remediation/ci/manifest.json
+          if-no-files-found: error

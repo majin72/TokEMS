@@ -1,0 +1,4 @@
+CREATE UNIQUE INDEX "customer_users_id_org_unique" ON "customer_users" USING btree ("id","organization_id");--> statement-breakpoint
+ALTER TABLE "customer_sessions" ADD CONSTRAINT "customer_sessions_user_org_fk" FOREIGN KEY ("customer_user_id","organization_id") REFERENCES "public"."customer_users"("id","organization_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "registrations" ADD CONSTRAINT "registrations_customer_org_fk" FOREIGN KEY ("customer_user_id","organization_id") REFERENCES "public"."customer_users"("id","organization_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "waitlist_entries" ADD CONSTRAINT "waitlist_customer_org_fk" FOREIGN KEY ("customer_user_id","organization_id") REFERENCES "public"."customer_users"("id","organization_id") ON DELETE no action ON UPDATE no action;

@@ -1,0 +1,66 @@
+{
+  "name": "tokems",
+  "version": "0.1.0",
+  "description": "Open-source, self-hosted conference operations for event websites, registration, ticketing, invoicing, and check-in.",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yaojingang/TokEMS.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yaojingang/TokEMS/issues"
+  },
+  "homepage": "https://github.com/yaojingang/TokEMS#readme",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "eslint apps packages tooling --max-warnings=0",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:persistent": "node tooling/persistent-smoke.mjs",
+    "test:operations": "node tooling/operations-smoke.mjs",
+    "test:waitlist": "node tooling/waitlist-smoke.mjs",
+    "test:invoice-export": "node tooling/invoice-export-smoke.mjs",
+    "test:admin-upgrade": "node tooling/admin-upgrade-smoke.mjs",
+    "test:security-config": "node tooling/production-config-smoke.mjs",
+    "test:checkin-load": "node tooling/checkin-load.mjs",
+    "test:visual": "node tooling/visual-smoke.mjs",
+    "test:tooling": "node --test tooling/**/*.test.mjs",
+    "release:manifest": "node tooling/generate-release-manifest.mjs",
+    "docs:inventory": "node tooling/project-inventory.mjs",
+    "docs:check": "node tooling/project-inventory.mjs --check",
+    "docker:build": "node tooling/docker-deploy.mjs --build-only",
+    "docker:deploy": "node tooling/docker-deploy.mjs",
+    "docker:verify": "node tooling/docker-smoke.mjs",
+    "docker:status": "node tooling/docker-compose.mjs ps -a",
+    "docker:logs": "node tooling/docker-compose.mjs logs --tail=200 -f",
+    "docker:stop": "node tooling/docker-compose.mjs stop",
+    "docker:down": "node tooling/docker-compose.mjs down",
+    "audit:security": "pnpm audit --registry=https://registry.npmjs.org --audit-level high",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm docs:check",
+    "db:generate": "pnpm --filter @conference/database generate",
+    "db:migrate": "pnpm --filter @conference/database migrate",
+    "db:seed": "pnpm --filter @conference/database seed",
+    "db:cleanup-local-demo": "DEPLOYMENT_MODE=local node tooling/cleanup-local-demo-users.mjs",
+    "format": "prettier --write \"{apps,packages,docs,tooling}/**/*.{ts,vue,css,md,json}\""
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.1.1",
+    "dotenv": "17.4.1",
+    "eslint": "10.7.0",
+    "eslint-plugin-vue": "10.9.2",
+    "globals": "16.4.0",
+    "playwright-core": "1.61.1",
+    "prettier": "3.9.5",
+    "turbo": "2.10.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.64.0",
+    "vue-eslint-parser": "10.4.1"
+  }
+}

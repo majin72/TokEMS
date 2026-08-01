@@ -1,0 +1,370 @@
+import {
+  Body,
+  Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Inject,
+  Module,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  Query,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import {
+  API_ERROR_CODES,
+  ClaimCustomerRegistrationSchema,
+  CustomerAdminExportQuerySchema,
+  CustomerAdminListQuerySchema,
+  CustomerCreateInvoiceSchema,
+  CustomerInvoiceCenterListQuerySchema,
+  CustomerRegistrationListQuerySchema,
+  CustomerUpdateInvoiceSchema,
+  RequestCustomerOtpSchema,
+  UpdateCustomerAdminSchema,
+  UpdateCustomerProfileSchema,
+  VerifyCustomerOtpSchema,
+} from '@conference/contracts';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import {
+  AuthGuard,
+  grantAllows,
+  RequireAllGrants,
+  RequireGrant,
+  type AuthenticatedUser,
+} from '../common/auth.guard.js';
+import { CustomerAccountService } from '../common/customer-account.service.js';
+import { CustomerAuthGuard, type CustomerRequest } from '../common/customer-auth.guard.js';
+import { CUSTOMER_SESSION_COOKIE, CustomerAuthService } from '../common/customer-auth.service.js';
+import { DomainError } from '../common/domain-error.js';
+import { InvoiceOperationsService } from '../common/invoice-operations.service.js';
+
+function parse<T>(
+  schema: {
+    safeParse(
+      value: unknown,
+    ): { success: true; data: T } | { success: false; error: { issues: unknown } };
+  },
+  value: unknown,
+  message: string,
+): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, message, HttpStatus.BAD_REQUEST, {
+      issues: parsed.error.issues,
+    });
+  }
+  return parsed.data;
+}
+
+function customerCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production' || process.env.DEPLOYMENT_MODE === 'production',
+    sameSite: 'lax' as const,
+    path: '/api/v1',
+    maxAge: 30 * 24 * 60 * 60,
+  };
+}
+
+@ApiTags('customer-auth')
+@Controller('customer-auth')
+class CustomerAuthController {
+  constructor(
+    @Inject(CustomerAuthService)
+    private readonly customerAuth: CustomerAuthService,
+  ) {}
+
+  @Post('otp')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  requestOtp(@Body() body: unknown, @Req() request: FastifyRequest) {
+    const input = parse(RequestCustomerOtpSchema, body, '请输入有效的中国大陆手机号');
+    return this.customerAuth.requestOtp(request, input.mobile);
+  }
+
+  @Post('verify')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async verify(
+    @Body() body: unknown,
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    const input = parse(VerifyCustomerOtpSchema, body, '手机号或验证码信息校验失败');
+    const result = await this.customerAuth.verifyOtp(request, input);
+    reply.setCookie(CUSTOMER_SESSION_COOKIE, result.token, customerCookieOptions());
+    return result.session;
+  }
+
+  @Get('session')
+  async session(@Req() request: FastifyRequest) {
+    const session = await this.customerAuth.optionalSession(request);
+    if (!session) return { authenticated: false };
+    return {
+      authenticated: true,
+      customer: session.customer,
+      csrfToken: session.csrfToken,
+      expiresAt: session.expiresAt.toISOString(),
+    };
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(CustomerAuthGuard)
+  async logout(@Req() request: CustomerRequest, @Res({ passthrough: true }) reply: FastifyReply) {
+    await this.customerAuth.revokeSession(request.customerSession);
+    reply.clearCookie(CUSTOMER_SESSION_COOKIE, { path: '/api/v1' });
+  }
+
+  @Post('logout-all')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(CustomerAuthGuard)
+  async logoutAll(
+    @Req() request: CustomerRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    await this.customerAuth.revokeAllSessions(request.customerSession);
+    reply.clearCookie(CUSTOMER_SESSION_COOKIE, { path: '/api/v1' });
+  }
+}
+
+@ApiTags('customer-account')
+@Controller('customer')
+@UseGuards(CustomerAuthGuard)
+class CustomerAccountController {
+  constructor(
+    @Inject(CustomerAccountService)
+    private readonly customerAccount: CustomerAccountService,
+    @Inject(InvoiceOperationsService)
+    private readonly invoices: InvoiceOperationsService,
+  ) {}
+
+  @Get('profile')
+  profile(@Req() request: CustomerRequest) {
+    return this.customerAccount.profile(request.customerSession);
+  }
+
+  @Patch('profile')
+  updateProfile(@Body() body: unknown, @Req() request: CustomerRequest) {
+    const input = parse(UpdateCustomerProfileSchema, body, '用户资料校验失败');
+    return this.customerAccount.updateProfile(request.customerSession, input);
+  }
+
+  @Get('registrations')
+  registrations(@Req() request: CustomerRequest, @Query() query: Record<string, unknown>) {
+    const input = parse(CustomerRegistrationListQuerySchema, query, '报名记录分页参数校验失败');
+    return this.customerAccount.registrations(request.customerSession, input.cursor, input.limit);
+  }
+
+  @Get('registrations/:registrationId')
+  registration(@Req() request: CustomerRequest, @Param('registrationId') registrationId: string) {
+    return this.customerAccount.registration(request.customerSession, registrationId);
+  }
+
+  @Post('registration-claims')
+  claimRegistration(@Req() request: CustomerRequest, @Body() body: unknown) {
+    return this.customerAccount.claimRegistration(
+      request.customerSession,
+      parse(ClaimCustomerRegistrationSchema, body, '历史报名认领信息校验失败'),
+    );
+  }
+
+  @Get('invoices')
+  listInvoices(@Req() request: CustomerRequest, @Query() query: Record<string, unknown>) {
+    return this.customerAccount.invoices(
+      request.customerSession,
+      parse(CustomerInvoiceCenterListQuerySchema, query, '发票列表筛选参数校验失败'),
+    );
+  }
+
+  @Get('orders/:orderId/invoice')
+  invoice(@Req() request: CustomerRequest, @Param('orderId') orderId: string) {
+    return this.invoices.readCustomerOrderInvoice(
+      request.customerSession.organizationId,
+      request.customerSession.customerUserId,
+      orderId,
+    );
+  }
+
+  @Get('orders/:orderId/invoice-context')
+  invoiceContext(@Req() request: CustomerRequest, @Param('orderId') orderId: string) {
+    return this.invoices.customerOrderInvoiceContext(
+      request.customerSession.organizationId,
+      request.customerSession.customerUserId,
+      orderId,
+    );
+  }
+
+  @Post('orders/:orderId/invoice')
+  createInvoice(
+    @Req() request: CustomerRequest,
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+  ) {
+    return this.invoices.createCustomerOrderInvoice(
+      request.customerSession.organizationId,
+      request.customerSession.customerUserId,
+      orderId,
+      parse(CustomerCreateInvoiceSchema, body, '发票信息校验失败'),
+    );
+  }
+
+  @Patch('orders/:orderId/invoice')
+  updateInvoice(
+    @Req() request: CustomerRequest,
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+  ) {
+    return this.invoices.updateCustomerOrderInvoice(
+      request.customerSession.organizationId,
+      request.customerSession.customerUserId,
+      orderId,
+      parse(CustomerUpdateInvoiceSchema, body, '发票信息校验失败'),
+    );
+  }
+
+  @Post('orders/:orderId/invoice/send')
+  @Throttle({ default: { limit: 5, ttl: 60 * 60_000 } })
+  sendInvoice(@Req() request: CustomerRequest, @Param('orderId') orderId: string) {
+    return this.invoices.sendCustomerOrderInvoice(
+      request.customerSession.organizationId,
+      request.customerSession.customerUserId,
+      orderId,
+    );
+  }
+}
+
+@ApiTags('admin-customers')
+@Controller('admin/customers')
+@UseGuards(AuthGuard)
+class CustomerAdminController {
+  constructor(
+    @Inject(CustomerAccountService)
+    private readonly customerAccount: CustomerAccountService,
+  ) {}
+
+  @Get()
+  @RequireGrant('customer.read')
+  list(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Query() query: Record<string, unknown>,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    reply.header('Cache-Control', 'private, no-store, max-age=0');
+    return this.customerAccount.adminList(
+      request.user.organizationId,
+      parse(CustomerAdminListQuerySchema, query, '用户筛选条件校验失败'),
+    );
+  }
+
+  @Get('export.csv')
+  @RequireAllGrants('customer.read', 'customer.export')
+  @Throttle({ default: { limit: 5, ttl: 60 * 60_000 } })
+  async exportCustomers(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Query() query: Record<string, unknown>,
+    @Res() reply: FastifyReply,
+  ) {
+    const result = await this.customerAccount.adminExportCsv(
+      request.user.organizationId,
+      request.user.sub,
+      parse(CustomerAdminExportQuerySchema, query, '用户导出筛选条件校验失败'),
+    );
+    return reply
+      .header('Content-Type', 'text/csv; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="${result.filename}"`)
+      .header('Cache-Control', 'private, no-store, max-age=0')
+      .header('X-Export-Row-Count', String(result.count))
+      .send(result.csv);
+  }
+
+  @Get(':userId')
+  @RequireGrant('customer.read')
+  detail(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Param('userId', ParseIntPipe) userId: number,
+  ) {
+    return this.customerAccount.adminDetail(request.user.organizationId, userId);
+  }
+
+  @Get(':userId/registrations')
+  @RequireGrant('customer.read')
+  registrations(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Param('userId', ParseIntPipe) userId: number,
+    @Query() query: Record<string, unknown>,
+  ) {
+    const input = parse(
+      CustomerRegistrationListQuerySchema,
+      { ...query, limit: query.limit ?? 50 },
+      '报名历史分页参数校验失败',
+    );
+    return this.customerAccount.adminRegistrations(
+      request.user.organizationId,
+      userId,
+      input.cursor,
+      input.limit,
+    );
+  }
+
+  @Get(':userId/invoices')
+  @RequireGrant('customer.read')
+  invoices(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Param('userId', ParseIntPipe) userId: number,
+    @Query() query: Record<string, unknown>,
+  ) {
+    const input = parse(
+      CustomerRegistrationListQuerySchema,
+      { ...query, limit: query.limit ?? 50 },
+      '发票历史分页参数校验失败',
+    );
+    return this.customerAccount.adminInvoices(
+      request.user.organizationId,
+      userId,
+      input.cursor,
+      input.limit,
+    );
+  }
+
+  @Patch(':userId')
+  @RequireGrant('customer.manage')
+  update(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Param('userId', ParseIntPipe) userId: number,
+    @Body() body: unknown,
+  ) {
+    const input = parse(UpdateCustomerAdminSchema, body, '用户管理信息校验失败');
+    if (input.status && !grantAllows(request.user.grants, 'customer.status.manage')) {
+      throw new ForbiddenException('当前角色无权修改普通用户账号状态');
+    }
+    return this.customerAccount.adminUpdate(
+      request.user.organizationId,
+      request.user.sub,
+      userId,
+      input,
+    );
+  }
+
+  @Delete(':userId')
+  @RequireGrant('customer.delete')
+  remove(
+    @Req() request: FastifyRequest & { user: AuthenticatedUser },
+    @Param('userId', ParseIntPipe) userId: number,
+  ) {
+    return this.customerAccount.adminDelete(request.user.organizationId, request.user.sub, userId);
+  }
+}
+
+@Module({
+  controllers: [CustomerAuthController, CustomerAccountController, CustomerAdminController],
+})
+export class CustomerModule {}

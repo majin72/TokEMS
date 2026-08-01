@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+.turbo/
+.nuxt/
+.output/
+dist/
+coverage/
+test-results/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+tmp/
+.codex-backups/

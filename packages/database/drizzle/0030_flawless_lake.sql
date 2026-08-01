@@ -1,0 +1,3 @@
+ALTER TABLE "template_asset_upload_reservations" ADD COLUMN "consumed_asset_id" uuid;--> statement-breakpoint
+ALTER TABLE "template_asset_upload_reservations" ADD COLUMN "consumed_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "template_asset_upload_reservations" ADD CONSTRAINT "template_asset_upload_reservations_consumed_asset_id_template_assets_id_fk" FOREIGN KEY ("consumed_asset_id") REFERENCES "public"."template_assets"("id") ON DELETE cascade ON UPDATE no action;

@@ -1,0 +1,248 @@
+# REST API 接口摘要
+
+Base URL：`http://localhost:8088/api/v1`
+
+Swagger UI：`http://localhost:8088/api/docs`
+
+OpenAPI JSON：`http://localhost:8088/api/openapi.json`
+
+## 通用请求约定
+
+- 后台接口使用 `Authorization: Bearer <token>`。
+- 多组织公开读取可传 `X-Organization-Slug`，默认值来自 `PUBLIC_ORGANIZATION_SLUG`。
+- 关键写操作使用 8 到 160 字符的 `Idempotency-Key`。
+- `eventId` 统一为 `101`–`2147483647` 的正整数。首场大会为 `101`，新建成功后全局递增 1，已分配编号不复用。
+- 支付回调使用 `X-Payment-Timestamp` 和 `X-Payment-Signature`。
+- 离线核销同步使用设备首次登记时返回的 `X-Device-Token`。
+- API 默认对全局、登录、报名、候补和支付回调分别执行请求限流。
+
+## 公开与交易接口
+
+| Method | Path                                                      | 说明                                        |
+| ------ | --------------------------------------------------------- | ------------------------------------------- |
+| GET    | `/events/:slug`                                           | 获取当前发布快照及实时库存                  |
+| POST   | `/registrations`                                          | 创建报名、订单和库存保留，可领取候补资格    |
+| POST   | `/waitlist`                                               | 售罄票种加入候补队列                        |
+| GET    | `/orders/:identifier`                                     | 使用订单访问凭证按订单 ID 或订单号查询      |
+| POST   | `/orders/access-links`                                    | 按订单信息申请带范围和有效期的访问凭证      |
+| GET    | `/orders/:orderId/invoice-request`                        | 使用订单访问凭证读取发票申请                |
+| POST   | `/orders/:orderId/invoice-request`                        | 使用订单访问凭证提交或补充发票资料          |
+| GET    | `/orders/:orderId/invoice-documents/:documentId/download` | 使用发票下载权限获取文件                    |
+| POST   | `/payments/webhook/:provider`                             | 支付渠道签名回调                            |
+| POST   | `/payments/mock/:orderId/confirm`                         | 仅开发环境使用的支付确认                    |
+| GET    | `/tickets/:codeOrRegistrationId`                          | 按票号或报名 ID 查询电子票                  |
+| POST   | `/checkins`                                               | 需要 `event.checkin.execute` 授权的在线核销 |
+| GET    | `/health`                                                 | API、数据库和运行模式健康状态               |
+
+报名请求示例：
+
+```json
+{
+  "eventId": 101,
+  "ticketTypeId": "33333333-3333-4333-8333-333333333331",
+  "attendee": {
+    "name": "林知夏",
+    "mobile": "13800138000",
+    "email": "lin@example.com",
+    "company": "深圳未来品牌实验室",
+    "title": "品牌增长负责人",
+    "city": "深圳"
+  },
+  "invoiceRequired": false,
+  "marketingConsent": true,
+  "termsAccepted": true,
+  "formVersion": 2,
+  "termsVersion": "2026-07"
+}
+```
+
+候补邀请报名会附加 `waitlistOfferToken`。服务端校验邀请票种、邮箱、过期时间和领取状态。报名响应中的 `orderAccessToken` 只返回给当前参会人，前端在会话存储中保存并用于订单页。访问链接接口按订单校验信息签发短期令牌，数据库只保存摘要；通知链接把令牌放在 URL 片段中，避免令牌进入服务端访问日志。公开报名限制为每 IP 每分钟 60 次，同一大会的有效报名不能复用邮箱或手机号。
+
+支付渠道对原始请求体计算签名：
+
+```text
+hex(hmac_sha256(secret, "<timestamp>.<raw-json-body>"))
+```
+
+时间戳使用毫秒，允许时间窗为五分钟。回调正文包含 `orderId`、`externalId`、`status`、`amount`、`currency` 和 `occurredAt`。
+
+## 认证与组织
+
+| Method | Path                                               | 授权或说明                       |
+| ------ | -------------------------------------------------- | -------------------------------- |
+| POST   | `/auth/login`                                      | 公开，10 次/分钟/IP，可指定组织  |
+| GET    | `/auth/me`                                         | 当前用户、组织、角色和权限       |
+| POST   | `/auth/invitations/accept`                         | 公开，接受一次性组织邀请         |
+| GET    | `/admin/organization/members`                      | `org.member.read`                |
+| PATCH  | `/admin/organization/members/:membershipId`        | `org.member.manage`              |
+| PATCH  | `/admin/organization/members/:membershipId/status` | `org.member.manage`，启用或停用  |
+| DELETE | `/admin/organization/members/:membershipId`        | `org.member.manage`，移除成员    |
+| GET    | `/admin/organization/invitations`                  | `org.member.read`                |
+| POST   | `/admin/organization/invitations`                  | `org.member.manage`              |
+| DELETE | `/admin/organization/invitations/:invitationId`    | `org.member.manage`，取消邀请    |
+| GET    | `/admin/organization/settings`                     | 组织设置读取                     |
+| PATCH  | `/admin/organization/settings`                     | 组织设置修改                     |
+| GET    | `/admin/integrations/status`                       | 支付、通知、AI、对象存储接入状态 |
+
+邀请创建响应中的 `acceptanceToken` 只返回一次，72 小时内有效。数据库保存令牌摘要，后台把令牌放在链接片段中，避免令牌进入 Web 服务器请求日志。登录可提交 `organizationSlug` 选择邀请对应的组织。
+
+## 普通用户账号
+
+普通用户会话使用 HttpOnly Cookie。登录成功响应返回 CSRF 令牌，资料修改、报名认领、发票提交和退出操作需要通过 `X-CSRF-Token` 传回。
+
+| Method | Path                                             | 授权或说明                                                      |
+| ------ | ------------------------------------------------ | --------------------------------------------------------------- |
+| POST   | `/customer-auth/otp`                             | 公开，请求手机验证码                                            |
+| POST   | `/customer-auth/verify`                          | 公开，验证并自动登录或首次注册                                  |
+| GET    | `/customer-auth/session`                         | 查询当前普通用户会话                                            |
+| POST   | `/customer-auth/logout`                          | 普通用户会话与 CSRF                                             |
+| POST   | `/customer-auth/logout-all`                      | 撤销当前用户全部会话                                            |
+| GET    | `/customer/profile`                              | 当前用户资料                                                    |
+| PATCH  | `/customer/profile`                              | 更新可选资料与版本号                                            |
+| GET    | `/customer/registrations`                        | 报名历史游标分页                                                |
+| GET    | `/customer/registrations/:registrationId`        | 报名、订单、电子票详情                                          |
+| POST   | `/customer/registration-claims`                  | 同手机号订单访问凭证，一次性认领                                |
+| GET    | `/customer/invoices`                             | 发票中心分类、准确数量、游标分页与可用操作                      |
+| GET    | `/customer/orders/:orderId/invoice`              | 读取本人订单的发票申请                                          |
+| GET    | `/customer/orders/:orderId/invoice-context`      | 读取订单号、大会与扣除成功退款后的可开票金额                    |
+| POST   | `/customer/orders/:orderId/invoice`              | 首次创建本人订单的发票申请                                      |
+| PATCH  | `/customer/orders/:orderId/invoice`              | 携带 `expectedUpdatedAt` 修改已有发票资料                       |
+| POST   | `/customer/orders/:orderId/invoice/send`         | 已开具发票重新发送，持久化冷却并限制请求频率                    |
+| GET    | `/admin/customers`                               | `customer.read`，用户搜索与游标分页                             |
+| GET    | `/admin/customers/export.csv`                    | `customer.read` + `customer.export`，按当前筛选导出完整用户目录 |
+| GET    | `/admin/customers/:customerUserId`               | `customer.read`，用户详情和首批历史                             |
+| GET    | `/admin/customers/:customerUserId/registrations` | `customer.read`，继续加载报名历史                               |
+| PATCH  | `/admin/customers/:customerUserId`               | `customer.manage`，状态修改另需高权限                           |
+| DELETE | `/admin/customers/:customerUserId`               | `customer.delete`，删除账号并保留历史                           |
+
+用户列表支持按姓名、用户名、公司、邮箱、完整手机号和完整用户 UUID 搜索。响应包含准确总数、账号资料与最近报名资料合成的显示姓名和公司、报名记录数、报名大会数，以及结构化的最新报名信息。完整手机号按 E.164 返回，管理端以国内 11 位格式显示。
+
+用户导出沿用列表的 `q`、`status` 和 `eventId` 筛选，覆盖同一数据库快照内的全部分页结果，单次上限为 50,000 条，每个访问来源每小时最多请求 5 次。CSV 使用 UTF-8 BOM，并对公式起始字符转义；用户列表和导出响应均禁止缓存。导出审计只记录筛选是否存在和结果数量，不保存搜索词或用户字段明文。
+
+普通用户没有独立的密码登录或账号注册接口。`/customer-auth/verify` 会为首次验证的“组织 + 手机号”创建账号，已有账号会直接建立新会话。本地 `fake` 模式在验证码申请响应中返回固定演示验证码 `123456`；正式 `provider` 模式不会在响应中返回验证码。
+
+历史报名认领令牌同时校验组织、报名、有效期、权限范围和当前登录手机号。成功后令牌中的认领权限立即消费。
+
+发票首次申请与资料更新使用独立契约。更新请求和后台状态操作携带 `expectedUpdatedAt`，服务在事务锁内核对版本；检测到其他页面或工作人员已更新记录时返回 `409`，客户端刷新最新状态后再继续。发票中心以订单创建时间和订单 ID 作为稳定游标，申请状态变化不会让记录在翻页期间跳动。普通用户时间线只返回公开状态文案；驳回原因可以展示，内部操作者、元数据和后台备注不会返回。
+
+## 大会、内容与发布
+
+| Method            | Path                                                  | 说明                                       |
+| ----------------- | ----------------------------------------------------- | ------------------------------------------ |
+| GET/POST          | `/admin/events`                                       | 大会列表与新建，新建必须提交已发布模板版本 |
+| GET/PATCH         | `/admin/events/:eventId`                              | 大会草稿详情与状态更新                     |
+| GET               | `/admin/event-blueprints`                             | 大会蓝图                                   |
+| GET               | `/admin/template-packages`                            | 前台模板包                                 |
+| GET               | `/admin/events/:eventId/template-binding`             | 模板绑定、当前版本和升级状态               |
+| PUT               | `/admin/events/:eventId/template-binding`             | 升级或替换大会模板                         |
+| POST              | `/admin/events/:eventId/save-as-template`             | 从大会解析配置创建并发布模板 V1            |
+| GET               | `/admin/events/:eventId/experience`                   | 读取模板与大会覆盖的解析结果               |
+| PUT               | `/admin/events/:eventId/experience/:surface`          | 保存首页、FAQ 或流程覆盖                   |
+| POST              | `/admin/events/:eventId/experience/validate`          | 发布前体验校验                             |
+| POST              | `/admin/events/:eventId/experience/preview`           | 生成大会体验预览                           |
+| GET/POST          | `/admin/events/:eventId/releases`                     | 发布历史与新版本                           |
+| POST              | `/admin/events/:eventId/releases/:releaseId/rollback` | 回滚公开快照指针                           |
+| GET               | `/admin/events/:eventId/content`                      | 嘉宾、议程和内容草稿                       |
+| POST/PATCH/DELETE | `/admin/events/:eventId/ticket-types[/:ticketTypeId]` | 票种维护与可恢复下架                       |
+| GET               | `/admin/events/:eventId/ticket-types/archived`        | 已下架票种                                 |
+| POST              | `/admin/events/:eventId/ticket-types/:id/restore`     | 恢复票种到大会草稿                         |
+| POST/PATCH/DELETE | `/admin/events/:eventId/speakers[/:speakerId]`        | 嘉宾维护                                   |
+| POST/PATCH/DELETE | `/admin/events/:eventId/sessions[/:sessionId]`        | 议程维护                                   |
+| GET               | `/admin/events/:eventId/registration-forms`           | 报名表版本                                 |
+| POST              | `/admin/events/:eventId/registration-forms/publish`   | 发布报名表和条款版本                       |
+
+大会更新的 `settings.registration` 包含 `paymentMode`、`currency` 和 `registrationOpen`。`free` 发布要求全部票种价格为 0，零元报名会在同一事务完成订单、库存和电子票。
+
+## 大会模板
+
+| Method    | Path                                     | 授权或说明                              |
+| --------- | ---------------------------------------- | --------------------------------------- |
+| GET       | `/admin/templates`                       | `org.template.read`，模板列表与使用统计 |
+| GET       | `/admin/template-options`                | `org.template.use`，已发布模板选项      |
+| POST      | `/admin/templates`                       | `org.template.manage`，创建或复制模板   |
+| GET/PATCH | `/admin/templates/:templateId`           | 读取详情或修改元信息                    |
+| GET/PUT   | `/admin/templates/:templateId/draft`     | 读取或按修订号保存结构化草稿            |
+| POST      | `/admin/templates/:templateId/publish`   | `org.template.publish`，发布不可变版本  |
+| GET       | `/admin/templates/:templateId/versions`  | 版本历史                                |
+| GET       | `/admin/templates/:templateId/usages`    | 使用大会与升级状态                      |
+| POST      | `/admin/templates/:templateId/duplicate` | 复制已发布版本                          |
+| POST      | `/admin/templates/:templateId/archive`   | 归档模板                                |
+| POST      | `/admin/templates/:templateId/restore`   | 恢复模板                                |
+| GET       | `/admin/template-assets`                 | 模板图片列表与短期预览地址              |
+| POST      | `/admin/template-assets/uploads`         | 获取对象存储预签名上传地址              |
+| POST      | `/admin/template-assets`                 | 校验已上传对象并登记资产                |
+| DELETE    | `/admin/template-assets/:assetId`        | 删除无引用资产并排队清理对象            |
+
+模板版本发布后保持不可变。大会绑定明确的 `templateVersionId`，升级、替换和大会再次发布均需要独立确认。模板资产登记会核对组织路径、媒体类型、文件大小和 SHA-256。
+
+## 发票管理
+
+| Method | Path                                                        | 授权或说明                               |
+| ------ | ----------------------------------------------------------- | ---------------------------------------- |
+| GET    | `/admin/invoices`                                           | `org.invoice.read`，搜索、筛选和游标分页 |
+| GET    | `/admin/invoices/pending-count`                             | 待处理数量                               |
+| GET    | `/admin/invoices/:invoiceId`                                | 路由化详情与状态时间线                   |
+| POST   | `/admin/invoices/:invoiceId/approve`                        | 审核通过                                 |
+| POST   | `/admin/invoices/:invoiceId/reject`                         | 驳回并记录原因                           |
+| POST   | `/admin/invoices/:invoiceId/retry`                          | 重新进入审核                             |
+| POST   | `/admin/invoices/:invoiceId/issue-failed`                   | 标记开票失败                             |
+| POST   | `/admin/invoices/:invoiceId/cancel`                         | 取消申请                                 |
+| POST   | `/admin/invoices/:invoiceId/document-uploads`               | 获取 PDF/OFD 预签名上传地址              |
+| POST   | `/admin/invoices/:invoiceId/documents`                      | 校验对象并登记电子发票                   |
+| POST   | `/admin/invoices/:invoiceId/documents/:documentId/void`     | 作废指定文件                             |
+| POST   | `/admin/invoices/:invoiceId/send`                           | 重新发送当前有效发票                     |
+| GET    | `/admin/invoices/:invoiceId/documents/:documentId/download` | 获取短期下载地址并记录审计               |
+| GET    | `/admin/invoices/export.csv`                                | 小结果直接导出，大结果创建 Worker 任务   |
+| GET    | `/admin/invoices/export-jobs/:exportJobId`                  | 查询异步导出状态                         |
+| POST   | `/admin/invoices/export-jobs/:exportJobId/retry`            | 重试失败任务                             |
+| GET    | `/admin/invoices/export-jobs/:exportJobId/download`         | 获取短期导出文件地址                     |
+
+CSV 导出对公式起始字符进行转义。达到 `INVOICE_ASYNC_EXPORT_THRESHOLD` 的查询进入 Worker，默认阈值为 50,000 条。
+
+## 运营、履约与审计
+
+| Method   | Path                                              | 说明                       |
+| -------- | ------------------------------------------------- | -------------------------- |
+| GET      | `/admin/events/:eventId/dashboard`                | 指标和票种库存             |
+| GET      | `/admin/events/:eventId/registrations`            | 报名分页查询               |
+| GET      | `/admin/events/:eventId/registrations/:id`        | 报名、订单与用户账号详情   |
+| GET      | `/admin/events/:eventId/orders`                   | 订单查询                   |
+| GET      | `/admin/events/:eventId/waitlist`                 | 候补队列                   |
+| POST     | `/admin/orders/:orderId/refunds`                  | 全额或部分退款             |
+| GET      | `/admin/refunds`                                  | 退款记录                   |
+| GET      | `/admin/events/:eventId/inventory`                | 实时库存、保留和候补占位   |
+| POST     | `/admin/inventory/release-expired`                | 释放过期库存               |
+| GET/POST | `/admin/events/:eventId/checkin-devices`          | 核销设备列表与登记         |
+| POST     | `/admin/checkins/sync`                            | 设备令牌保护的离线批次同步 |
+| GET      | `/admin/audit-logs`                               | 审计查询                   |
+| GET      | `/admin/events/:eventId/registrations/export.csv` | 报名 CSV 导出              |
+
+原有 `/admin/dashboard?eventId=`、`/admin/registrations?eventId=` 和 `/admin/orders?eventId=` 在兼容周期内继续可用。
+
+报名分页查询支持 `q`、`status`、`page` 和 `pageSize`，`pageSize` 范围为 1 到 100。响应为 `{ items, total, page, pageSize }`。报名详情需要 `event.registration.read`，关联用户账号资料还需要 `customer.read`；缺少用户查看权限时通过 `customerRelation: "restricted"` 明确标记。
+
+## AI 与通知
+
+| Method | Path                             | 说明                   |
+| ------ | -------------------------------- | ---------------------- |
+| GET    | `/admin/ai/runs`                 | AI 运行记录            |
+| POST   | `/admin/ai/generate`             | 生成待审核草稿         |
+| POST   | `/admin/ai/runs/:runId/approve`  | 人工审批               |
+| GET    | `/admin/notification-templates`  | 通知模板               |
+| GET    | `/admin/notification-deliveries` | 投递记录               |
+| POST   | `/admin/notifications/queue`     | 基于已审批内容排队发送 |
+
+## 错误格式
+
+```json
+{
+  "code": "INVENTORY_UNAVAILABLE",
+  "message": "所选票种暂时无可用名额",
+  "details": {},
+  "traceId": "4cde015f-74c7-4f19-a221-56f63e13de72",
+  "path": "/api/v1/registrations",
+  "occurredAt": "2026-07-18T04:00:00.000Z"
+}
+```
+
+服务端 500 错误返回统一安全提示，内部堆栈仅写入服务端日志。核心业务错误码包括 `VALIDATION_ERROR`、`UNAUTHORIZED`、`FORBIDDEN`、`NOT_FOUND`、`IDEMPOTENCY_CONFLICT`、`INVENTORY_UNAVAILABLE`、`INVALID_STATE_TRANSITION` 和 `DUPLICATE_CHECKIN`。

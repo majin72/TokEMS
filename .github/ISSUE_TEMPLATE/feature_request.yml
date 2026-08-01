@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a focused TokEMS improvement
+title: '[Feature]: '
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What conference workflow or user need should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the behavior you want and who benefits.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or other approaches when available.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Deployment and regional scope
+      description: Note affected languages, regions, providers, APIs, migrations, or compatibility constraints.

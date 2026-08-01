@@ -1,0 +1,1353 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { compare, hash } from 'bcryptjs';
+import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import type {
+  AccountProfile,
+  AcceptOrganizationInvitation,
+  AuthMe,
+  CreateOrganizationInvitation,
+  CreateOrganizationInvitationResult,
+  IntegrationStatus,
+  OrganizationInvitation,
+  OrganizationMember,
+  OrganizationSettings,
+  OrganizationSettingsResult,
+  PublicSiteConfiguration,
+  UpdateAccountProfile,
+  UpdateMembershipStatus,
+  UpdateOrganizationMember,
+  UpdateOrganizationSettings,
+} from '@conference/contracts';
+import {
+  AnalyticsSettingsSchema,
+  API_ERROR_CODES,
+  OrganizationSettingsSchema,
+  WebsiteSettingsSchema,
+} from '@conference/contracts';
+import {
+  auditLogs,
+  eventBlueprints,
+  memberProfiles,
+  memberships,
+  organizationInvitations,
+  organizationIntegrations,
+  organizations,
+  outboxEvents,
+  publicUserIds,
+  users,
+} from '@conference/database';
+import { readAliyunSmsConfiguration } from '@conference/integrations';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+import { DatabaseService } from './database.service.js';
+import { DomainError } from './domain-error.js';
+import { requirePublicUserId } from './public-user-id.js';
+
+type Database = NonNullable<DatabaseService['db']>;
+
+const DEFAULT_ORGANIZATION_SETTINGS: OrganizationSettings = {
+  brandName: '大会管理中心',
+  defaultTimezone: 'Asia/Shanghai',
+  defaultCurrency: 'CNY',
+  defaultBlueprintId: null,
+  defaultTemplateId: null,
+  customerAccounts: {
+    defaultAccountMode: 'mobile_otp_required',
+    termsUrl: '',
+    termsVersion: '',
+    privacyUrl: '',
+    privacyVersion: '',
+  },
+  website: {
+    siteName: '大会报名中心',
+    seoTitle: '大会报名中心',
+    seoDescription: '',
+    faviconUrl: '',
+    footerText: '',
+    icpNumber: '',
+    supportEmail: '',
+  },
+  analytics: {
+    enabled: false,
+    provider: 'baidu',
+    trackingId: '',
+    scriptUrl: '',
+    siteId: '',
+  },
+};
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function normalizeOrganizationSettings(
+  organizationName: string,
+  value: Partial<OrganizationSettings> & Record<string, unknown>,
+): OrganizationSettings {
+  const website = WebsiteSettingsSchema.safeParse({
+    ...DEFAULT_ORGANIZATION_SETTINGS.website,
+    ...recordValue(value.website),
+  });
+  const analytics = AnalyticsSettingsSchema.safeParse({
+    ...DEFAULT_ORGANIZATION_SETTINGS.analytics,
+    ...recordValue(value.analytics),
+  });
+  const customerAccounts = recordValue(value.customerAccounts);
+  const normalizedCustomerAccounts = OrganizationSettingsSchema.shape.customerAccounts.safeParse({
+    ...DEFAULT_ORGANIZATION_SETTINGS.customerAccounts,
+    ...customerAccounts,
+  });
+  return {
+    brandName:
+      typeof value.brandName === 'string'
+        ? value.brandName
+        : typeof value.brand === 'string'
+          ? value.brand
+          : organizationName,
+    defaultTimezone:
+      typeof value.defaultTimezone === 'string'
+        ? value.defaultTimezone
+        : DEFAULT_ORGANIZATION_SETTINGS.defaultTimezone,
+    defaultCurrency: 'CNY',
+    defaultBlueprintId:
+      typeof value.defaultBlueprintId === 'string' ? value.defaultBlueprintId : null,
+    defaultTemplateId: typeof value.defaultTemplateId === 'string' ? value.defaultTemplateId : null,
+    customerAccounts: normalizedCustomerAccounts.success
+      ? normalizedCustomerAccounts.data
+      : DEFAULT_ORGANIZATION_SETTINGS.customerAccounts,
+    website: website.success
+      ? website.data
+      : {
+          ...DEFAULT_ORGANIZATION_SETTINGS.website,
+          siteName: organizationName,
+          seoTitle: organizationName,
+        },
+    analytics: analytics.success ? analytics.data : DEFAULT_ORGANIZATION_SETTINGS.analytics,
+  };
+}
+
+function validatesGrants(grants: string[]) {
+  return grants.every(
+    (grant) => !grant.includes(' ') && !grant.startsWith('.') && !grant.endsWith('.'),
+  );
+}
+
+function allowsGrant(grants: string[], required: string) {
+  return grants.some(
+    (grant) =>
+      grant === '*' ||
+      grant === required ||
+      (grant.endsWith('.*') && required.startsWith(`${grant.slice(0, -2)}.`)),
+  );
+}
+
+function sameGrants(left: string[], right: string[]) {
+  return [...new Set(left)].sort().join('\n') === [...new Set(right)].sort().join('\n');
+}
+
+function isOrganizationAdministrator(member: {
+  role: string;
+  grants: string[];
+  status: 'active' | 'disabled';
+}) {
+  return member.status === 'active' && allowsGrant(member.grants, 'org.member.manage');
+}
+
+function isPrivilegeAdministrator(member: {
+  role: string;
+  grants: string[];
+  status: 'active' | 'disabled';
+}) {
+  return (
+    member.status === 'active' &&
+    member.role === 'organization_admin' &&
+    member.grants.includes('*')
+  );
+}
+
+function assertRoleGrantConsistency(role: string, grants: string[]) {
+  const privilegedRole = role === 'organization_admin';
+  const privilegedGrants = grants.includes('*');
+  if (privilegedRole !== privilegedGrants) {
+    throw new DomainError(
+      API_ERROR_CODES.VALIDATION_ERROR,
+      '组织管理员角色需要使用完整权限，其他角色不能持有完整权限',
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+  if (grants.some((grant) => grant.startsWith('event.')) && !allowsGrant(grants, 'event.read')) {
+    throw new DomainError(
+      API_ERROR_CODES.VALIDATION_ERROR,
+      '大会级角色需要同时具备大会基础访问权限',
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+}
+
+function assertCanDelegate(
+  actor: { role: string; grants: string[]; status: 'active' | 'disabled' },
+  role: string,
+  grants: string[],
+) {
+  assertRoleGrantConsistency(role, grants);
+  if (isPrivilegeAdministrator(actor)) return;
+  if (role === 'organization_admin' || grants.some((grant) => !allowsGrant(actor.grants, grant))) {
+    throw new DomainError(
+      API_ERROR_CODES.FORBIDDEN,
+      '不能分配超出当前账号范围的角色或权限',
+      HttpStatus.FORBIDDEN,
+    );
+  }
+}
+
+@Injectable()
+export class OrganizationAdminService {
+  constructor(@Inject(DatabaseService) private readonly database: DatabaseService) {}
+
+  private db(): Database {
+    if (!this.database.db) {
+      throw new DomainError(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '此管理能力需要 PostgreSQL 持久化模式',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    return this.database.db;
+  }
+
+  private tokenHash(token: string) {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  private invitationFromRow(
+    row: typeof organizationInvitations.$inferSelect,
+    now = new Date(),
+  ): OrganizationInvitation {
+    return {
+      id: row.id,
+      email: row.email,
+      role: row.role,
+      grants: row.grants,
+      status: row.status === 'pending' && row.expiresAt <= now ? 'expired' : row.status,
+      invitedBy: row.invitedBy,
+      expiresAt: row.expiresAt.toISOString(),
+      acceptedAt: row.acceptedAt?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+    };
+  }
+
+  private memberFromRows(
+    membership: typeof memberships.$inferSelect,
+    user: typeof users.$inferSelect,
+    profile: typeof memberProfiles.$inferSelect | null,
+    publicUserId: number,
+  ): OrganizationMember {
+    return {
+      id: membership.id,
+      userId: publicUserId,
+      email: user.email,
+      name: user.name,
+      mobile: user.mobile,
+      role: membership.role,
+      grants: membership.grants,
+      status: membership.status,
+      profile: profile
+        ? {
+            company: profile.company,
+            title: profile.title,
+            city: profile.city,
+            bio: profile.bio,
+            tags: profile.tags,
+          }
+        : null,
+    };
+  }
+
+  private accountProfileFromRows(
+    membership: typeof memberships.$inferSelect,
+    user: typeof users.$inferSelect,
+    organization: typeof organizations.$inferSelect,
+    profile: typeof memberProfiles.$inferSelect | null,
+    publicUserId: number,
+  ): AccountProfile {
+    return {
+      user: {
+        id: publicUserId,
+        email: user.email,
+        name: user.name,
+        mobile: user.mobile,
+      },
+      organization: {
+        id: organization.id,
+        slug: organization.slug,
+        name: organization.name,
+      },
+      membership: {
+        id: membership.id,
+        role: membership.role,
+        grants: membership.grants,
+        status: membership.status,
+      },
+      profile: profile
+        ? {
+            company: profile.company,
+            title: profile.title,
+            city: profile.city,
+            bio: profile.bio,
+            tags: profile.tags,
+          }
+        : null,
+    };
+  }
+
+  async getCurrentIdentity(
+    organizationId: string,
+    userId: string,
+    fallback?: {
+      email: string;
+      name: string;
+      role: AuthMe['membership']['role'];
+      grants: string[];
+    },
+  ): Promise<AuthMe> {
+    if (!this.database.db && fallback) {
+      return {
+        user: { id: 101, email: fallback.email, name: fallback.name },
+        organization: {
+          id: organizationId,
+          slug: process.env.PUBLIC_ORGANIZATION_SLUG ?? 'tokems-demo',
+          name: 'TokEMS Demo Team',
+          settings: {
+            ...DEFAULT_ORGANIZATION_SETTINGS,
+            brandName: 'TokEMS Demo',
+          },
+        },
+        membership: {
+          id: `demo-membership:${userId}`,
+          role: fallback.role,
+          grants: fallback.grants,
+          status: 'active',
+        },
+      };
+    }
+    const [row] = await this.db()
+      .select({
+        membership: memberships,
+        user: users,
+        organization: organizations,
+        publicUserId: publicUserIds.publicId,
+      })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .innerJoin(organizations, eq(organizations.id, memberships.organizationId))
+      .innerJoin(
+        publicUserIds,
+        and(
+          eq(publicUserIds.subjectType, 'staff'),
+          eq(publicUserIds.subjectUuid, users.id),
+          isNull(publicUserIds.retiredAt),
+        ),
+      )
+      .where(
+        and(
+          eq(memberships.organizationId, organizationId),
+          eq(memberships.userId, userId),
+          eq(memberships.status, 'active'),
+        ),
+      )
+      .limit(1);
+    if (!row) {
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '组织成员身份已失效',
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+    return {
+      user: {
+        id: row.publicUserId,
+        email: row.user.email,
+        name: row.user.name,
+      },
+      organization: {
+        id: row.organization.id,
+        slug: row.organization.slug,
+        name: row.organization.name,
+        settings: normalizeOrganizationSettings(row.organization.name, row.organization.settings),
+      },
+      membership: {
+        id: row.membership.id,
+        role: row.membership.role,
+        grants: row.membership.grants,
+        status: row.membership.status,
+      },
+    };
+  }
+
+  async getAccountProfile(
+    organizationId: string,
+    userId: string,
+    fallback?: {
+      email: string;
+      name: string;
+      role: AccountProfile['membership']['role'];
+      grants: string[];
+    },
+  ): Promise<AccountProfile> {
+    if (!this.database.db && fallback) {
+      return {
+        user: {
+          id: 101,
+          email: fallback.email,
+          name: fallback.name,
+          mobile: null,
+        },
+        organization: {
+          id: organizationId,
+          slug: process.env.PUBLIC_ORGANIZATION_SLUG ?? 'tokems-demo',
+          name: 'TokEMS Demo Team',
+        },
+        membership: {
+          id: `demo-membership:${userId}`,
+          role: fallback.role,
+          grants: fallback.grants,
+          status: 'active',
+        },
+        profile: null,
+      };
+    }
+    const [row] = await this.db()
+      .select({
+        membership: memberships,
+        user: users,
+        organization: organizations,
+        profile: memberProfiles,
+        publicUserId: publicUserIds.publicId,
+      })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .innerJoin(organizations, eq(organizations.id, memberships.organizationId))
+      .innerJoin(
+        publicUserIds,
+        and(
+          eq(publicUserIds.subjectType, 'staff'),
+          eq(publicUserIds.subjectUuid, users.id),
+          isNull(publicUserIds.retiredAt),
+        ),
+      )
+      .leftJoin(
+        memberProfiles,
+        and(
+          eq(memberProfiles.userId, memberships.userId),
+          eq(memberProfiles.organizationId, memberships.organizationId),
+        ),
+      )
+      .where(
+        and(
+          eq(memberships.organizationId, organizationId),
+          eq(memberships.userId, userId),
+          eq(memberships.status, 'active'),
+        ),
+      )
+      .limit(1);
+    if (!row) {
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '组织成员身份已失效',
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+    return this.accountProfileFromRows(
+      row.membership,
+      row.user,
+      row.organization,
+      row.profile,
+      row.publicUserId,
+    );
+  }
+
+  async updateAccountProfile(
+    organizationId: string,
+    userId: string,
+    input: UpdateAccountProfile,
+  ): Promise<AccountProfile> {
+    const db = this.db();
+    const publicUserId = await requirePublicUserId(db, 'staff', userId);
+    await db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ membership: memberships, user: users })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(
+          and(
+            eq(memberships.organizationId, organizationId),
+            eq(memberships.userId, userId),
+            eq(memberships.status, 'active'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!row) {
+        throw new DomainError(
+          API_ERROR_CODES.UNAUTHORIZED,
+          '组织成员身份已失效',
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+      const [profile] = await tx
+        .select()
+        .from(memberProfiles)
+        .where(
+          and(eq(memberProfiles.organizationId, organizationId), eq(memberProfiles.userId, userId)),
+        )
+        .limit(1);
+
+      await tx
+        .update(users)
+        .set({ name: input.name, mobile: input.mobile, updatedAt: new Date() })
+        .where(eq(users.id, userId));
+      await tx
+        .insert(memberProfiles)
+        .values({
+          organizationId,
+          userId,
+          ...input.profile,
+        })
+        .onConflictDoUpdate({
+          target: [memberProfiles.organizationId, memberProfiles.userId],
+          set: { ...input.profile, updatedAt: new Date() },
+        });
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId: userId,
+        action: 'account.profile.update',
+        resourceType: 'user',
+        resourceId: String(publicUserId),
+        before: {
+          name: row.user.name,
+          mobile: row.user.mobile,
+          profile: profile
+            ? {
+                company: profile.company,
+                title: profile.title,
+                city: profile.city,
+                bio: profile.bio,
+                tags: profile.tags,
+              }
+            : null,
+        },
+        after: {
+          name: input.name,
+          mobile: input.mobile,
+          profile: input.profile,
+        },
+        traceId: crypto.randomUUID(),
+      });
+    });
+    return this.getAccountProfile(organizationId, userId);
+  }
+
+  async listMembers(organizationId: string): Promise<OrganizationMember[]> {
+    const rows = await this.db()
+      .select({
+        membership: memberships,
+        user: users,
+        profile: memberProfiles,
+        publicUserId: publicUserIds.publicId,
+      })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .innerJoin(
+        publicUserIds,
+        and(
+          eq(publicUserIds.subjectType, 'staff'),
+          eq(publicUserIds.subjectUuid, users.id),
+          isNull(publicUserIds.retiredAt),
+        ),
+      )
+      .leftJoin(
+        memberProfiles,
+        and(
+          eq(memberProfiles.userId, memberships.userId),
+          eq(memberProfiles.organizationId, memberships.organizationId),
+        ),
+      )
+      .where(eq(memberships.organizationId, organizationId))
+      .orderBy(asc(users.name));
+    return rows.map(({ membership, user, profile, publicUserId }) =>
+      this.memberFromRows(membership, user, profile, publicUserId),
+    );
+  }
+
+  async updateMember(
+    organizationId: string,
+    membershipId: string,
+    actorId: string,
+    input: UpdateOrganizationMember,
+  ): Promise<OrganizationMember> {
+    if (!validatesGrants(input.grants)) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '权限标识格式不正确',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const db = this.db();
+    const result = await db.transaction(async (tx) => {
+      const [membership] = await tx
+        .select()
+        .from(memberships)
+        .where(
+          and(eq(memberships.id, membershipId), eq(memberships.organizationId, organizationId)),
+        )
+        .for('update')
+        .limit(1);
+      if (!membership) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '组织成员不存在或无权访问',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      const [actor] = await tx
+        .select({
+          userId: memberships.userId,
+          role: memberships.role,
+          grants: memberships.grants,
+          status: memberships.status,
+        })
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.organizationId, organizationId),
+            eq(memberships.userId, actorId),
+            eq(memberships.status, 'active'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!actor) {
+        throw new DomainError(
+          API_ERROR_CODES.UNAUTHORIZED,
+          '组织成员身份已失效',
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+      const changesOwnAccess =
+        membership.userId === actorId &&
+        (membership.role !== input.role || !sameGrants(membership.grants, input.grants));
+      if (changesOwnAccess) {
+        throw new DomainError(
+          API_ERROR_CODES.FORBIDDEN,
+          '当前账号不能修改自己的角色或权限',
+          HttpStatus.FORBIDDEN,
+        );
+      }
+      assertCanDelegate(actor, input.role, input.grants);
+      const activeRows = await tx
+        .select({ role: memberships.role, grants: memberships.grants, status: memberships.status })
+        .from(memberships)
+        .where(eq(memberships.organizationId, organizationId))
+        .for('update');
+      const removesAdministratorAccess =
+        isOrganizationAdministrator(membership) &&
+        !isOrganizationAdministrator({
+          role: input.role,
+          grants: input.grants,
+          status: membership.status,
+        });
+      if (
+        removesAdministratorAccess &&
+        activeRows.filter(isOrganizationAdministrator).length <= 1
+      ) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '组织需要保留至少一名可管理成员与权限的管理员',
+          HttpStatus.CONFLICT,
+        );
+      }
+      const [user] = await tx
+        .update(users)
+        .set({ name: input.name, mobile: input.mobile, updatedAt: new Date() })
+        .where(eq(users.id, membership.userId))
+        .returning();
+      const [updatedMembership] = await tx
+        .update(memberships)
+        .set({ role: input.role, grants: input.grants, updatedAt: new Date() })
+        .where(eq(memberships.id, membership.id))
+        .returning();
+      const [profile] = await tx
+        .insert(memberProfiles)
+        .values({
+          organizationId,
+          userId: membership.userId,
+          ...input.profile,
+        })
+        .onConflictDoUpdate({
+          target: [memberProfiles.organizationId, memberProfiles.userId],
+          set: { ...input.profile, updatedAt: new Date() },
+        })
+        .returning();
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId,
+        action: 'organization.member.update',
+        resourceType: 'membership',
+        resourceId: membership.id,
+        before: { role: membership.role, grants: membership.grants },
+        after: { role: updatedMembership!.role, grants: updatedMembership!.grants },
+        traceId: crypto.randomUUID(),
+      });
+      return { user: user!, membership: updatedMembership!, profile: profile! };
+    });
+    const publicUserId = await requirePublicUserId(this.db(), 'staff', result.user.id);
+    return this.memberFromRows(result.membership, result.user, result.profile, publicUserId);
+  }
+
+  async updateMemberStatus(
+    organizationId: string,
+    membershipId: string,
+    actorId: string,
+    input: UpdateMembershipStatus,
+  ): Promise<OrganizationMember> {
+    const result = await this.db().transaction(async (tx) => {
+      const [membership] = await tx
+        .select()
+        .from(memberships)
+        .where(
+          and(eq(memberships.id, membershipId), eq(memberships.organizationId, organizationId)),
+        )
+        .for('update')
+        .limit(1);
+      if (!membership) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '组织成员不存在或无权访问',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      const [actor] = await tx
+        .select({
+          role: memberships.role,
+          grants: memberships.grants,
+          status: memberships.status,
+        })
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.organizationId, organizationId),
+            eq(memberships.userId, actorId),
+            eq(memberships.status, 'active'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!actor) {
+        throw new DomainError(
+          API_ERROR_CODES.UNAUTHORIZED,
+          '组织成员身份已失效',
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+      if (isPrivilegeAdministrator(membership) && !isPrivilegeAdministrator(actor)) {
+        throw new DomainError(
+          API_ERROR_CODES.FORBIDDEN,
+          '只有组织管理员可以停用组织管理员',
+          HttpStatus.FORBIDDEN,
+        );
+      }
+      const [user] = await tx.select().from(users).where(eq(users.id, membership.userId)).limit(1);
+      const [profile] = await tx
+        .select()
+        .from(memberProfiles)
+        .where(
+          and(
+            eq(memberProfiles.userId, membership.userId),
+            eq(memberProfiles.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+      if (membership.userId === actorId && input.status === 'disabled') {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '当前账号不能停用自己',
+          HttpStatus.CONFLICT,
+        );
+      }
+      const activeRows = await tx
+        .select({ role: memberships.role, grants: memberships.grants, status: memberships.status })
+        .from(memberships)
+        .where(eq(memberships.organizationId, organizationId))
+        .for('update');
+      if (
+        input.status === 'disabled' &&
+        isOrganizationAdministrator(membership) &&
+        activeRows.filter(isOrganizationAdministrator).length <= 1
+      ) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '组织需要保留至少一名可管理成员与权限的管理员',
+          HttpStatus.CONFLICT,
+        );
+      }
+      const [updated] = await tx
+        .update(memberships)
+        .set({ status: input.status, updatedAt: new Date() })
+        .where(eq(memberships.id, membershipId))
+        .returning();
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId,
+        action: `organization.member.${input.status === 'active' ? 'enable' : 'disable'}`,
+        resourceType: 'membership',
+        resourceId: membershipId,
+        before: { status: membership.status },
+        after: { status: updated!.status },
+        traceId: crypto.randomUUID(),
+      });
+      return { membership: updated!, user: user!, profile: profile ?? null };
+    });
+    const publicUserId = await requirePublicUserId(this.db(), 'staff', result.user.id);
+    return this.memberFromRows(result.membership, result.user, result.profile, publicUserId);
+  }
+
+  async removeMember(organizationId: string, membershipId: string, actorId: string) {
+    return this.db().transaction(async (tx) => {
+      const [membership] = await tx
+        .select()
+        .from(memberships)
+        .where(
+          and(eq(memberships.id, membershipId), eq(memberships.organizationId, organizationId)),
+        )
+        .for('update')
+        .limit(1);
+      if (!membership) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '组织成员不存在或无权访问',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      const [actor] = await tx
+        .select({
+          role: memberships.role,
+          grants: memberships.grants,
+          status: memberships.status,
+        })
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.organizationId, organizationId),
+            eq(memberships.userId, actorId),
+            eq(memberships.status, 'active'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!actor) {
+        throw new DomainError(
+          API_ERROR_CODES.UNAUTHORIZED,
+          '组织成员身份已失效',
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+      if (isPrivilegeAdministrator(membership) && !isPrivilegeAdministrator(actor)) {
+        throw new DomainError(
+          API_ERROR_CODES.FORBIDDEN,
+          '只有组织管理员可以移除组织管理员',
+          HttpStatus.FORBIDDEN,
+        );
+      }
+      if (membership.userId === actorId) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '当前账号不能移除自己',
+          HttpStatus.CONFLICT,
+        );
+      }
+      const activeRows = await tx
+        .select({ role: memberships.role, grants: memberships.grants, status: memberships.status })
+        .from(memberships)
+        .where(eq(memberships.organizationId, organizationId))
+        .for('update');
+      if (
+        isOrganizationAdministrator(membership) &&
+        activeRows.filter(isOrganizationAdministrator).length <= 1
+      ) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '组织需要保留至少一名可管理成员与权限的管理员',
+          HttpStatus.CONFLICT,
+        );
+      }
+      await tx
+        .delete(memberProfiles)
+        .where(
+          and(
+            eq(memberProfiles.organizationId, organizationId),
+            eq(memberProfiles.userId, membership.userId),
+          ),
+        );
+      await tx.delete(memberships).where(eq(memberships.id, membershipId));
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId,
+        action: 'organization.member.remove',
+        resourceType: 'membership',
+        resourceId: membershipId,
+        before: {
+          userId: membership.userId,
+          role: membership.role,
+          grants: membership.grants,
+          status: membership.status,
+        },
+        traceId: crypto.randomUUID(),
+      });
+      return { deleted: true };
+    });
+  }
+
+  async listInvitations(organizationId: string): Promise<OrganizationInvitation[]> {
+    const rows = await this.db()
+      .select()
+      .from(organizationInvitations)
+      .where(eq(organizationInvitations.organizationId, organizationId))
+      .orderBy(desc(organizationInvitations.createdAt));
+    return rows.map((row) => this.invitationFromRow(row));
+  }
+
+  async createInvitation(
+    organizationId: string,
+    actorId: string,
+    input: CreateOrganizationInvitation,
+  ): Promise<CreateOrganizationInvitationResult> {
+    if (!validatesGrants(input.grants)) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '权限标识格式不正确',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const email = input.email.trim().toLowerCase();
+    const acceptanceToken = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60_000);
+    const invitation = await this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`organization-invitation:${organizationId}:${email}`}, 0))`,
+      );
+      const [actor] = await tx
+        .select({
+          role: memberships.role,
+          grants: memberships.grants,
+          status: memberships.status,
+        })
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.organizationId, organizationId),
+            eq(memberships.userId, actorId),
+            eq(memberships.status, 'active'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!actor) {
+        throw new DomainError(
+          API_ERROR_CODES.UNAUTHORIZED,
+          '组织成员身份已失效',
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+      assertCanDelegate(actor, input.role, input.grants);
+      const [existingMember] = await tx
+        .select({ id: memberships.id })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(and(eq(memberships.organizationId, organizationId), eq(users.email, email)))
+        .limit(1);
+      if (existingMember) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '该邮箱已经是组织成员',
+          HttpStatus.CONFLICT,
+        );
+      }
+      await tx
+        .update(organizationInvitations)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(
+          and(
+            eq(organizationInvitations.organizationId, organizationId),
+            eq(organizationInvitations.email, email),
+            eq(organizationInvitations.status, 'pending'),
+          ),
+        );
+      const [created] = await tx
+        .insert(organizationInvitations)
+        .values({
+          organizationId,
+          email,
+          role: input.role,
+          grants: input.grants,
+          tokenHash: this.tokenHash(acceptanceToken),
+          invitedBy: actorId,
+          expiresAt,
+        })
+        .returning();
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId,
+        action: 'organization.invitation.create',
+        resourceType: 'organization_invitation',
+        resourceId: created!.id,
+        after: {
+          email,
+          role: input.role,
+          grants: input.grants,
+          expiresAt: expiresAt.toISOString(),
+        },
+        traceId: crypto.randomUUID(),
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId,
+        eventType: 'OrganizationInvitationCreated',
+        correlationId: `organization-invitation:${created!.id}`,
+        payload: {
+          invitationId: created!.id,
+          email,
+          expiresAt: expiresAt.toISOString(),
+          delivery: 'admin_copy_link',
+        },
+      });
+      return created!;
+    });
+    return {
+      invitation: this.invitationFromRow(invitation),
+      acceptanceToken,
+    };
+  }
+
+  async cancelInvitation(organizationId: string, invitationId: string, actorId: string) {
+    return this.db().transaction(async (tx) => {
+      const [invitation] = await tx
+        .update(organizationInvitations)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(
+          and(
+            eq(organizationInvitations.id, invitationId),
+            eq(organizationInvitations.organizationId, organizationId),
+            eq(organizationInvitations.status, 'pending'),
+          ),
+        )
+        .returning();
+      if (!invitation) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '待接受邀请不存在或已经结束',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId,
+        action: 'organization.invitation.cancel',
+        resourceType: 'organization_invitation',
+        resourceId: invitationId,
+        before: { status: 'pending' },
+        after: { status: 'cancelled' },
+        traceId: crypto.randomUUID(),
+      });
+      return { cancelled: true };
+    });
+  }
+
+  async acceptInvitation(input: AcceptOrganizationInvitation): Promise<OrganizationMember> {
+    const db = this.db();
+    return db.transaction(async (tx) => {
+      const [invitation] = await tx
+        .select()
+        .from(organizationInvitations)
+        .where(eq(organizationInvitations.tokenHash, this.tokenHash(input.token)))
+        .for('update')
+        .limit(1);
+      if (!invitation || invitation.status !== 'pending' || invitation.expiresAt <= new Date()) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '邀请链接无效或已经过期',
+          HttpStatus.CONFLICT,
+        );
+      }
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`organization-invitation-user:${invitation.email}`}, 0))`,
+      );
+      const [existingUser] = await tx
+        .select()
+        .from(users)
+        .where(eq(users.email, invitation.email))
+        .limit(1);
+      let user = existingUser;
+      if (existingUser) {
+        if (
+          !existingUser.passwordHash ||
+          !(await compare(input.password, existingUser.passwordHash))
+        ) {
+          throw new DomainError(
+            API_ERROR_CODES.UNAUTHORIZED,
+            '该邮箱已有账号，请输入现有账号密码',
+            HttpStatus.UNAUTHORIZED,
+          );
+        }
+      } else {
+        [user] = await tx
+          .insert(users)
+          .values({
+            email: invitation.email,
+            name: input.name,
+            passwordHash: await hash(input.password, 12),
+          })
+          .returning();
+      }
+      const [existingMembership] = await tx
+        .select({ id: memberships.id })
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.organizationId, invitation.organizationId),
+            eq(memberships.userId, user!.id),
+          ),
+        )
+        .limit(1);
+      if (existingMembership) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '该账号已经加入组织',
+          HttpStatus.CONFLICT,
+        );
+      }
+      const [membership] = await tx
+        .insert(memberships)
+        .values({
+          organizationId: invitation.organizationId,
+          userId: user!.id,
+          role: invitation.role,
+          grants: invitation.grants,
+          status: 'active',
+        })
+        .returning();
+      const [accepted] = await tx
+        .update(organizationInvitations)
+        .set({ status: 'accepted', acceptedAt: new Date(), updatedAt: new Date() })
+        .where(eq(organizationInvitations.id, invitation.id))
+        .returning();
+      await tx.insert(auditLogs).values({
+        organizationId: invitation.organizationId,
+        actorId: user!.id,
+        action: 'organization.invitation.accept',
+        resourceType: 'organization_invitation',
+        resourceId: invitation.id,
+        before: { status: invitation.status },
+        after: { status: accepted!.status, membershipId: membership!.id },
+        traceId: crypto.randomUUID(),
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: invitation.organizationId,
+        eventType: 'OrganizationInvitationAccepted',
+        correlationId: `organization-invitation:accepted:${invitation.id}`,
+        payload: {
+          invitationId: invitation.id,
+          membershipId: membership!.id,
+          userId: user!.id,
+        },
+      });
+      const [publicIdRow] = await tx
+        .select({ publicId: publicUserIds.publicId })
+        .from(publicUserIds)
+        .where(
+          and(
+            eq(publicUserIds.subjectType, 'staff'),
+            eq(publicUserIds.subjectUuid, user!.id),
+            isNull(publicUserIds.retiredAt),
+          ),
+        )
+        .limit(1);
+      if (!publicIdRow) throw new Error('新成员缺少数字用户 ID');
+      return this.memberFromRows(membership!, user!, null, publicIdRow.publicId);
+    });
+  }
+
+  async getSettings(organizationId: string): Promise<OrganizationSettingsResult> {
+    const [organization] = await this.db()
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1);
+    if (!organization) {
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '组织不存在或无权访问',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return {
+      id: organization.id,
+      slug: organization.slug,
+      name: organization.name,
+      settings: normalizeOrganizationSettings(organization.name, organization.settings),
+    };
+  }
+
+  async updateSettings(
+    organizationId: string,
+    actorId: string,
+    input: UpdateOrganizationSettings,
+  ): Promise<OrganizationSettingsResult> {
+    const db = this.db();
+    const row = await db.transaction(async (tx) => {
+      const [organization] = await tx
+        .select()
+        .from(organizations)
+        .where(eq(organizations.id, organizationId))
+        .for('update')
+        .limit(1);
+      if (!organization) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '组织不存在或无权访问',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      if (input.settings?.defaultBlueprintId) {
+        const [blueprint] = await tx
+          .select({ id: eventBlueprints.id })
+          .from(eventBlueprints)
+          .where(
+            and(
+              eq(eventBlueprints.id, input.settings.defaultBlueprintId),
+              eq(eventBlueprints.organizationId, organizationId),
+            ),
+          )
+          .limit(1);
+        if (!blueprint) {
+          throw new DomainError(
+            API_ERROR_CODES.NOT_FOUND,
+            '默认大会蓝图不存在或无权访问',
+            HttpStatus.NOT_FOUND,
+          );
+        }
+      }
+      const before = normalizeOrganizationSettings(organization.name, organization.settings);
+      const settingsPatch = Object.fromEntries(
+        Object.entries(input.settings ?? {}).filter(([, value]) => value !== undefined),
+      ) as Partial<OrganizationSettings>;
+      const settings: OrganizationSettings = {
+        ...before,
+        ...settingsPatch,
+        defaultCurrency: 'CNY',
+      };
+      const [updated] = await tx
+        .update(organizations)
+        .set({
+          ...(input.name ? { name: input.name } : {}),
+          settings: { ...organization.settings, ...settings },
+          updatedAt: new Date(),
+        })
+        .where(eq(organizations.id, organizationId))
+        .returning();
+      await tx.insert(auditLogs).values({
+        organizationId,
+        actorId,
+        action: 'organization.settings.update',
+        resourceType: 'organization',
+        resourceId: organizationId,
+        before: { name: organization.name, settings: before },
+        after: { name: updated!.name, settings },
+        traceId: crypto.randomUUID(),
+      });
+      return updated!;
+    });
+    return {
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      settings: normalizeOrganizationSettings(row.name, row.settings),
+    };
+  }
+
+  async getIntegrationStatus(organizationId: string): Promise<IntegrationStatus> {
+    const configured = (value: boolean) => ({
+      configured: value,
+      status: value ? ('configured' as const) : ('unconfigured' as const),
+    });
+    const [payment] = await this.db()
+      .select({ status: organizationIntegrations.status })
+      .from(organizationIntegrations)
+      .where(
+        and(
+          eq(organizationIntegrations.organizationId, organizationId),
+          eq(organizationIntegrations.provider, 'wechatpay'),
+        ),
+      )
+      .limit(1);
+    const [aliyunSms] = await this.db()
+      .select({
+        status: organizationIntegrations.status,
+        config: organizationIntegrations.config,
+      })
+      .from(organizationIntegrations)
+      .where(
+        and(
+          eq(organizationIntegrations.organizationId, organizationId),
+          eq(organizationIntegrations.provider, 'aliyun-sms'),
+        ),
+      )
+      .limit(1);
+    const hasPayment = payment?.status === 'verified' || payment?.status === 'configured';
+    const smsConfig = aliyunSms ? readAliyunSmsConfiguration(aliyunSms.config) : undefined;
+    const hasNotification = Boolean(
+      (aliyunSms?.status === 'verified' &&
+        smsConfig?.enabled &&
+        Object.values(smsConfig.templates).some(
+          (template) => template.enabled && template.status === 'verified',
+        )) ||
+      process.env.NOTIFICATION_WEBHOOK_URL ||
+      process.env.SMTP_URL ||
+      process.env.RESEND_API_KEY,
+    );
+    const hasAi = Boolean(process.env.AI_API_KEY || process.env.OPENAI_API_KEY);
+    const hasStorage = Boolean(
+      process.env.S3_ENDPOINT &&
+      process.env.S3_ACCESS_KEY &&
+      process.env.S3_SECRET_KEY &&
+      process.env.S3_BUCKET,
+    );
+    return {
+      payment: configured(hasPayment),
+      notification: configured(hasNotification),
+      ai: configured(hasAi),
+      objectStorage: configured(hasStorage),
+    };
+  }
+
+  async getPublicSiteConfiguration(organizationSlug: string): Promise<PublicSiteConfiguration> {
+    const [organization] = await this.db()
+      .select()
+      .from(organizations)
+      .where(eq(organizations.slug, organizationSlug))
+      .limit(1);
+    if (!organization) {
+      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '站点不存在', HttpStatus.NOT_FOUND);
+    }
+    const settings = normalizeOrganizationSettings(organization.name, organization.settings);
+    return {
+      website: settings.website,
+      analytics: settings.analytics,
+      customerAccounts: {
+        termsUrl: settings.customerAccounts.termsUrl,
+        termsVersion: settings.customerAccounts.termsVersion,
+        privacyUrl: settings.customerAccounts.privacyUrl,
+        privacyVersion: settings.customerAccounts.privacyVersion,
+      },
+    };
+  }
+}

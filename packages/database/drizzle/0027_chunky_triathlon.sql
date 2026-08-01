@@ -1,0 +1,1 @@
+ALTER TABLE "template_html_import_assets" ADD COLUMN "released_at" timestamp with time zone;

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "webPages": 10,
+  "adminViews": 34,
+  "migrations": 35,
+  "latestMigration": "0034_public-user-ids.sql",
+  "databaseTables": 59,
+  "apiControllers": 23,
+  "apiOperations": 167,
+  "testFiles": 38
+}
