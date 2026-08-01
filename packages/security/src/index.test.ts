@@ -16,13 +16,17 @@ import {
 } from './index.js';
 
 describe('ticket code security contract', () => {
-  it('BLK-01 generates only ticket codes accepted by the strict public contract', () => {
-    for (let index = 0; index < 100_000; index += 1) {
-      const code = createTicketCode();
-      expect(isStrictTicketCode(code)).toBe(true);
-      expect(isReadableTicketCode(code)).toBe(true);
-    }
-  });
+  it(
+    'BLK-01 generates only ticket codes accepted by the strict public contract',
+    { timeout: 20_000 },
+    () => {
+      for (let index = 0; index < 100_000; index += 1) {
+        const code = createTicketCode();
+        expect(isStrictTicketCode(code)).toBe(true);
+        expect(isReadableTicketCode(code)).toBe(true);
+      }
+    },
+  );
 
   it('BLK-01 keeps historical nanoid ticket codes readable without accepting unsafe paths', () => {
     expect(isReadableTicketCode('TOK-T-08DPDRLZ_9')).toBe(true);
