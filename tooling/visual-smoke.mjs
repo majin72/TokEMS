@@ -237,6 +237,13 @@ async function screenshot(page, file, label) {
   checked.push(label);
 }
 
+async function settleScroll(page, locator) {
+  await locator.scrollIntoViewIfNeeded();
+  await page.evaluate(
+    () => new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))),
+  );
+}
+
 async function loginAdmin(page) {
   await page.getByLabel('用户名').fill(adminUsername);
   await page.getByLabel('密码').fill(adminPassword);
@@ -443,15 +450,15 @@ if (await desktopCustomerView.count()) {
     /^(编辑|查看)$/.test(document.activeElement?.textContent?.trim() ?? ''),
   );
   const desktopCustomerMore = admin.getByRole('button', { name: '更多' }).first();
+  await settleScroll(admin, desktopCustomerMore);
   await desktopCustomerMore.click();
   const desktopCustomerDelete = admin.getByRole('button', { name: '删除用户' }).first();
-  if (await desktopCustomerDelete.count()) {
-    await desktopCustomerDelete.dispatchEvent('click');
-    await admin.locator('.customer-delete-dialog[open]').waitFor();
-    await assertCenteredDialog(admin, '.customer-delete-dialog[open]', '用户删除确认桌面端');
-    await screenshot(admin, 'admin-user-delete-desktop.png', '用户删除确认桌面端');
-    await admin.getByRole('button', { name: '取消' }).click();
-  }
+  await desktopCustomerDelete.waitFor();
+  await desktopCustomerDelete.dispatchEvent('click');
+  await admin.locator('.customer-delete-dialog[open]').waitFor();
+  await assertCenteredDialog(admin, '.customer-delete-dialog[open]', '用户删除确认桌面端');
+  await screenshot(admin, 'admin-user-delete-desktop.png', '用户删除确认桌面端');
+  await admin.getByRole('button', { name: '取消' }).click();
 } else {
   issues.push('用户管理桌面端: 没有可用于弹窗验收的用户');
 }
@@ -591,15 +598,15 @@ if (await mobileCustomerView.count()) {
     /^(编辑|查看)$/.test(document.activeElement?.textContent?.trim() ?? ''),
   );
   const mobileCustomerMore = mobileAdmin.getByRole('button', { name: '更多' }).first();
+  await settleScroll(mobileAdmin, mobileCustomerMore);
   await mobileCustomerMore.click();
   const mobileCustomerDelete = mobileAdmin.getByRole('button', { name: '删除用户' }).first();
-  if (await mobileCustomerDelete.count()) {
-    await mobileCustomerDelete.dispatchEvent('click');
-    await mobileAdmin.locator('.customer-delete-dialog[open]').waitFor();
-    await assertCenteredDialog(mobileAdmin, '.customer-delete-dialog[open]', '用户删除确认手机端');
-    await screenshot(mobileAdmin, 'admin-user-delete-mobile.png', '用户删除确认手机端');
-    await mobileAdmin.getByRole('button', { name: '取消' }).click();
-  }
+  await mobileCustomerDelete.waitFor();
+  await mobileCustomerDelete.dispatchEvent('click');
+  await mobileAdmin.locator('.customer-delete-dialog[open]').waitFor();
+  await assertCenteredDialog(mobileAdmin, '.customer-delete-dialog[open]', '用户删除确认手机端');
+  await screenshot(mobileAdmin, 'admin-user-delete-mobile.png', '用户删除确认手机端');
+  await mobileAdmin.getByRole('button', { name: '取消' }).click();
 } else {
   issues.push('用户管理手机端: 没有可用于弹窗验收的用户');
 }
