@@ -246,6 +246,20 @@
       "when": 1785542657413,
       "tag": "0034_public-user-ids",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785567900000,
+      "tag": "0035_wechat_payment_status_enum",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1785567900001,
+      "tag": "0036_wechat_payment_attempts",
+      "breakpoints": true
     }
   ]
 }

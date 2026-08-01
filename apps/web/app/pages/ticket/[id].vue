@@ -27,7 +27,10 @@ const dateRange = computed(() => {
   });
   return `${format.format(new Date(event.value.startsAt))} 至 ${format.format(new Date(event.value.endsAt))}`;
 });
-const homeHref = computed(() => `/?event=${encodeURIComponent(event.value.slug)}`);
+const homeHref = computed(() =>
+  api.resolveConferenceUrl(`/?event=${encodeURIComponent(event.value.slug)}`),
+);
+const paymentSurface = computed(() => api.isPaymentSurface());
 const paymentRequired = computed(
   () => checkout.value?.order.amount !== 0 && checkout.value?.order.paymentMethod !== 'free',
 );
@@ -135,7 +138,8 @@ function printTicket() {
       >
         <NuxtLink v-if="invoiceHref" class="flow-action" :to="invoiceHref"> 填写发票信息 </NuxtLink>
         <button class="flow-action" type="button" @click="printTicket">打印 / 导出电子票</button>
-        <NuxtLink class="flow-action is-secondary" :to="homeHref">返回大会首页</NuxtLink>
+        <a v-if="paymentSurface" class="flow-action is-secondary" :href="homeHref">返回大会首页</a>
+        <NuxtLink v-else class="flow-action is-secondary" :to="homeHref">返回大会首页</NuxtLink>
       </div>
     </main>
   </div>

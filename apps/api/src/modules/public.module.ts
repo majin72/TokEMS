@@ -17,12 +17,14 @@ import {
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { z } from 'zod';
 import {
   API_ERROR_CODES,
   CheckInRequestSchema,
   CreateRegistrationSchema,
   PaymentCallbackSchema,
   WaitlistJoinSchema,
+  WeChatPaymentChannelSchema,
 } from '@conference/contracts';
 import { isReadableTicketCode } from '@conference/security';
 import { ConferenceRepository } from '../common/conference.repository.js';
@@ -30,9 +32,70 @@ import { DomainError } from '../common/domain-error.js';
 import { AuthGuard, RequireGrant, type AuthenticatedUser } from '../common/auth.guard.js';
 import { OrganizationAdminService } from '../common/organization-admin.service.js';
 import { TemplateOperationsService } from '../common/template-operations.service.js';
-import { WeChatPayService } from '../common/wechat-pay.service.js';
+import {
+  resolveTrustedClientIp,
+  WeChatPayService,
+} from '../common/wechat-pay.service.js';
 import { CustomerAuthService } from '../common/customer-auth.service.js';
 import { HtmlTemplateOperationsService } from '../common/html-template-operations.service.js';
+
+const WeChatSwitchChannelBodySchema = z
+  .object({
+    channel: WeChatPaymentChannelSchema,
+    oauthSession: z.string().trim().min(16).max(500).optional(),
+  })
+  .strict();
+
+const WeChatJsapiPrepareBodySchema = z
+  .object({
+    oauthSession: z.string().trim().min(16).max(500).optional(),
+  })
+  .strict();
+
+const WeChatOAuthStartBodySchema = z
+  .object({
+    returnPath: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict();
+
+const WeChatOAuthHandoffBodySchema = z
+  .object({
+    handoffCode: z.string().trim().min(16).max(128),
+  })
+  .strict();
+
+/**
+ * Reads an OAuth session token from the dedicated header or JSON body.
+ *
+ * @param headerValue - Optional X-Wechat-OAuth-Session header
+ * @param bodyToken - Optional oauthSession field from the body
+ * @returns Non-empty session token
+ */
+function oauthSessionToken(headerValue: string | undefined, bodyToken: string | undefined) {
+  const token = (headerValue?.trim() || bodyToken?.trim() || '').trim();
+  if (token.length < 16 || token.length > 500) {
+    throw new DomainError(
+      API_ERROR_CODES.UNAUTHORIZED,
+      '微信 OAuth 会话无效或已过期',
+      HttpStatus.UNAUTHORIZED,
+    );
+  }
+  return token;
+}
+
+/**
+ * Resolves a trusted payer client IP for H5 scene_info.
+ *
+ * @param request - Incoming Fastify request
+ * @returns Best-effort client IP string
+ */
+function trustedClientIp(request: FastifyRequest) {
+  const forwarded = request.headers['x-forwarded-for'];
+  return resolveTrustedClientIp(
+    request.ip,
+    typeof forwarded === 'string' ? forwarded : Array.isArray(forwarded) ? forwarded[0] : undefined,
+  );
+}
 
 function idempotencyKey(value: string | undefined) {
   if (!value || value.length < 8 || value.length > 160) {
@@ -344,9 +407,9 @@ class OrdersController {
   ) {
     const accessToken = orderAccessToken(authorization);
     const current = await this.repository.getOrder(identifier, accessToken);
-    if (['pending_payment', 'processing'].includes(current.status) && current.paymentUrl) {
+    if (['pending_payment', 'processing'].includes(current.status)) {
       try {
-        const transaction = await this.weChatPay.queryNativePayment(current.id, accessToken);
+        const transaction = await this.weChatPay.queryPayment(current.id, accessToken);
         if (transaction) {
           await this.repository.confirmPayment(
             transaction.orderId,
@@ -357,8 +420,11 @@ class OrdersController {
               amount: transaction.amount,
               currency: transaction.currency,
               occurredAt: transaction.occurredAt,
+              paymentId: transaction.paymentId,
+              outTradeNo: transaction.outTradeNo,
               payload: {
                 source: 'transaction-query',
+                outTradeNo: transaction.outTradeNo,
                 occurredAt: transaction.occurredAt,
                 receivedAt: new Date().toISOString(),
               },
@@ -398,11 +464,229 @@ class OrdersController {
 
   @Post('payments/wechat/:orderId/native')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   prepareWeChatNativePayment(
     @Param('orderId') orderId: string,
     @Headers('authorization') authorization?: string,
   ) {
     return this.weChatPay.prepareNativePayment(orderId, orderAccessToken(authorization));
+  }
+
+  @Post('payments/wechat/:orderId/jsapi')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  prepareWeChatJsapiPayment(
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+    @Headers('authorization') authorization?: string,
+    @Headers('x-wechat-oauth-session') oauthSessionHeader?: string,
+  ) {
+    const parsed = WeChatJsapiPrepareBodySchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        'JSAPI 支付参数校验失败',
+        HttpStatus.BAD_REQUEST,
+        { issues: parsed.error.issues },
+      );
+    }
+    return this.weChatPay.prepareJsapiPayment(
+      orderId,
+      orderAccessToken(authorization),
+      oauthSessionToken(oauthSessionHeader, parsed.data.oauthSession),
+    );
+  }
+
+  @Post('payments/wechat/:orderId/h5')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  prepareWeChatH5Payment(
+    @Param('orderId') orderId: string,
+    @Req() request: FastifyRequest,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.weChatPay.prepareH5Payment(
+      orderId,
+      orderAccessToken(authorization),
+      trustedClientIp(request),
+    );
+  }
+
+  @Post('payments/wechat/:orderId/switch')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async switchWeChatPaymentChannel(
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+    @Req() request: FastifyRequest,
+    @Headers('authorization') authorization?: string,
+    @Headers('x-wechat-oauth-session') oauthSessionHeader?: string,
+  ) {
+    return this.switchWeChatPaymentChannelHandler(
+      orderId,
+      body,
+      request,
+      authorization,
+      oauthSessionHeader,
+    );
+  }
+
+  @Post('payments/wechat/:orderId/switch-channel')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async switchWeChatPaymentChannelAlias(
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+    @Req() request: FastifyRequest,
+    @Headers('authorization') authorization?: string,
+    @Headers('x-wechat-oauth-session') oauthSessionHeader?: string,
+  ) {
+    return this.switchWeChatPaymentChannelHandler(
+      orderId,
+      body,
+      request,
+      authorization,
+      oauthSessionHeader,
+    );
+  }
+
+  @Post('payments/wechat/:orderId/channel')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async switchWeChatPaymentChannelFrontendAlias(
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+    @Req() request: FastifyRequest,
+    @Headers('authorization') authorization?: string,
+    @Headers('x-wechat-oauth-session') oauthSessionHeader?: string,
+  ) {
+    return this.switchWeChatPaymentChannelHandler(
+      orderId,
+      body,
+      request,
+      authorization,
+      oauthSessionHeader,
+    );
+  }
+
+  /**
+   * Shared channel-switch handler used by /switch, /switch-channel, and /channel.
+   *
+   * @param orderId - Order UUID
+   * @param body - Request body with target channel
+   * @param request - Fastify request for client IP
+   * @param authorization - Bearer order access token
+   * @param oauthSessionHeader - Optional OAuth session header
+   * @returns Paid confirmation or fresh prepare result
+   */
+  private async switchWeChatPaymentChannelHandler(
+    orderId: string,
+    body: unknown,
+    request: FastifyRequest,
+    authorization: string | undefined,
+    oauthSessionHeader: string | undefined,
+  ) {
+    const parsed = WeChatSwitchChannelBodySchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '切换支付通道参数校验失败',
+        HttpStatus.BAD_REQUEST,
+        { issues: parsed.error.issues },
+      );
+    }
+    const accessToken = orderAccessToken(authorization);
+    const switchOptions: { clientIp: string; oauthSessionToken?: string } = {
+      clientIp: trustedClientIp(request),
+    };
+    if (parsed.data.channel === 'jsapi') {
+      switchOptions.oauthSessionToken = oauthSessionToken(
+        oauthSessionHeader,
+        parsed.data.oauthSession,
+      );
+    }
+    const result = await this.weChatPay.switchChannel(
+      orderId,
+      accessToken,
+      parsed.data.channel,
+      switchOptions,
+    );
+    if (result.paid) {
+      await this.repository.confirmPayment(
+        result.payment.orderId,
+        `wechatpay:switch:${result.payment.externalId}`,
+        {
+          provider: 'wechatpay',
+          externalId: result.payment.externalId,
+          amount: result.payment.amount,
+          currency: result.payment.currency,
+          occurredAt: result.payment.occurredAt,
+          paymentId: result.payment.paymentId,
+          outTradeNo: result.payment.outTradeNo,
+          payload: {
+            source: 'channel-switch',
+            outTradeNo: result.payment.outTradeNo,
+            occurredAt: result.payment.occurredAt,
+            receivedAt: new Date().toISOString(),
+          },
+          reason: '切换通道时发现订单已支付',
+        },
+      );
+      return { paid: true, orderId: result.payment.orderId };
+    }
+    return result.payment;
+  }
+
+  @Post('payments/wechat/:orderId/oauth/start')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  startWeChatOAuth(
+    @Param('orderId') orderId: string,
+    @Body() body: unknown,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const parsed = WeChatOAuthStartBodySchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        'OAuth 启动参数校验失败',
+        HttpStatus.BAD_REQUEST,
+        { issues: parsed.error.issues },
+      );
+    }
+    return this.weChatPay.startOAuth(
+      orderId,
+      orderAccessToken(authorization),
+      parsed.data.returnPath ?? `/order/${orderId}`,
+    );
+  }
+
+  @Get('payments/wechat/oauth/callback')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  async weChatOAuthCallback(
+    @Res() reply: FastifyReply,
+    @Req() request: FastifyRequest<{ Querystring: { code?: string; state?: string } }>,
+  ) {
+    const code = typeof request.query.code === 'string' ? request.query.code : '';
+    const state = typeof request.query.state === 'string' ? request.query.state : '';
+    const result = await this.weChatPay.consumeOAuthCallback(code, state);
+    return reply.redirect(result.redirectUrl, 302);
+  }
+
+  @Post('payments/wechat/oauth/handoff')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  exchangeWeChatOAuthHandoff(@Body() body: unknown) {
+    const parsed = WeChatOAuthHandoffBodySchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        'OAuth handoff 参数校验失败',
+        HttpStatus.BAD_REQUEST,
+        { issues: parsed.error.issues },
+      );
+    }
+    return this.weChatPay.exchangeHandoff(parsed.data.handoffCode);
   }
 
   @Post('payments/wechat/notify/:organizationId')
@@ -429,23 +713,12 @@ class OrdersController {
       signature,
       serial,
     });
-    await this.repository.confirmPayment(
-      transaction.orderId,
-      `wechatpay:${transaction.externalId}`,
-      {
-        provider: 'wechatpay',
-        externalId: transaction.externalId,
-        amount: transaction.amount,
-        currency: transaction.currency,
-        occurredAt: transaction.occurredAt,
-        payload: {
-          notificationId: transaction.notificationId,
-          occurredAt: transaction.occurredAt,
-          receivedAt: new Date().toISOString(),
-        },
-        reason: '微信支付回调确认成功',
-      },
-    );
+    // Fast ACK after durable inbox write; confirm asynchronously for worker/retry safety.
+    if (!transaction.alreadyProcessed) {
+      void this.weChatPay.processPaymentNotificationAsync(transaction.inboxId).catch(() => {
+        // Worker/ops can retry failed inbox rows; notify must still return SUCCESS.
+      });
+    }
     return { code: 'SUCCESS', message: '成功' };
   }
 

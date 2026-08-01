@@ -189,6 +189,8 @@ interface PaymentConfirmation {
   amount?: number;
   currency?: string;
   occurredAt?: string;
+  paymentId?: string;
+  outTradeNo?: string;
   payload: Record<string, unknown>;
   reason: string;
 }
@@ -2000,17 +2002,44 @@ export class ConferenceRepository {
         .update(inventoryReservations)
         .set({ convertedAt: now, updatedAt: now })
         .where(eq(inventoryReservations.orderId, orderRow.id));
-      const [preparedPayment] = await tx
-        .select({ id: payments.id })
-        .from(payments)
-        .where(
-          and(
-            eq(payments.orderId, orderRow.id),
-            eq(payments.provider, confirmation.provider),
-            eq(payments.status, 'pending'),
-          ),
-        )
-        .limit(1);
+      const paymentId = confirmation.paymentId;
+      const outTradeNo =
+        confirmation.outTradeNo ??
+        (typeof confirmation.payload.outTradeNo === 'string'
+          ? confirmation.payload.outTradeNo
+          : undefined);
+      const [preparedPayment] = paymentId
+        ? await tx
+            .select({ id: payments.id })
+            .from(payments)
+            .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderRow.id)))
+            .limit(1)
+        : outTradeNo
+          ? await tx
+              .select({ id: payments.id })
+              .from(payments)
+              .where(
+                and(eq(payments.orderId, orderRow.id), eq(payments.outTradeNo, outTradeNo)),
+              )
+              .limit(1)
+          : await tx
+              .select({ id: payments.id })
+              .from(payments)
+              .where(
+                and(
+                  eq(payments.orderId, orderRow.id),
+                  eq(payments.provider, confirmation.provider),
+                  inArray(payments.status, [
+                    'preparing',
+                    'pending',
+                    'processing',
+                    'query_pending',
+                    'close_pending',
+                    'unknown',
+                  ]),
+                ),
+              )
+              .limit(1);
       if (preparedPayment) {
         await tx
           .update(payments)
@@ -2019,6 +2048,7 @@ export class ConferenceRepository {
             status: 'succeeded',
             amount: orderRow.amount,
             currency: orderRow.currency,
+            wechatTradeState: 'SUCCESS',
             payload: confirmation.payload,
             updatedAt: now,
           })
@@ -2031,6 +2061,8 @@ export class ConferenceRepository {
           status: 'succeeded',
           amount: orderRow.amount,
           currency: orderRow.currency,
+          outTradeNo,
+          wechatTradeState: 'SUCCESS',
           payload: confirmation.payload,
         });
       }
@@ -2218,15 +2250,32 @@ export class ConferenceRepository {
       .update(orderAccessTokens)
       .set({ lastUsedAt: new Date() })
       .where(eq(orderAccessTokens.id, token.id));
-    const [payment] = await db
-      .select({ payload: payments.payload })
+    const paymentRows = await db
+      .select({
+        payload: payments.payload,
+        channel: payments.channel,
+        status: payments.status,
+      })
       .from(payments)
       .where(and(eq(payments.orderId, row.id), eq(payments.provider, 'wechatpay')))
-      .limit(1);
+      .orderBy(desc(payments.updatedAt))
+      .limit(5);
+    const activeNative = paymentRows.find(
+      (item) =>
+        item.channel === 'native' &&
+        ['preparing', 'pending', 'processing', 'query_pending'].includes(item.status) &&
+        typeof item.payload?.codeUrl === 'string',
+    );
+    const anyCodeUrl = paymentRows.find(
+      (item) => typeof item.payload?.codeUrl === 'string' && item.payload.codeUrl,
+    );
     const paymentUrl =
-      payment?.payload && typeof payment.payload.codeUrl === 'string'
-        ? payment.payload.codeUrl
-        : undefined;
+      (activeNative?.payload && typeof activeNative.payload.codeUrl === 'string'
+        ? activeNative.payload.codeUrl
+        : undefined) ??
+      (anyCodeUrl?.payload && typeof anyCodeUrl.payload.codeUrl === 'string'
+        ? anyCodeUrl.payload.codeUrl
+        : undefined);
     return {
       id: row.id,
       orderNo: row.orderNo,

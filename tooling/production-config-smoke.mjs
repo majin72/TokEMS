@@ -30,6 +30,9 @@ const validSecrets = composeConfig({
   DEPLOYMENT_MODE: 'production',
   PUBLIC_ORIGIN: 'https://conference.example.com',
   ADMIN_ORIGIN: 'https://admin.conference.example.com',
+  PAYMENT_PUBLIC_ORIGIN: 'https://www.example.com',
+  PAYMENT_PUBLIC_BASE_PATH: '/pay/hui',
+  PAYMENT_PUBLIC_URL: 'https://www.example.com/pay/hui',
   JWT_SECRET: 'jwt-secret-for-config-test-at-least-32-characters',
   CUSTOMER_OTP_PEPPER: 'otp-pepper-for-config-test-at-least-32-characters',
   CUSTOMER_SESSION_SECRET: 'session-secret-for-config-test-at-least-32-characters',
@@ -87,7 +90,7 @@ const configuration = JSON.parse(validSecrets.stdout);
 if (configuration.name !== 'tokems') {
   throw new Error(`Compose project name must be tokems, received ${configuration.name}`);
 }
-for (const serviceName of ['api', 'web', 'admin']) {
+for (const serviceName of ['api', 'web', 'payment-web', 'admin']) {
   if (configuration.services[serviceName].ports) {
     throw new Error(`${serviceName} unexpectedly publishes a host port`);
   }
@@ -99,6 +102,7 @@ for (const [serviceName, imageName] of Object.entries({
   api: 'tokems-api:local',
   worker: 'tokems-worker:local',
   web: 'tokems-web:local',
+  'payment-web': 'tokems-web:local',
   admin: 'tokems-admin:local',
   gateway: 'tokems-gateway:local',
   'notification-sink': 'tokems-notification-sink:local',
@@ -106,6 +110,25 @@ for (const [serviceName, imageName] of Object.entries({
   if (configuration.services[serviceName].image !== imageName) {
     throw new Error(`${serviceName} image must be ${imageName}`);
   }
+}
+if (!configuration.services['payment-web']) {
+  throw new Error('payment-web service is missing from Compose config');
+}
+if (
+  configuration.services['payment-web'].environment.NUXT_PUBLIC_PAYMENT_SURFACE !== 'true' &&
+  configuration.services['payment-web'].environment.NUXT_PUBLIC_PAYMENT_SURFACE !== true
+) {
+  throw new Error('payment-web must set NUXT_PUBLIC_PAYMENT_SURFACE=true');
+}
+if (
+  !String(configuration.services['payment-web'].environment.NUXT_APP_BASE_URL ?? '').includes(
+    '/pay/hui',
+  )
+) {
+  throw new Error('payment-web must use /pay/hui/ as NUXT_APP_BASE_URL');
+}
+if (configuration.services.api.environment.PAYMENT_PUBLIC_ORIGIN !== 'https://www.example.com') {
+  throw new Error('PAYMENT_PUBLIC_ORIGIN is not forwarded to the API container');
 }
 for (const volumeName of ['tokems-postgres', 'tokems-redis', 'tokems-minio']) {
   if (configuration.volumes[volumeName]?.name !== volumeName) {

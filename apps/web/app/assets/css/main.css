@@ -573,6 +573,17 @@
   letter-spacing: 0.08em;
 }
 
+.payment-placeholder.is-jsapi,
+.payment-placeholder.is-h5 {
+  background:
+    linear-gradient(135deg, #07c160 0%, #06ad56 100%);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  box-shadow: 0 0 0 1px rgba(7, 193, 96, 0.35);
+}
+
 .payment-qr {
   display: block;
   width: 144px;
@@ -587,6 +598,32 @@
   margin: 0 0 14px;
   color: var(--conference-ink-muted);
   font-size: 12px;
+}
+
+.order-payment .payment-prepare-error {
+  margin-top: -4px;
+}
+
+.payment-countdown {
+  color: var(--conference-red);
+  font-variant-numeric: tabular-nums;
+}
+
+.payment-channel-switch {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.payment-surface-hint {
+  margin: 0 0 12px;
+  color: var(--conference-ink-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.order-payment .flow-action + .flow-action {
+  margin-top: 8px;
 }
 
 .global-site-footer {

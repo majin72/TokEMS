@@ -214,6 +214,60 @@ await waitFor('前后台独立来源的 CORS 均可用', async () => {
   }
 });
 
+const paymentOrigin =
+  process.env.DOCKER_PAYMENT_ORIGIN ?? environment.PAYMENT_PUBLIC_ORIGIN ?? '';
+const paymentBasePath = (environment.PAYMENT_PUBLIC_BASE_PATH || '/pay/hui').replace(/\/+$/, '');
+
+if (paymentOrigin) {
+  await waitFor('支付入口 CORS 可用', async () => {
+    const response = await fetch(`${endpoints.api}/auth/login`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: paymentOrigin,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type,authorization,x-wechat-oauth-session',
+      },
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert(response.status === 204, `Payment CORS preflight returned ${response.status}`);
+    assert(
+      response.headers.get('access-control-allow-origin') === paymentOrigin,
+      `${paymentOrigin} is not allowed by CORS`,
+    );
+  });
+
+  await waitFor('支付入口 /pay/hui 规范化与页面可访问', async () => {
+    const bare = await fetch(`${gateway}${paymentBasePath}`, {
+      redirect: 'manual',
+      headers: { Host: new URL(paymentOrigin).host },
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert(bare.status === 308, `Payment bare path returned ${bare.status}`);
+    assert(
+      (bare.headers.get('location') ?? '').endsWith(`${paymentBasePath}/`),
+      `Payment bare path redirected to ${bare.headers.get('location')}`,
+    );
+
+    const page = await fetch(`${gateway}${paymentBasePath}/`, {
+      headers: { Host: new URL(paymentOrigin).host },
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert(page.ok, `Payment page returned ${page.status}`);
+    const body = await page.text();
+    assert(body.length > 0, 'Payment page body is empty');
+  });
+
+  await waitFor('支付入口 API 前缀可到达健康检查', async () => {
+    const response = await fetch(`${gateway}${paymentBasePath}/api/v1/health`, {
+      headers: { Host: new URL(paymentOrigin).host },
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert(response.ok, `Payment API health returned ${response.status}`);
+    const body = await response.json();
+    assert(body.status === 'ok', `Payment API health status is ${body.status}`);
+  });
+}
+
 await waitFor('Nuxt 大会前台可访问', async () => {
   const { body } = await request(endpoints.web);
   assert(body.includes('TokEMS Demo'), 'Web page did not render the conference shell');

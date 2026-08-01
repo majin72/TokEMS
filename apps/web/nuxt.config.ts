@@ -26,9 +26,14 @@ export default defineNuxtConfig({
         (process.env.NODE_ENV === 'production' ? '/api/v1' : 'http://localhost:4100/api/v1'),
       organizationSlug: process.env.NUXT_PUBLIC_ORGANIZATION_SLUG ?? 'tokems-demo',
       eventSlug: process.env.NUXT_PUBLIC_EVENT_SLUG ?? 'tokems-demo-2026',
+      paymentOrigin: process.env.NUXT_PUBLIC_PAYMENT_ORIGIN ?? '',
+      paymentBasePath: process.env.NUXT_PUBLIC_PAYMENT_BASE_PATH ?? '/pay/hui',
+      conferenceOrigin: process.env.NUXT_PUBLIC_CONFERENCE_ORIGIN ?? '',
+      paymentSurface: process.env.NUXT_PUBLIC_PAYMENT_SURFACE === 'true',
     },
   },
   app: {
+    baseURL: process.env.NUXT_APP_BASE_URL || '/',
     head: {
       htmlAttrs: { lang: 'zh-CN' },
       title: 'TokEMS Demo Conference 2026 · 深圳',
@@ -52,7 +57,7 @@ export default defineNuxtConfig({
   },
   routeRules: {
     '/register': { ssr: true },
-    '/order/**': { ssr: false },
+    '/order/**': { ssr: false, headers: { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } },
     '/invoice/**': { ssr: false },
     '/ticket/**': { ssr: false },
     '/account/**': { ssr: false },
