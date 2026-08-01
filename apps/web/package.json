@@ -12,7 +12,7 @@
   "dependencies": {
     "@conference/contracts": "workspace:*",
     "@conference/ui": "workspace:*",
-    "nuxt": "4.4.8",
+    "nuxt": "4.5.1",
     "qrcode.vue": "3.10.0",
     "vue": "3.5.40"
   },
@@ -20,6 +20,7 @@
     "@tailwindcss/vite": "4.3.3",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
+    "vite": "8.1.5",
     "vitest": "4.1.10"
   }
 }
