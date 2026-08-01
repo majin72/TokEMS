@@ -287,6 +287,10 @@
   font-size: 12px;
 }
 
+.panel-tab {
+  min-width: 40px;
+}
+
 .button.compact {
   min-width: 40px;
 }

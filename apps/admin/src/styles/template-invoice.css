@@ -392,7 +392,7 @@
   border: 1px solid var(--line);
   border-radius: 999px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   font-style: normal;
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -1807,6 +1807,7 @@
 
 .preview-device-switch button,
 .flow-preset-buttons button {
+  min-width: 40px;
   min-height: 40px;
   padding: 6px 10px;
   color: var(--muted);
