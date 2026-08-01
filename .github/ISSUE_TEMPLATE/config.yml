@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions and support
+    url: https://github.com/yaojingang/TokEMS/discussions
+    about: Ask about deployment, configuration, and usage
   - name: Security report
     url: https://github.com/yaojingang/TokEMS/security/advisories/new
     about: Report a vulnerability privately

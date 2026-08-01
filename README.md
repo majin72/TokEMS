@@ -3,13 +3,14 @@
 简体中文 | [English](README.en.md)
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.1.0_private_preview-orange.svg)](CHANGELOG.md)
+[![CI](https://github.com/yaojingang/TokEMS/actions/workflows/ci.yml/badge.svg)](https://github.com/yaojingang/TokEMS/actions/workflows/ci.yml)
+[![Status: Public Preview](https://img.shields.io/badge/status-public_preview-orange.svg)](CHANGELOG.md)
 
-开源、自托管的一体化大会运营平台，覆盖大会官网、报名交易、票务、通知、发票和现场核销。
+开源、自托管的一体化大会运营平台，覆盖大会官网、报名、票务、订单、发票、通知和现场签到。
 
 TokEMS 面向大会主办方、活动运营团队和技术服务商。团队可以在一个系统内管理内容发布、参会者旅程、交易履约与现场协作，并保留完整的组织权限和审计记录。
 
-> 当前版本为 `v0.1.0` 私有预发布版。核心链路已经实现，公开发布前还会继续完成安全审计、部署文档和管理后台国际化。
+> 当前版本为 `v0.1.0` 早期预览版，适合本地评估、二次开发和预发布验证。生产部署需要结合实际地区与供应商完成安全、合规、支付、通知、备份和监控配置。管理后台当前以简体中文为主，英文界面列入近期路线图。
 
 ## 已实现能力
 
@@ -104,7 +105,7 @@ pnpm test:checkin-load     # 多设备并发核销验收
 pnpm test:visual           # 前后台视觉与交互验收
 ```
 
-## 全球化现状
+## 全球化与语言支持
 
 TokEMS 的产品定位面向全球大会运营团队。`v0.1.0` 的界面语言以简体中文为主，首批支付、短信和手机号流程按中国大陆场景实现。管理后台会先支持 `zh-CN` 与 `en-US`，随后扩展大会前台、通知模板、时区、货币、地址和区域集成。
 
@@ -129,11 +130,12 @@ TokEMS 的产品定位面向全球大会运营团队。`v0.1.0` 的界面语言�
 - [运行、迁移与发布](docs/operations.md)
 - [国际化规划](docs/internationalization.md)
 - [安全策略](SECURITY.md)
+- [社区支持](SUPPORT.md)
 - [贡献指南](CONTRIBUTING.md)
 
 ## 参与贡献
 
-提交 Issue 或 Pull Request 前，请先阅读[贡献指南](CONTRIBUTING.md)和[行为准则](CODE_OF_CONDUCT.md)。安全问题请按[安全策略](SECURITY.md)私下报告。
+部署交流和使用问题请前往 [GitHub Discussions](https://github.com/yaojingang/TokEMS/discussions)。提交 Issue 或 Pull Request 前，请先阅读[社区支持](SUPPORT.md)、[贡献指南](CONTRIBUTING.md)和[行为准则](CODE_OF_CONDUCT.md)。安全问题请按[安全策略](SECURITY.md)私下报告。
 
 ## 许可证
 

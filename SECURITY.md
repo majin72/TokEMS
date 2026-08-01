@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-TokEMS is currently in private preview. Security fixes are applied to the latest commit on `main`. A formal supported-version table will be published with the first public release.
+TokEMS is currently in early preview. Security fixes are applied to the latest commit on `main` and the latest tagged `0.1.x` release when available. Older preview builds may not receive backports.
 
 ## Report a vulnerability
 

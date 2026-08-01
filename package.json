@@ -1,7 +1,7 @@
 {
   "name": "tokems",
   "version": "0.1.0",
-  "description": "Open-source, self-hosted conference operations for event websites, registration, ticketing, invoicing, and check-in.",
+  "description": "Open-source, self-hosted conference operations platform for event websites, registration, ticketing, orders, invoicing, notifications, and check-in.",
   "private": true,
   "license": "AGPL-3.0-only",
   "repository": {

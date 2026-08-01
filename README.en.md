@@ -3,13 +3,14 @@
 [简体中文](README.md) | English
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.1.0_private_preview-orange.svg)](CHANGELOG.md)
+[![CI](https://github.com/yaojingang/TokEMS/actions/workflows/ci.yml/badge.svg)](https://github.com/yaojingang/TokEMS/actions/workflows/ci.yml)
+[![Status: Public Preview](https://img.shields.io/badge/status-public_preview-orange.svg)](CHANGELOG.md)
 
-An open-source, self-hosted conference operations platform for event websites, registration, ticketing, notifications, invoicing, and check-in.
+An open-source, self-hosted conference operations platform for event websites, registration, ticketing, orders, invoicing, notifications, and check-in.
 
 TokEMS is built for conference organizers, operations teams, and event technology providers. It brings content publishing, attendee journeys, transactions, on-site delivery, organization permissions, and audit records into one system.
 
-> `v0.1.0` is a private preview. The core workflows are implemented. Security review, deployment documentation, and admin internationalization will continue before the public release.
+> `v0.1.0` is an early preview for local evaluation, customization, and pre-production validation. Production deployments require region-specific security, compliance, payment, messaging, backup, and monitoring configuration. The admin console is currently Simplified Chinese-first, with English support on the near-term roadmap.
 
 ## Features
 
@@ -129,11 +130,12 @@ See the [operations guide](docs/operations.md) for deployment details.
 - [Operations, migrations, and releases](docs/operations.md)
 - [Internationalization roadmap](docs/internationalization.md)
 - [Security policy](SECURITY.md)
+- [Community support](SUPPORT.md)
 - [Contributing guide](CONTRIBUTING.md)
 
 ## Contributing
 
-Read the [contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before opening an issue or pull request. Report security issues privately by following the [security policy](SECURITY.md).
+Use [GitHub Discussions](https://github.com/yaojingang/TokEMS/discussions) for deployment and usage questions. Read the [support guide](SUPPORT.md), [contributing guide](CONTRIBUTING.md), and [Code of Conduct](CODE_OF_CONDUCT.md) before opening an issue or pull request. Report security issues privately by following the [security policy](SECURITY.md).
 
 ## License
 

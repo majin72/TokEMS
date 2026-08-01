@@ -8,9 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Planned
 
-- Complete the private-preview security and deployment review.
+- Continue security and production deployment hardening.
 - Add `zh-CN` and `en-US` support to the admin console.
-- Prepare the first public release.
+- Publish `v0.1.0` as the initial public preview.
 
 ## [0.1.0] - 2026-08-01
 
