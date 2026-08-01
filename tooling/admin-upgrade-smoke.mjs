@@ -1,6 +1,11 @@
 import { chromium } from 'playwright-core';
 
 const adminBase = process.env.ADMIN_BASE_URL ?? 'http://admin.localhost:8088/admin';
+const adminUsername = process.env.ADMIN_USERNAME;
+const adminPassword = process.env.ADMIN_PASSWORD;
+if (!adminUsername || !adminPassword) {
+  throw new Error('ADMIN_USERNAME and ADMIN_PASSWORD are required for the admin upgrade test');
+}
 const browser = await chromium.launch({
   executablePath:
     process.env.CHROMIUM_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -36,6 +41,8 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 1000
 const page = await context.newPage();
 try {
   await page.goto(`${adminBase}/login`, { waitUntil: 'networkidle' });
+  await page.getByLabel('用户名').fill(adminUsername);
+  await page.getByLabel('密码').fill(adminPassword);
   await page.getByRole('button', { name: '进入运营台' }).click();
   await page.waitForURL(/\/manage\/events/);
 
