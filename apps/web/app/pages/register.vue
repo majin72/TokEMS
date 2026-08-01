@@ -234,12 +234,20 @@ async function submit() {
       });
       return;
     }
+    const accessToken = checkout.orderAccessToken ?? '';
+    const paymentCheckoutUrl = api.resolvePaymentCheckoutUrl(
+      checkout.order.id,
+      event.value.slug,
+      accessToken,
+    );
+    if (/^https?:\/\//i.test(paymentCheckoutUrl)) {
+      window.location.assign(paymentCheckoutUrl);
+      return;
+    }
     await router.push({
       path: `/order/${checkout.order.id}`,
       query: { event: event.value.slug },
-      ...(checkout.orderAccessToken
-        ? { hash: `#access=${encodeURIComponent(checkout.orderAccessToken)}` }
-        : {}),
+      ...(accessToken ? { hash: `#access=${encodeURIComponent(accessToken)}` } : {}),
     });
   } catch (error) {
     errorMessage.value = await registrationError(error, '提交失败，请检查报名信息后重试。');

@@ -19,3 +19,9 @@ tmp
 *.log
 *.docx
 docs
+cert
+cert/
+*.pem
+*.p12
+*.key
+*.crt

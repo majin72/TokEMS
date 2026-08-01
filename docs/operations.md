@@ -38,7 +38,8 @@ Compose 顶层名称固定为 `tokems`，目录中的中文和空格不会改变
 
 ```bash
 cp .env.example .env
-# 同步修改 GATEWAY_PORT、PUBLIC_ORIGIN 与 ADMIN_ORIGIN
+# 例如：GATEWAY_PORT=9088 POSTGRES_PORT=25432 REDIS_PORT=26379
+# 同步修改 PUBLIC_ORIGIN / ADMIN_ORIGIN / PAYMENT_PUBLIC_* / DATABASE_URL / REDIS_URL / S3_*ENDPOINT
 pnpm docker:deploy
 ```
 
@@ -92,7 +93,13 @@ pnpm dev
 | `DEPLOYMENT_MODE`                          | 部署边界，正式环境为 `production`                 |
 | `PUBLIC_ORIGIN`                            | 前台、API、站点链接和回调的外部 HTTPS 来源        |
 | `ADMIN_ORIGIN`                             | 后台独立的外部 HTTPS 来源                         |
-| `GATEWAY_BIND_ADDRESS` / `GATEWAY_PORT`    | 统一网关的本机监听地址与端口                      |
+| `GATEWAY_BIND_ADDRESS` / `GATEWAY_PORT`    | 统一网关的宿主机监听地址与端口                    |
+| `DOCKER_PUBLISH_BIND_ADDRESS`              | Postgres/Redis/MinIO/Mailpit/通知接收器宿主机绑定，默认 `127.0.0.1` |
+| `POSTGRES_PORT` / `REDIS_PORT`             | 数据服务宿主机映射端口                            |
+| `MINIO_API_PORT` / `MINIO_CONSOLE_PORT`    | MinIO API / Console 宿主机映射端口                |
+| `MAILPIT_SMTP_PORT` / `MAILPIT_WEB_PORT`   | Mailpit SMTP / Web 宿主机映射端口                 |
+| `NOTIFICATION_SINK_HOST_PORT`              | 本地通知接收器宿主机映射端口（容器内固定 4080）   |
+| `WEB_PORT` / `ADMIN_PORT` / `API_PORT`     | 源码开发模式的服务端口                            |
 | `REDIS_URL`                                | BullMQ 连接，生产 Worker 必填                     |
 | `JWT_SECRET`                               | JWT 签名，生产环境至少 32 字符                    |
 | `INVOICE_DOWNLOAD_SIGNING_SECRET`          | 发票与导出下载链接签名密钥                        |
@@ -128,15 +135,13 @@ pnpm dev
 | `HTML_TEMPLATE_AI_ORG_DAILY_LIMIT`         | 单组织每日 AI 变量识别上限，默认 100              |
 | `DOCKER_DATABASE_URL` / `DOCKER_REDIS_URL` | Compose 内部连接地址                              |
 | `DOCKER_S3_ENDPOINT`                       | Compose 容器访问对象存储的内部地址                |
-| `POSTGRES_PORT` / `REDIS_PORT`             | 数据服务本机映射端口                              |
-| `WEB_PORT` / `ADMIN_PORT` / `API_PORT`     | 源码开发模式的服务端口                            |
 | `BUILD_SHA` / `BUILD_TIME`                 | 构建对应的提交和 UTC 时间                         |
 | `BUILD_MIGRATION`                          | 构建对应的最高数据库迁移文件                      |
 | `API_BIND_ADDRESS`                         | 源码 API 监听地址，本地假验证码模式必须为回环地址 |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`  | 本地对象存储凭据                                  |
 | `S3_PUBLIC_ENDPOINT` / `S3_REGION`         | 浏览器可访问的对象存储入口与签名区域              |
 | `WORKER_TMPFS_SIZE`                        | 异步 CSV 分页生成时的临时磁盘上限，默认 `512m`    |
-| `NOTIFICATION_SINK_PORT`                   | 本地通知接收器映射端口                            |
+| `NOTIFICATION_SINK_PORT`                   | 兼容旧名；优先使用 `NOTIFICATION_SINK_HOST_PORT`  |
 
 机密值应进入部署平台的 Secret Manager。`.env` 仅用于本地开发。
 
@@ -189,14 +194,45 @@ node apps/web/.output/server/index.mjs
 
 ## 支付渠道接入
 
-1. 为渠道分配小写标识，例如 `wechat-pay`。
-2. 配置 `PAYMENT_WEBHOOK_SECRET_WECHAT_PAY`。
+### 通用 HMAC 渠道（非微信）
+
+1. 为渠道分配小写标识，例如 `stripe-like`。
+2. 配置 `PAYMENT_WEBHOOK_SECRET_<PROVIDER>`。
 3. 渠道把毫秒时间戳写入 `X-Payment-Timestamp`。
 4. 按 `<timestamp>.<raw-json-body>` 计算 HMAC-SHA256 十六进制签名。
-5. 把签名写入 `X-Payment-Signature` 并调用 `/api/v1/payments/webhook/wechat-pay`。
+5. 把签名写入 `X-Payment-Signature` 并调用 `/api/v1/payments/webhook/<provider>`。
 6. 验证成功、重复回调、金额错误、过期时间戳和伪造签名五类用例。
 
 开发模拟支付路由在 `NODE_ENV=production` 下固定返回 403。本地 Compose 的完整验收使用带 HMAC 签名的测试渠道回调完成付款、出票与核销。源码开发环境如需临时使用模拟路由，可显式设置 `ENABLE_LOCAL_PAYMENT_SIMULATION=true`。
+
+### 微信支付三通道（Native / JSAPI / H5）
+
+TokEMS 将大会主站与支付入口拆分：
+
+| 用途 | 域名 / 路径 |
+| --- | --- |
+| 大会官网、报名、用户中心 | `PUBLIC_ORIGIN`（例如 `https://hui.ailingdaoli.com`） |
+| 订单支付、OAuth、H5 回跳、票券结果 | `PAYMENT_PUBLIC_URL`（例如 `https://www.ailingdaoli.com/pay/hui`） |
+| 微信支付 notify（稳定、不可单独撤销） | `{PUBLIC_ORIGIN}/api/v1/payments/wechat/notify/{organizationId}` |
+
+必填环境变量：
+
+- `PAYMENT_PUBLIC_ORIGIN`：支付入口 origin，必须与 `PUBLIC_ORIGIN` 不同
+- `PAYMENT_PUBLIC_BASE_PATH`：默认 `/pay/hui`
+- `PAYMENT_PUBLIC_URL`：完整支付入口 URL，须与 origin + base path 一致
+
+微信商户凭据（AppID、商户号、证书序列号、商户私钥、APIv3 密钥、微信支付公钥、公众号 AppSecret、通道开关）全部在管理后台「支付服务」加密入库，**不要**使用 `.env` 中的 `WEIXIN_*` / `MERCHANT_*`（这些变量不会被代码读取）。
+
+微信平台侧需确认：
+
+1. 公众号 AppID 已绑定商户号，并具备网页授权能力。
+2. 网页授权域名 / H5 支付域名为 `www.ailingdaoli.com`。
+3. JSAPI 支付授权目录为 `https://www.ailingdaoli.com/pay/`（`/pay/hui/` 及其子路径均在目录内）。
+4. Native、JSAPI、H5 产品权限均已开通。
+
+外部 Nginx 仅代理 `www` 的 `/pay/hui` 前缀到 Gateway，参见 `docker/payment-entry.nginx.conf.example`。Gateway 会把无尾斜杠的 `/pay/hui` 308 到 `/pay/hui/`，并将页面与 `/pay/hui/_nuxt/` 转到 `payment-web`，将 `/pay/hui/api/` 去前缀后转到 API。
+
+上线与回滚详见 `docs/wechat-pay-rollout.md`。
 
 ## 通知与候补
 

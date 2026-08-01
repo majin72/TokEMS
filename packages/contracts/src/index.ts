@@ -1878,6 +1878,15 @@ export const WeChatPayConfigurationSchema = z.object({
   merchantCertificateSerial: z.string(),
   platformPublicKeyId: z.string(),
   notifyUrl: z.url(),
+  oauthRedirectUri: z.string().optional(),
+  oauthEnabled: z.boolean().default(false),
+  channels: z
+    .object({
+      native: z.boolean().default(true),
+      jsapi: z.boolean().default(false),
+      h5: z.boolean().default(false),
+    })
+    .default({ native: true, jsapi: false, h5: false }),
   status: z.enum(['unconfigured', 'configured', 'verified', 'error']),
   lastVerifiedAt: z.string().nullable(),
   lastError: z.string().nullable(),
@@ -1885,6 +1894,7 @@ export const WeChatPayConfigurationSchema = z.object({
     merchantPrivateKey: z.boolean(),
     apiV3Key: z.boolean(),
     platformPublicKey: z.boolean(),
+    appSecret: z.boolean(),
   }),
 });
 
@@ -1904,6 +1914,15 @@ export const UpdateWeChatPayConfigurationSchema = z
       .optional(),
     platformPublicKeyId: z.string().trim().min(8).max(128),
     platformPublicKey: z.string().min(100).max(10_000).optional(),
+    appSecret: z.string().trim().min(8).max(128).optional(),
+    oauthEnabled: z.boolean().default(false),
+    channels: z
+      .object({
+        native: z.boolean().default(true),
+        jsapi: z.boolean().default(false),
+        h5: z.boolean().default(false),
+      })
+      .optional(),
   })
   .strict();
 
@@ -1914,10 +1933,63 @@ export const WeChatPayConnectionTestSchema = z.object({
   verifiedAt: z.string(),
 });
 
+export const WeChatPaymentChannelSchema = z.enum(['native', 'jsapi', 'h5']);
+
 export const WeChatNativePaymentSchema = z.object({
   orderId: z.string(),
+  channel: z.literal('native'),
+  attemptId: z.string(),
+  outTradeNo: z.string(),
   codeUrl: z.url(),
   expiresAt: z.string(),
+});
+
+export const WeChatJsapiPaymentSchema = z.object({
+  orderId: z.string(),
+  channel: z.literal('jsapi'),
+  attemptId: z.string(),
+  outTradeNo: z.string(),
+  expiresAt: z.string(),
+  jsapiParams: z.object({
+    appId: z.string(),
+    timeStamp: z.string(),
+    nonceStr: z.string(),
+    package: z.string(),
+    signType: z.literal('RSA'),
+    paySign: z.string(),
+  }),
+});
+
+export const WeChatH5PaymentSchema = z.object({
+  orderId: z.string(),
+  channel: z.literal('h5'),
+  attemptId: z.string(),
+  outTradeNo: z.string(),
+  h5Url: z.url(),
+  expiresAt: z.string(),
+  redirectUrl: z.url(),
+});
+
+export const WeChatPaymentPrepareResultSchema = z.discriminatedUnion('channel', [
+  WeChatNativePaymentSchema,
+  WeChatJsapiPaymentSchema,
+  WeChatH5PaymentSchema,
+]);
+
+export const WeChatOAuthStartSchema = z.object({
+  authorizeUrl: z.url(),
+  stateExpiresAt: z.string(),
+});
+
+export const WeChatOAuthHandoffSchema = z.object({
+  handoffCode: z.string().min(16).max(128),
+  expiresAt: z.string(),
+});
+
+export const WeChatOAuthSessionSchema = z.object({
+  sessionToken: z.string().min(16).max(200),
+  expiresAt: z.string(),
+  orderId: z.string(),
 });
 
 export const AliyunSmsTemplateKeySchema = z.enum([
@@ -2662,7 +2734,14 @@ export type IntegrationStatus = z.infer<typeof IntegrationStatusSchema>;
 export type WeChatPayConfiguration = z.infer<typeof WeChatPayConfigurationSchema>;
 export type UpdateWeChatPayConfiguration = z.infer<typeof UpdateWeChatPayConfigurationSchema>;
 export type WeChatPayConnectionTest = z.infer<typeof WeChatPayConnectionTestSchema>;
+export type WeChatPaymentChannel = z.infer<typeof WeChatPaymentChannelSchema>;
 export type WeChatNativePayment = z.infer<typeof WeChatNativePaymentSchema>;
+export type WeChatJsapiPayment = z.infer<typeof WeChatJsapiPaymentSchema>;
+export type WeChatH5Payment = z.infer<typeof WeChatH5PaymentSchema>;
+export type WeChatPaymentPrepareResult = z.infer<typeof WeChatPaymentPrepareResultSchema>;
+export type WeChatOAuthStart = z.infer<typeof WeChatOAuthStartSchema>;
+export type WeChatOAuthHandoff = z.infer<typeof WeChatOAuthHandoffSchema>;
+export type WeChatOAuthSession = z.infer<typeof WeChatOAuthSessionSchema>;
 export type AliyunSmsTemplateKey = z.infer<typeof AliyunSmsTemplateKeySchema>;
 export type AliyunSmsConfiguration = z.infer<typeof AliyunSmsConfigurationSchema>;
 export type UpdateAliyunSmsConfiguration = z.infer<typeof UpdateAliyunSmsConfigurationSchema>;

@@ -293,10 +293,19 @@ export class CommerceOperationsService {
       .select({ reservation: inventoryReservations, order: orders })
       .from(inventoryReservations)
       .innerJoin(orders, eq(orders.id, inventoryReservations.orderId))
+      .leftJoin(
+        payments,
+        and(
+          eq(payments.orderId, orders.id),
+          eq(payments.provider, 'wechatpay'),
+          sql`${payments.status} in ('preparing', 'pending', 'processing', 'query_pending', 'close_pending', 'unknown')`,
+        ),
+      )
       .where(
         and(
           isNull(inventoryReservations.releasedAt),
           isNull(inventoryReservations.convertedAt),
+          isNull(payments.id),
           lt(inventoryReservations.expiresAt, new Date()),
           eq(orders.status, 'pending_payment'),
         ),
@@ -307,6 +316,19 @@ export class CommerceOperationsService {
     const releasedOrderIds: string[] = [];
     for (const candidate of candidates) {
       const released = await db.transaction(async (tx) => {
+        const [activeWeChatPayment] = await tx
+          .select({ id: payments.id })
+          .from(payments)
+          .where(
+            and(
+              eq(payments.orderId, candidate.order.id),
+              eq(payments.provider, 'wechatpay'),
+              sql`${payments.status} in ('preparing', 'pending', 'processing', 'query_pending', 'close_pending', 'unknown')`,
+            ),
+          )
+          .limit(1);
+        if (activeWeChatPayment) return false;
+
         const [reservation] = await tx
           .update(inventoryReservations)
           .set({ releasedAt: new Date(), updatedAt: new Date() })

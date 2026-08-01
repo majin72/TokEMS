@@ -18,9 +18,19 @@ type DeploymentOriginEnvironment = Partial<
     | 'ADMIN_WEB_URL'
     | 'PUBLIC_SITE_URL'
     | 'PUBLIC_API_URL'
+    | 'PAYMENT_PUBLIC_ORIGIN'
+    | 'PAYMENT_PUBLIC_BASE_PATH'
+    | 'PAYMENT_PUBLIC_URL'
   >
 >;
 
+/**
+ * Parses and validates a browser origin that contains only scheme, host, and optional port.
+ *
+ * @param value - Absolute URL string to validate.
+ * @param name - Environment variable name used in error messages.
+ * @returns Canonical origin string.
+ */
 function exactOrigin(value: string, name: string) {
   let url: URL;
   try {
@@ -32,6 +42,116 @@ function exactOrigin(value: string, name: string) {
     throw new Error(`${name} must contain only scheme, host, and optional port`);
   }
   return url.origin;
+}
+
+/**
+ * Normalizes a payment base path such as `/pay/hui`.
+ *
+ * @param value - Raw base path from the environment.
+ * @param name - Environment variable name used in error messages.
+ * @returns Canonical path without trailing slash, starting with `/`.
+ */
+export function normalizePaymentBasePath(value: string, name = 'PAYMENT_PUBLIC_BASE_PATH') {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('/')) {
+    throw new Error(`${name} must start with /`);
+  }
+  if (trimmed.includes('?') || trimmed.includes('#') || trimmed.includes('\\')) {
+    throw new Error(`${name} must not contain query, hash, or backslash characters`);
+  }
+  const segments = trimmed.split('/').filter(Boolean);
+  if (!segments.length) {
+    throw new Error(`${name} must contain at least one path segment`);
+  }
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
+    throw new Error(`${name} must not contain path traversal segments`);
+  }
+  if (segments.some((segment) => !/^[A-Za-z0-9._~-]+$/.test(segment))) {
+    throw new Error(`${name} contains unsupported path characters`);
+  }
+  return `/${segments.join('/')}`;
+}
+
+/**
+ * Resolves the external payment surface origin, base path, and absolute URL.
+ *
+ * @param environment - Process environment or overrides.
+ * @returns Payment origin metadata when configured; otherwise undefined fields.
+ */
+export function resolvePaymentPublicSurface(
+  environment: DeploymentOriginEnvironment = process.env,
+) {
+  const paymentOrigin = environment.PAYMENT_PUBLIC_ORIGIN
+    ? exactOrigin(environment.PAYMENT_PUBLIC_ORIGIN, 'PAYMENT_PUBLIC_ORIGIN')
+    : undefined;
+  const paymentBasePath = environment.PAYMENT_PUBLIC_BASE_PATH
+    ? normalizePaymentBasePath(environment.PAYMENT_PUBLIC_BASE_PATH)
+    : paymentOrigin
+      ? '/pay/hui'
+      : undefined;
+  const derivedPaymentUrl =
+    paymentOrigin && paymentBasePath ? `${paymentOrigin}${paymentBasePath}` : undefined;
+  const paymentPublicUrl = environment.PAYMENT_PUBLIC_URL?.replace(/\/+$/, '') || undefined;
+
+  if (paymentPublicUrl) {
+    let url: URL;
+    try {
+      url = new URL(paymentPublicUrl);
+    } catch {
+      throw new Error('PAYMENT_PUBLIC_URL must be an absolute URL');
+    }
+    if (url.search || url.hash) {
+      throw new Error('PAYMENT_PUBLIC_URL must not contain query or hash');
+    }
+    const expectedOrigin = exactOrigin(url.origin, 'PAYMENT_PUBLIC_URL');
+    const expectedPath = normalizePaymentBasePath(url.pathname || '/', 'PAYMENT_PUBLIC_URL');
+    if (paymentOrigin && expectedOrigin !== paymentOrigin) {
+      throw new Error('PAYMENT_PUBLIC_URL origin must match PAYMENT_PUBLIC_ORIGIN');
+    }
+    if (paymentBasePath && expectedPath !== paymentBasePath) {
+      throw new Error('PAYMENT_PUBLIC_URL path must match PAYMENT_PUBLIC_BASE_PATH');
+    }
+    return {
+      paymentOrigin: paymentOrigin ?? expectedOrigin,
+      paymentBasePath: paymentBasePath ?? expectedPath,
+      paymentPublicUrl: `${expectedOrigin}${expectedPath}`,
+    };
+  }
+
+  if (environment.DEPLOYMENT_MODE === 'production' && paymentOrigin) {
+    const paymentUrl = new URL(paymentOrigin);
+    if (paymentUrl.protocol !== 'https:') {
+      throw new Error('PAYMENT_PUBLIC_ORIGIN must use HTTPS when DEPLOYMENT_MODE=production');
+    }
+    if (isLoopbackHostname(paymentUrl.hostname)) {
+      throw new Error('PAYMENT_PUBLIC_ORIGIN must not use a loopback host in production');
+    }
+  }
+
+  return {
+    paymentOrigin,
+    paymentBasePath,
+    paymentPublicUrl: derivedPaymentUrl,
+  };
+}
+
+/**
+ * Builds an absolute payment-surface URL for an order or recovery path.
+ *
+ * @param path - Application path beginning with `/`, relative to the payment base.
+ * @param environment - Process environment or overrides.
+ * @returns Absolute URL under the payment public surface.
+ */
+export function resolvePaymentPublicUrl(
+  path: string,
+  environment: DeploymentOriginEnvironment = process.env,
+) {
+  const surface = resolvePaymentPublicSurface(environment);
+  if (!surface.paymentPublicUrl) {
+    throw new Error('PAYMENT_PUBLIC_URL or PAYMENT_PUBLIC_ORIGIN is required');
+  }
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${surface.paymentPublicUrl}${normalizedPath}`;
 }
 
 export function isLoopbackHostname(hostname: string) {
@@ -48,6 +168,12 @@ export function isLoopbackHostname(hostname: string) {
   );
 }
 
+/**
+ * Resolves conference, admin, and optional payment browser origins for CORS and link generation.
+ *
+ * @param environment - Process environment or overrides.
+ * @returns Canonical origins and the CORS allow-list.
+ */
 export function resolveDeploymentOrigins(environment: DeploymentOriginEnvironment = process.env) {
   const publicOrigin = environment.PUBLIC_ORIGIN
     ? exactOrigin(environment.PUBLIC_ORIGIN, 'PUBLIC_ORIGIN')
@@ -61,9 +187,13 @@ export function resolveDeploymentOrigins(environment: DeploymentOriginEnvironmen
   const adminWebOrigin = environment.ADMIN_WEB_URL
     ? exactOrigin(environment.ADMIN_WEB_URL, 'ADMIN_WEB_URL')
     : undefined;
+  const paymentSurface = resolvePaymentPublicSurface(environment);
 
   if (publicOrigin && adminOrigin && publicOrigin === adminOrigin) {
     throw new Error('PUBLIC_ORIGIN and ADMIN_ORIGIN must use distinct browser origins');
+  }
+  if (publicOrigin && paymentSurface.paymentOrigin && publicOrigin === paymentSurface.paymentOrigin) {
+    throw new Error('PAYMENT_PUBLIC_ORIGIN must differ from PUBLIC_ORIGIN');
   }
 
   if (environment.DEPLOYMENT_MODE === 'production') {
@@ -116,13 +246,20 @@ export function resolveDeploymentOrigins(environment: DeploymentOriginEnvironmen
     }
   }
 
-  const corsOrigins = [publicOrigin, adminOrigin, publicWebOrigin, adminWebOrigin].filter(
-    (value): value is string => Boolean(value),
-  );
+  const corsOrigins = [
+    publicOrigin,
+    adminOrigin,
+    publicWebOrigin,
+    adminWebOrigin,
+    paymentSurface.paymentOrigin,
+  ].filter((value): value is string => Boolean(value));
 
   return {
     publicOrigin,
     adminOrigin,
+    paymentOrigin: paymentSurface.paymentOrigin,
+    paymentBasePath: paymentSurface.paymentBasePath,
+    paymentPublicUrl: paymentSurface.paymentPublicUrl,
     corsOrigins: corsOrigins.length
       ? [...new Set(corsOrigins)]
       : ['http://localhost:3000', 'http://localhost:3200'],
