@@ -6,10 +6,16 @@ FROM ${NODE_IMAGE} AS workspace
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 
-RUN apt-get update && \
+# Prefer China mirrors so ECS builds are not gated on deb.debian.org / npmjs.
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    apt-get update && \
     apt-get install --yes --no-install-recommends g++ make python3 && \
-    npm install --global pnpm@11.9.0 && \
+    npm install --global pnpm@11.9.0 --registry=https://registry.npmmirror.com && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
