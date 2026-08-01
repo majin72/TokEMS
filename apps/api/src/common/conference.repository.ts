@@ -735,7 +735,7 @@ export class ConferenceRepository {
   ): Promise<WaitlistEntry> {
     const db = this.database.db;
     if (!db) {
-      if (this.demoEvent.registration.accountMode === 'mobile_otp_required' && !customer) {
+      if (!customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
@@ -837,17 +837,14 @@ export class ConferenceRepository {
         )
         .limit(1);
       const releaseSnapshot = release?.snapshot as EventReleaseSnapshot | undefined;
-      const releasedRegistration = this.registrationSettings(
-        releaseSnapshot?.event?.settings?.registration ?? eventSettings?.registration,
-      );
-      if (releasedRegistration.accountMode === 'mobile_otp_required' && !customer) {
+      if (!customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
           HttpStatus.UNAUTHORIZED,
         );
       }
-      if (customer && customer.organizationId !== ticket.organizationId) {
+      if (customer.organizationId !== ticket.organizationId) {
         throw new DomainError(
           API_ERROR_CODES.FORBIDDEN,
           '当前登录账号不属于本场大会',
@@ -1063,7 +1060,7 @@ export class ConferenceRepository {
     const db = this.database.db;
 
     if (!db) {
-      if (this.demoEvent.registration.accountMode === 'mobile_otp_required' && !customer) {
+      if (!customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
@@ -1088,20 +1085,28 @@ export class ConferenceRepository {
       }
       this.memory.ticketRemaining.set(ticket.id, remaining - 1);
       const now = new Date();
-      const attendee = customer
-        ? {
-            name:
-              input.attendee.name ||
-              customer.profile.realName ||
-              customer.profile.nickname ||
-              '参会人',
-            mobile: customer.mobile,
-            email: input.attendee.email || customer.profile.email || '',
-            company: input.attendee.company || customer.profile.company || '',
-            title: input.attendee.title || customer.profile.title || '',
-            city: input.attendee.city || customer.profile.city || '',
-          }
-        : input.attendee;
+      let attendeeMobile: string;
+      try {
+        attendeeMobile = normalizeMainlandMobile(input.attendee.mobile);
+      } catch {
+        throw new DomainError(
+          API_ERROR_CODES.VALIDATION_ERROR,
+          '请输入有效的中国大陆手机号',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      const attendee = {
+        name:
+          input.attendee.name ||
+          customer.profile.realName ||
+          customer.profile.nickname ||
+          '参会人',
+        mobile: attendeeMobile,
+        email: input.attendee.email || customer.profile.email || '',
+        company: input.attendee.company || customer.profile.company || '',
+        title: input.attendee.title || customer.profile.title || '',
+        city: input.attendee.city || customer.profile.city || '',
+      };
       const checkoutInput = { ...input, attendee };
       const formAnswers = this.normalizeRegistrationAnswers(
         this.demoEvent.registrationForm?.fields ?? [],
@@ -1247,14 +1252,14 @@ export class ConferenceRepository {
       const releasedRegistration = this.registrationSettings(
         releaseSnapshot?.event?.settings?.registration ?? eventSettings.registration,
       );
-      if (releasedRegistration.accountMode === 'mobile_otp_required' && !customer) {
+      if (!customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
           HttpStatus.UNAUTHORIZED,
         );
       }
-      if (customer && customer.organizationId !== ticketRow.organizationId) {
+      if (customer.organizationId !== ticketRow.organizationId) {
         throw new DomainError(
           API_ERROR_CODES.FORBIDDEN,
           '当前登录账号不属于本场大会',
@@ -1271,29 +1276,20 @@ export class ConferenceRepository {
           HttpStatus.BAD_REQUEST,
         );
       }
-      if (customer && normalizedInputMobile !== customer.mobile) {
-        throw new DomainError(
-          API_ERROR_CODES.VALIDATION_ERROR,
-          '报名手机号需要与当前登录账号一致',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
       const checkoutInput: CreateRegistration = {
         ...input,
-        attendee: customer
-          ? {
-              name:
-                input.attendee.name ||
-                customer.profile.realName ||
-                customer.profile.nickname ||
-                '参会人',
-              mobile: customer.mobile,
-              email: input.attendee.email || customer.profile.email || '',
-              company: input.attendee.company || customer.profile.company || '',
-              title: input.attendee.title || customer.profile.title || '',
-              city: input.attendee.city || customer.profile.city || '',
-            }
-          : input.attendee,
+        attendee: {
+          name:
+            input.attendee.name ||
+            customer.profile.realName ||
+            customer.profile.nickname ||
+            '参会人',
+          mobile: normalizedInputMobile,
+          email: input.attendee.email || customer.profile.email || '',
+          company: input.attendee.company || customer.profile.company || '',
+          title: input.attendee.title || customer.profile.title || '',
+          city: input.attendee.city || customer.profile.city || '',
+        },
       };
       const releasedTicket = releaseSnapshot?.tickets?.find(
         (ticket) => ticket.id === input.ticketTypeId,
@@ -1338,28 +1334,6 @@ export class ConferenceRepository {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`registration-mobile:${input.eventId}:${attendeeMobile}`}, 0))`,
       );
-      const duplicateContacts: SQL[] = [eq(registrations.attendeeMobileE164, attendeeMobile)];
-      if (attendeeEmail) {
-        duplicateContacts.push(eq(registrations.attendeeEmailNormalized, attendeeEmail));
-      }
-      const [duplicateRegistration] = await tx
-        .select({ id: registrations.id })
-        .from(registrations)
-        .where(
-          and(
-            eq(registrations.eventId, input.eventId),
-            sql`${registrations.status} <> 'cancelled'`,
-            or(...duplicateContacts),
-          ),
-        )
-        .limit(1);
-      if (duplicateRegistration) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '该邮箱或手机号已经提交过本场大会报名',
-          HttpStatus.CONFLICT,
-        );
-      }
       let waitlistOffer: typeof waitlistEntries.$inferSelect | undefined;
       if (checkoutInput.waitlistOfferToken) {
         [waitlistOffer] = await tx

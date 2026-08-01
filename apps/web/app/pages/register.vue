@@ -78,9 +78,7 @@ const registrationHelp = computed(
     '选择参会票种并填写真实信息。提交后将进入下一步。',
 );
 const answer = (key: string) => String(answers[key] ?? '').trim();
-const accountRequired = computed(
-  () => event.value.registration.accountMode === 'mobile_otp_required',
-);
+const accountRequired = computed(() => true);
 const verifiedMobile = computed(() => customer.session.value?.customer.maskedMobile ?? '');
 const inputAutocomplete = (key: string) =>
   ({
@@ -110,7 +108,8 @@ watch(
   () => customer.session.value,
   (session) => {
     if (!session) return;
-    answers.mobile = session.customer.mobile;
+    // Prefill from profile; keep any value the user already typed (including a different mobile).
+    answers.mobile ||= session.customer.mobile;
     answers.name ||= session.customer.profile.realName || session.customer.profile.nickname || '';
     answers.email ||= session.customer.profile.email || '';
     answers.company ||= session.customer.profile.company || '';
@@ -319,9 +318,10 @@ async function submit() {
             >
               <span aria-hidden="true">{{ customer.session.value ? '✓' : '•' }}</span>
               <p v-if="customer.session.value">
-                手机号已验证：<strong>{{ verifiedMobile }}</strong>
+                已登录账号：<strong>{{ verifiedMobile }}</strong>
+                。报名手机号可单独填写，不必与登录号相同。
               </p>
-              <p v-else>本场大会需要先验证手机号，验证成功后会保留当前填写内容。</p>
+              <p v-else>请先登录后再填写报名信息，登录成功后会保留当前已填内容。</p>
               <button v-if="!customer.session.value" type="button" @click="customer.openLogin">
                 登录 / 注册
               </button>
@@ -350,7 +350,6 @@ async function submit() {
                   :type="field.type"
                   :autocomplete="inputAutocomplete(field.key)"
                   :placeholder="field.placeholder ?? `请填写${field.label}`"
-                  :readonly="field.key === 'mobile' && Boolean(customer.session.value)"
                 />
               </div>
             </div>

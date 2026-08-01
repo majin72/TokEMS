@@ -978,12 +978,12 @@ export const registrations = pgTable(
       table.attendeeMobileE164,
       table.createdAt,
     ),
-    uniqueIndex('registrations_event_mobile_active_unique')
+    index('registrations_event_mobile_idx')
       .on(table.eventId, table.attendeeMobileE164)
-      .where(sql`${table.attendeeMobileE164} <> '' and ${table.status} <> 'cancelled'`),
-    uniqueIndex('registrations_event_customer_active_unique')
+      .where(sql`${table.attendeeMobileE164} <> ''`),
+    index('registrations_event_customer_idx')
       .on(table.eventId, table.customerUserId)
-      .where(sql`${table.customerUserId} is not null and ${table.status} <> 'cancelled'`),
+      .where(sql`${table.customerUserId} is not null`),
   ],
 );
 

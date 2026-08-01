@@ -260,6 +260,13 @@
       "when": 1785567900001,
       "tag": "0036_wechat_payment_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1785600000000,
+      "tag": "0037_allow_duplicate_registrations",
+      "breakpoints": true
     }
   ]
 }

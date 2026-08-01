@@ -659,24 +659,6 @@ export class CustomerAccountService {
         );
       }
       if (!proof.registration.customerUserId) {
-        const [duplicate] = await tx
-          .select({ id: registrations.id })
-          .from(registrations)
-          .where(
-            and(
-              eq(registrations.eventId, proof.registration.eventId),
-              eq(registrations.customerUserId, session.customerUserId),
-              sql`${registrations.status} <> 'cancelled'`,
-            ),
-          )
-          .limit(1);
-        if (duplicate) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前账号已经有本场大会的有效报名',
-            HttpStatus.CONFLICT,
-          );
-        }
         await tx
           .update(registrations)
           .set({
