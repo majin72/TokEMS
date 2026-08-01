@@ -439,6 +439,9 @@ if (await desktopCustomerView.count()) {
   await screenshot(admin, 'admin-user-detail-desktop.png', '用户详情弹窗桌面端');
   await admin.getByRole('button', { name: '关闭用户详情' }).click();
   await admin.locator('.customer-detail-dialog').waitFor({ state: 'detached' });
+  await admin.waitForFunction(() =>
+    /^(编辑|查看)$/.test(document.activeElement?.textContent?.trim() ?? ''),
+  );
   const desktopCustomerMore = admin.getByRole('button', { name: '更多' }).first();
   await desktopCustomerMore.click();
   const desktopCustomerDelete = admin.getByRole('button', { name: '删除用户' }).first();
@@ -584,6 +587,9 @@ if (await mobileCustomerView.count()) {
   await screenshot(mobileAdmin, 'admin-user-detail-mobile.png', '用户详情弹窗手机端');
   await mobileAdmin.getByRole('button', { name: '关闭用户详情' }).click();
   await mobileAdmin.locator('.customer-detail-dialog').waitFor({ state: 'detached' });
+  await mobileAdmin.waitForFunction(() =>
+    /^(编辑|查看)$/.test(document.activeElement?.textContent?.trim() ?? ''),
+  );
   const mobileCustomerMore = mobileAdmin.getByRole('button', { name: '更多' }).first();
   await mobileCustomerMore.click();
   const mobileCustomerDelete = mobileAdmin.getByRole('button', { name: '删除用户' }).first();
