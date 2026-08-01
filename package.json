@@ -44,8 +44,9 @@
     "audit:security": "pnpm audit --registry=https://registry.npmjs.org --audit-level high",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm docs:check",
     "db:generate": "pnpm --filter @conference/database generate",
-    "db:migrate": "pnpm --filter @conference/database migrate",
-    "db:seed": "pnpm --filter @conference/database seed",
+    "db:prepare": "pnpm --filter \"@conference/database^...\" build",
+    "db:migrate": "pnpm db:prepare && pnpm --filter @conference/database migrate",
+    "db:seed": "pnpm db:prepare && pnpm --filter @conference/database seed",
     "db:cleanup-local-demo": "DEPLOYMENT_MODE=local node tooling/cleanup-local-demo-users.mjs",
     "format": "prettier --write \"{apps,packages,docs,tooling}/**/*.{ts,vue,css,md,json}\""
   },

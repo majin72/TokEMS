@@ -104,7 +104,10 @@ jobs:
             '
       - name: Migrate and seed
         id: migrate_seed
-        run: pnpm db:migrate && pnpm db:seed
+        run: >-
+          pnpm db:prepare &&
+          pnpm --filter @conference/database migrate &&
+          pnpm --filter @conference/database seed
       - name: Quality gate
         id: quality_gate
         run: pnpm check
