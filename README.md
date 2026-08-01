@@ -12,6 +12,71 @@ TokEMS 面向大会主办方、活动运营团队和技术服务商。团队可�
 
 > 当前版本为 `v0.1.0` 早期预览版，适合本地评估、二次开发和预发布验证。生产部署需要结合实际地区与供应商完成安全、合规、支付、通知、备份和监控配置。管理后台当前以简体中文为主，英文界面列入近期路线图。
 
+## 项目全景
+
+TokEMS 沿着大会从内容发布到现场核验的完整流程设计。公开站承接内容和报名，API 维护组织、库存、订单与票据等业务事实，Worker 处理通知、候补、导出和其他异步任务。
+
+[完整可视化分析报告](docs/tokems-visual-report.html)包含适用场景、技术原理、技术栈、功能域、安全控制、部署拓扑和全球化路线。报告为单文件 HTML，可下载后直接打开或打印为 PDF。
+
+### 适用场景
+
+| 场景               | TokEMS 提供的能力                                              |
+| ------------------ | -------------------------------------------------------------- |
+| 中大型行业大会     | 官网、报名、付费票、通知、发票和现场签到在同一套业务流程中协作 |
+| 多活动组织方       | 多组织隔离、细粒度 RBAC、模板复用、发布回滚和审计记录          |
+| 活动技术服务商     | 自托管部署、模块化应用、共享契约，以及支付和通知集成边界       |
+| 高峰现场与弱网环境 | 设备令牌、二维码核销、重复检测、离线批次同步和多设备并发验收   |
+
+### 当前工程规模
+
+以下数据由 [`docs/generated/project-inventory.json`](docs/generated/project-inventory.json) 生成，并由 `pnpm docs:check` 校验。
+
+| 公开站页面 | 管理端视图 | API Controllers | API Operations | 数据库表 | 数据库迁移 | 测试文件 |
+| ---------: | ---------: | --------------: | -------------: | -------: | ---------: | -------: |
+|         10 |         34 |              23 |            167 |       59 |         35 |       38 |
+
+### 端到端业务链路
+
+```mermaid
+flowchart LR
+    Publish["内容发布"] --> Reach["用户触达"]
+    Reach --> Register["报名与资格"]
+    Register --> Reserve["库存预占"]
+    Reserve --> Commerce["订单与支付"]
+    Commerce --> Deliver["电子票、发票与通知"]
+    Deliver --> CheckIn["现场签到"]
+    CheckIn --> Audit["审计与复盘"]
+```
+
+### 系统架构
+
+```mermaid
+flowchart TB
+    subgraph Experience["体验层"]
+        Web["大会前台<br/>Nuxt 4 + Vue 3"]
+        Admin["运营后台<br/>Vue 3 + Vite"]
+    end
+
+    Gateway["Nginx Gateway"]
+    API["NestJS 11 模块化单体 API"]
+    PostgreSQL[("PostgreSQL 16 + pgvector")]
+    Outbox["事务 Outbox"]
+    Queue["Redis + BullMQ"]
+    Worker["Worker"]
+    Integrations["MinIO / 邮件 / 支付 / 区域服务"]
+
+    Web --> Gateway
+    Admin --> Gateway
+    Gateway --> API
+    API --> PostgreSQL
+    API --> Outbox
+    Outbox --> Queue
+    Queue --> Worker
+    Worker --> Integrations
+```
+
+公开页面通过不可变发布快照保持稳定，票务库存继续实时计算。订单预占、支付回调、候补领取和离线签到分别使用锁、签名、哈希、时间窗口和幂等约束维护状态一致性。
+
 ## 已实现能力
 
 | 产品域   | 当前能力                                                                      |

@@ -1,0 +1,3286 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="TokEMS 开源大会运营平台可视化分析报告，覆盖适用场景、技术原理、技术栈、系统功能、安全、部署与国际化路线。"
+    />
+    <meta name="color-scheme" content="light" />
+    <title>TokEMS 开源项目可视化报告</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/cn-fontsource-tsanger-jinkai02-regular/font.css"
+    />
+    <style>
+      :root {
+        --paper: #ffffff;
+        --surface: #ffffff;
+        --ink: #171a1f;
+        --ink-soft: #5d626b;
+        --ink-faint: #8a9099;
+        --line: #d9dce1;
+        --line-strong: #b9bec7;
+        --brand: #1b365d;
+        --brand-2: #294a78;
+        --brand-soft: #eaf0f7;
+        --warm: #8a6f47;
+        --success: #2f684f;
+        --warning: #8a5c20;
+        --danger: #864a4a;
+        --shadow: 0 18px 50px rgba(27, 54, 93, 0.08);
+        --radius: 18px;
+        --radius-sm: 10px;
+        --serif: 'TsangerJinKai02', 'Songti SC', 'STSong', 'Noto Serif CJK SC', serif;
+        --sans:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+        --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+        --max: 1320px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 88px;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: #ffffff;
+        font-family: var(--sans);
+        line-height: 1.72;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 4px;
+      }
+
+      button,
+      a {
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      :focus-visible {
+        outline: 3px solid rgba(27, 54, 93, 0.35);
+        outline-offset: 3px;
+        border-radius: 4px;
+      }
+
+      ::selection {
+        color: #ffffff;
+        background: var(--brand);
+      }
+
+      .skip-link {
+        position: fixed;
+        z-index: 1000;
+        top: 12px;
+        left: 12px;
+        transform: translateY(-160%);
+        padding: 9px 14px;
+        color: #ffffff;
+        background: var(--brand);
+        border-radius: 8px;
+      }
+
+      .skip-link:focus {
+        transform: translateY(0);
+      }
+
+      .reading-progress {
+        position: fixed;
+        z-index: 900;
+        top: 0;
+        left: 0;
+        width: 0;
+        height: 3px;
+        background: var(--brand);
+      }
+
+      .topbar {
+        position: sticky;
+        z-index: 800;
+        top: 0;
+        border-bottom: 1px solid rgba(217, 220, 225, 0.88);
+        background: rgba(255, 255, 255, 0.94);
+        backdrop-filter: blur(14px);
+      }
+
+      .topbar-inner {
+        width: min(calc(100% - 40px), var(--max));
+        min-height: 68px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+
+      .brand-lockup {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+      }
+
+      .brand-mark {
+        width: 35px;
+        height: 35px;
+        display: grid;
+        place-items: center;
+        color: #ffffff;
+        background: var(--brand);
+        border-radius: 9px 9px 9px 2px;
+        font-family: var(--serif);
+        font-size: 19px;
+        font-weight: 700;
+      }
+
+      .brand-name {
+        display: grid;
+        line-height: 1.15;
+      }
+
+      .brand-name strong {
+        font-family: var(--serif);
+        font-size: 18px;
+        letter-spacing: 0.02em;
+      }
+
+      .brand-name span {
+        color: var(--ink-faint);
+        font-size: 10px;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .button {
+        min-height: 40px;
+        padding: 8px 14px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        background: #ffffff;
+        border-radius: 9px;
+        font: 650 13px/1 var(--sans);
+        text-decoration: none;
+        cursor: pointer;
+        transition:
+          border-color 160ms ease,
+          background 160ms ease,
+          color 160ms ease,
+          transform 160ms ease;
+      }
+
+      .button:hover {
+        border-color: var(--brand);
+        transform: translateY(-1px);
+      }
+
+      .button.primary {
+        color: #ffffff;
+        border-color: var(--brand);
+        background: var(--brand);
+      }
+
+      .button.primary:hover {
+        background: var(--brand-2);
+      }
+
+      .button svg {
+        width: 15px;
+        height: 15px;
+      }
+
+      .hero {
+        width: min(calc(100% - 40px), var(--max));
+        margin: 0 auto;
+        padding: 96px 0 68px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(330px, 0.65fr);
+        gap: 72px;
+        align-items: end;
+      }
+
+      .eyebrow {
+        margin: 0 0 18px;
+        color: var(--brand);
+        font: 750 12px/1.4 var(--sans);
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 860px;
+        margin-bottom: 24px;
+        font-family: var(--serif);
+        font-size: clamp(48px, 6vw, 82px);
+        font-weight: 600;
+        line-height: 1.04;
+        letter-spacing: -0.045em;
+      }
+
+      .hero-title-line {
+        display: block;
+      }
+
+      .hero-lede {
+        max-width: 760px;
+        margin-bottom: 30px;
+        color: var(--ink-soft);
+        font-size: clamp(17px, 1.7vw, 21px);
+        line-height: 1.82;
+      }
+
+      .tag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .tag {
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        color: var(--ink-soft);
+        background: #ffffff;
+        border-radius: 999px;
+        font-size: 12px;
+        line-height: 1.25;
+      }
+
+      .tag.brand {
+        color: var(--brand);
+        border-color: rgba(27, 54, 93, 0.28);
+        background: var(--brand-soft);
+      }
+
+      .hero-note {
+        padding: 28px;
+        border: 1px solid var(--line);
+        border-top: 4px solid var(--brand);
+        background: #ffffff;
+        box-shadow: var(--shadow);
+      }
+
+      .hero-note .kicker {
+        margin-bottom: 12px;
+        color: var(--ink-faint);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .hero-note h2 {
+        margin-bottom: 14px;
+        font-family: var(--serif);
+        font-size: 28px;
+        font-weight: 600;
+        line-height: 1.25;
+      }
+
+      .hero-note p {
+        margin-bottom: 0;
+        color: var(--ink-soft);
+        font-size: 14px;
+      }
+
+      .metrics {
+        width: min(calc(100% - 40px), var(--max));
+        margin: 0 auto 92px;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .metric {
+        min-height: 126px;
+        padding: 25px 22px;
+        border-right: 1px solid var(--line);
+      }
+
+      .metric:last-child {
+        border-right: 0;
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--brand);
+        font-family: var(--serif);
+        font-size: clamp(30px, 3.2vw, 43px);
+        font-weight: 600;
+        line-height: 1;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .metric span {
+        color: var(--ink-soft);
+        font-size: 12px;
+      }
+
+      .report-shell {
+        width: min(calc(100% - 40px), var(--max));
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: 210px minmax(0, 1fr);
+        gap: 72px;
+        align-items: start;
+      }
+
+      .toc {
+        position: sticky;
+        top: 102px;
+        padding-bottom: 40px;
+      }
+
+      .toc-label {
+        margin-bottom: 14px;
+        color: var(--ink-faint);
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+      }
+
+      .toc nav {
+        display: grid;
+        gap: 3px;
+      }
+
+      .toc a {
+        padding: 8px 10px;
+        color: var(--ink-soft);
+        border-left: 2px solid transparent;
+        font-size: 12px;
+        line-height: 1.35;
+        text-decoration: none;
+        transition:
+          color 160ms ease,
+          border-color 160ms ease,
+          background 160ms ease;
+      }
+
+      .toc a:hover,
+      .toc a.active {
+        color: var(--brand);
+        border-left-color: var(--brand);
+        background: var(--brand-soft);
+      }
+
+      .toc .toc-meta {
+        margin-top: 24px;
+        padding-top: 18px;
+        border-top: 1px solid var(--line);
+        color: var(--ink-faint);
+        font-size: 10px;
+        line-height: 1.65;
+      }
+
+      main {
+        min-width: 0;
+      }
+
+      .report-section {
+        padding: 0 0 104px;
+        scroll-margin-top: 96px;
+      }
+
+      .report-section + .report-section {
+        padding-top: 94px;
+        border-top: 1px solid var(--line);
+      }
+
+      .section-head {
+        max-width: 880px;
+        margin-bottom: 42px;
+        display: grid;
+        grid-template-columns: 70px minmax(0, 1fr);
+        gap: 20px;
+        align-items: start;
+      }
+
+      .section-no {
+        padding-top: 8px;
+        color: var(--brand);
+        font-family: var(--serif);
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .section-head h2 {
+        margin-bottom: 14px;
+        font-family: var(--serif);
+        font-size: clamp(34px, 4vw, 52px);
+        font-weight: 600;
+        line-height: 1.14;
+        letter-spacing: -0.025em;
+      }
+
+      .section-head p {
+        margin-bottom: 0;
+        color: var(--ink-soft);
+        font-size: 16px;
+        line-height: 1.8;
+      }
+
+      .section-label {
+        margin: 44px 0 18px;
+        color: var(--ink-faint);
+        font-size: 11px;
+        font-weight: 750;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .lead-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+
+      .lead-card,
+      .scenario-card,
+      .feature-card,
+      .mechanism-card,
+      .summary-card {
+        padding: 25px;
+        border: 1px solid var(--line);
+        background: #ffffff;
+        border-radius: var(--radius-sm);
+      }
+
+      .lead-card {
+        min-height: 205px;
+        border-top: 3px solid var(--brand);
+      }
+
+      .card-index {
+        display: inline-grid;
+        width: 30px;
+        height: 30px;
+        margin-bottom: 20px;
+        place-items: center;
+        color: var(--brand);
+        background: var(--brand-soft);
+        border-radius: 50%;
+        font: 750 11px/1 var(--sans);
+      }
+
+      .lead-card h3,
+      .scenario-card h3,
+      .feature-card h3,
+      .mechanism-card h3,
+      .summary-card h3 {
+        margin-bottom: 10px;
+        font-family: var(--serif);
+        font-size: 22px;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+
+      .lead-card p,
+      .scenario-card p,
+      .feature-card p,
+      .mechanism-card p,
+      .summary-card p {
+        margin-bottom: 0;
+        color: var(--ink-soft);
+        font-size: 13px;
+        line-height: 1.72;
+      }
+
+      .callout {
+        margin-top: 18px;
+        padding: 22px 24px;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 16px;
+        border: 1px solid rgba(27, 54, 93, 0.22);
+        background: var(--brand-soft);
+        border-radius: var(--radius-sm);
+      }
+
+      .callout-icon {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        color: #ffffff;
+        background: var(--brand);
+        border-radius: 50%;
+        font-family: var(--serif);
+      }
+
+      .callout strong {
+        display: block;
+        margin: 1px 0 4px;
+        font-size: 13px;
+      }
+
+      .callout p {
+        margin: 0;
+        color: var(--ink-soft);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .scenario-grid,
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+
+      .scenario-card {
+        min-height: 190px;
+      }
+
+      .scenario-card .mini-label,
+      .feature-card .mini-label,
+      .mechanism-card .mini-label {
+        display: block;
+        margin-bottom: 14px;
+        color: var(--brand);
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .figure {
+        margin: 22px 0 0;
+        padding: clamp(16px, 3vw, 32px);
+        overflow: hidden;
+        border: 1px solid var(--line);
+        background: #ffffff;
+        border-radius: var(--radius);
+      }
+
+      .figure-header {
+        margin-bottom: 24px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .figure-header h3 {
+        margin-bottom: 4px;
+        font-family: var(--serif);
+        font-size: 24px;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+
+      .figure-header p {
+        margin: 0;
+        color: var(--ink-faint);
+        font-size: 11px;
+      }
+
+      .figure-code {
+        flex: 0 0 auto;
+        color: var(--brand);
+        font: 650 10px/1.3 var(--mono);
+        letter-spacing: 0.04em;
+      }
+
+      .figure svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      figcaption {
+        margin-top: 22px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+        color: var(--ink-soft);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .svg-label {
+        fill: var(--ink);
+        font-family: var(--sans);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .svg-small {
+        fill: var(--ink-soft);
+        font-family: var(--sans);
+        font-size: 10px;
+      }
+
+      .svg-tiny {
+        fill: var(--ink-faint);
+        font-family: var(--sans);
+        font-size: 9px;
+      }
+
+      .svg-node {
+        fill: #ffffff;
+        stroke: var(--line-strong);
+        stroke-width: 1;
+      }
+
+      .svg-node-brand {
+        fill: var(--brand);
+        stroke: var(--brand);
+        stroke-width: 1;
+      }
+
+      .svg-label-light {
+        fill: #ffffff;
+        font-family: var(--sans);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .svg-small-light {
+        fill: rgba(255, 255, 255, 0.76);
+        font-family: var(--sans);
+        font-size: 10px;
+      }
+
+      .svg-line {
+        fill: none;
+        stroke: var(--line-strong);
+        stroke-width: 1.5;
+      }
+
+      .svg-line-brand {
+        fill: none;
+        stroke: var(--brand);
+        stroke-width: 1.7;
+      }
+
+      .svg-dash {
+        stroke-dasharray: 6 6;
+      }
+
+      .fit-table,
+      .role-table,
+      .control-table,
+      .deploy-table {
+        width: 100%;
+        border-collapse: collapse;
+        border: 1px solid var(--line);
+        font-size: 12px;
+      }
+
+      .fit-table th,
+      .fit-table td,
+      .role-table th,
+      .role-table td,
+      .control-table th,
+      .control-table td,
+      .deploy-table th,
+      .deploy-table td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .fit-table thead th,
+      .role-table thead th,
+      .control-table thead th,
+      .deploy-table thead th {
+        color: var(--brand);
+        background: #ffffff;
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .fit-table tbody tr:last-child td,
+      .role-table tbody tr:last-child td,
+      .control-table tbody tr:last-child td,
+      .deploy-table tbody tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .fit-table td:first-child,
+      .role-table td:first-child,
+      .control-table td:first-child,
+      .deploy-table td:first-child {
+        color: var(--ink);
+        font-weight: 700;
+      }
+
+      .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 6px;
+        border-radius: 50%;
+        background: var(--line-strong);
+      }
+
+      .dot.high {
+        background: var(--brand);
+      }
+
+      .dot.mid {
+        background: var(--warm);
+      }
+
+      .dot.low {
+        background: var(--ink-faint);
+      }
+
+      .journey {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(110px, 1fr));
+        overflow-x: auto;
+        padding-bottom: 8px;
+        scrollbar-width: thin;
+      }
+
+      .journey-step {
+        position: relative;
+        min-width: 118px;
+        padding: 18px 19px 16px 16px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+        background: #ffffff;
+      }
+
+      .journey-step:last-child {
+        border-right: 1px solid var(--line);
+      }
+
+      .journey-step::after {
+        content: '';
+        position: absolute;
+        z-index: 2;
+        top: 50%;
+        right: -6px;
+        width: 10px;
+        height: 10px;
+        border-top: 1px solid var(--line-strong);
+        border-right: 1px solid var(--line-strong);
+        background: #ffffff;
+        transform: translateY(-50%) rotate(45deg);
+      }
+
+      .journey-step:last-child::after {
+        display: none;
+      }
+
+      .journey-step small {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--brand);
+        font: 750 9px/1.2 var(--mono);
+      }
+
+      .journey-step strong {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .journey-step span {
+        color: var(--ink-faint);
+        font-size: 10px;
+        line-height: 1.45;
+      }
+
+      .tech-stack {
+        display: grid;
+        gap: 8px;
+      }
+
+      .tech-layer {
+        padding: 14px 16px;
+        display: grid;
+        grid-template-columns: 124px minmax(0, 1fr);
+        align-items: center;
+        gap: 18px;
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--brand);
+        background: #ffffff;
+      }
+
+      .tech-layer strong {
+        color: var(--brand);
+        font-family: var(--serif);
+        font-size: 16px;
+      }
+
+      .tech-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .tech-tags span {
+        padding: 5px 8px;
+        color: var(--ink-soft);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        font: 10px/1.25 var(--mono);
+      }
+
+      .bar-chart {
+        display: grid;
+        gap: 12px;
+      }
+
+      .bar-row {
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr) 38px;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .bar-row .bar-name {
+        color: var(--ink-soft);
+        font: 650 10px/1.3 var(--mono);
+        text-align: right;
+      }
+
+      .bar-track {
+        height: 13px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        background: #ffffff;
+        border-radius: 999px;
+      }
+
+      .bar-fill {
+        width: var(--value);
+        height: 100%;
+        background: var(--brand);
+        border-radius: 999px;
+      }
+
+      .bar-value {
+        color: var(--ink);
+        font: 750 10px/1 var(--mono);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .inventory-groups {
+        margin-top: 16px;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+
+      .inventory-group {
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+      }
+
+      .inventory-group h3 {
+        margin-bottom: 16px;
+        color: var(--brand);
+        font-family: var(--serif);
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      .inventory-pair {
+        padding: 8px 0;
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        border-top: 1px solid var(--line);
+        color: var(--ink-soft);
+        font-size: 11px;
+      }
+
+      .inventory-pair strong {
+        color: var(--ink);
+        font: 750 12px/1.5 var(--mono);
+      }
+
+      .feature-card {
+        min-height: 210px;
+      }
+
+      .feature-card ul,
+      .mechanism-card ul,
+      .summary-card ul {
+        margin: 14px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .feature-card li,
+      .mechanism-card li,
+      .summary-card li {
+        position: relative;
+        padding: 7px 0 7px 14px;
+        color: var(--ink-soft);
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .feature-card li::before,
+      .mechanism-card li::before,
+      .summary-card li::before {
+        content: '';
+        position: absolute;
+        top: 13px;
+        left: 0;
+        width: 4px;
+        height: 4px;
+        background: var(--brand);
+        border-radius: 50%;
+      }
+
+      .role-table {
+        min-width: 760px;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        border-radius: var(--radius-sm);
+      }
+
+      .role-mark {
+        color: var(--brand);
+        font-weight: 850;
+      }
+
+      .role-empty {
+        color: var(--line-strong);
+      }
+
+      .mechanism-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+
+      .mechanism-card {
+        min-height: 250px;
+      }
+
+      .formula {
+        margin: 16px 0 0;
+        padding: 12px 14px;
+        overflow-x: auto;
+        color: var(--brand);
+        border: 1px solid rgba(27, 54, 93, 0.2);
+        background: var(--brand-soft);
+        border-radius: 7px;
+        font: 650 10px/1.55 var(--mono);
+        white-space: nowrap;
+      }
+
+      .layer-map {
+        display: grid;
+        gap: 8px;
+      }
+
+      .security-layer {
+        position: relative;
+        padding: 16px 18px 16px 54px;
+        display: grid;
+        grid-template-columns: 130px minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+        border: 1px solid var(--line);
+        background: #ffffff;
+      }
+
+      .security-layer::before {
+        content: attr(data-level);
+        position: absolute;
+        left: 16px;
+        width: 24px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        color: #ffffff;
+        background: var(--brand);
+        border-radius: 50%;
+        font: 750 9px/1 var(--mono);
+      }
+
+      .security-layer strong {
+        color: var(--brand);
+        font-family: var(--serif);
+        font-size: 16px;
+      }
+
+      .security-layer span {
+        color: var(--ink-soft);
+        font-size: 11px;
+      }
+
+      .domain-map {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+      }
+
+      .domain-group {
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+      }
+
+      .domain-group h3 {
+        margin-bottom: 15px;
+        color: var(--brand);
+        font-family: var(--serif);
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      .domain-pill {
+        margin-top: 7px;
+        padding: 9px 10px;
+        color: var(--ink-soft);
+        border-left: 3px solid var(--brand);
+        background: var(--brand-soft);
+        font-size: 11px;
+      }
+
+      .quality-flow {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 0;
+      }
+
+      .quality-step {
+        position: relative;
+        min-height: 116px;
+        padding: 19px 16px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+      }
+
+      .quality-step:last-child {
+        border-right: 1px solid var(--line);
+      }
+
+      .quality-step::after {
+        content: '';
+        position: absolute;
+        z-index: 2;
+        top: 34px;
+        right: -5px;
+        width: 8px;
+        height: 8px;
+        border-top: 1px solid var(--brand);
+        border-right: 1px solid var(--brand);
+        background: #ffffff;
+        transform: rotate(45deg);
+      }
+
+      .quality-step:last-child::after {
+        display: none;
+      }
+
+      .quality-step small {
+        display: block;
+        margin-bottom: 14px;
+        color: var(--brand);
+        font: 750 9px/1 var(--mono);
+      }
+
+      .quality-step strong {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 11px;
+        line-height: 1.35;
+      }
+
+      .quality-step span {
+        color: var(--ink-faint);
+        font-size: 9px;
+        line-height: 1.45;
+      }
+
+      .signal-grid {
+        margin-top: 14px;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+      }
+
+      .signal {
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .signal strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--brand);
+        font: 750 10px/1.3 var(--mono);
+      }
+
+      .signal span {
+        color: var(--ink-soft);
+        font-size: 10px;
+      }
+
+      .timeline {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 18px;
+      }
+
+      .timeline::before {
+        content: '';
+        position: absolute;
+        top: 22px;
+        left: 8%;
+        right: 8%;
+        height: 1px;
+        background: var(--line-strong);
+      }
+
+      .timeline-item {
+        position: relative;
+        z-index: 1;
+        padding-top: 58px;
+      }
+
+      .timeline-item::before {
+        content: '';
+        position: absolute;
+        top: 14px;
+        left: 0;
+        width: 16px;
+        height: 16px;
+        border: 5px solid #ffffff;
+        outline: 1px solid var(--brand);
+        background: var(--brand);
+        border-radius: 50%;
+      }
+
+      .timeline-item.planned::before {
+        background: #ffffff;
+      }
+
+      .timeline-item small {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--brand);
+        font: 750 9px/1.2 var(--mono);
+        letter-spacing: 0.05em;
+      }
+
+      .timeline-item h3 {
+        margin-bottom: 8px;
+        font-family: var(--serif);
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+
+      .timeline-item p {
+        margin-bottom: 0;
+        color: var(--ink-soft);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+
+      .summary-card {
+        min-height: 250px;
+      }
+
+      .source-list {
+        margin: 36px 0 0;
+        padding: 24px 0 0;
+        border-top: 1px solid var(--line);
+        color: var(--ink-soft);
+        font-size: 11px;
+      }
+
+      .source-list strong {
+        color: var(--ink);
+      }
+
+      .source-list ul {
+        margin: 12px 0 0;
+        padding-left: 18px;
+      }
+
+      .source-list li {
+        margin: 5px 0;
+      }
+
+      .source-list code {
+        color: var(--brand);
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .footer {
+        width: min(calc(100% - 40px), var(--max));
+        margin: 0 auto;
+        padding: 38px 0 64px;
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        border-top: 1px solid var(--line);
+        color: var(--ink-faint);
+        font-size: 10px;
+      }
+
+      .footer strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--ink);
+        font-family: var(--serif);
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      .footer a {
+        color: var(--brand);
+      }
+
+      .back-top {
+        position: fixed;
+        z-index: 700;
+        right: 22px;
+        bottom: 22px;
+        width: 40px;
+        height: 40px;
+        display: grid;
+        place-items: center;
+        color: var(--brand);
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.94);
+        border-radius: 50%;
+        box-shadow: 0 8px 30px rgba(27, 54, 93, 0.09);
+        text-decoration: none;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(8px);
+        transition:
+          opacity 160ms ease,
+          transform 160ms ease;
+      }
+
+      .back-top.visible {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+      }
+
+      @media (max-width: 1100px) {
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 34px;
+        }
+
+        .hero-note {
+          max-width: 720px;
+        }
+
+        .metrics {
+          grid-template-columns: repeat(3, 1fr);
+        }
+
+        .metric:nth-child(3) {
+          border-right: 0;
+        }
+
+        .metric:nth-child(-n + 3) {
+          border-bottom: 1px solid var(--line);
+        }
+
+        .report-shell {
+          grid-template-columns: 1fr;
+          gap: 46px;
+        }
+
+        .toc {
+          position: static;
+          overflow-x: auto;
+          padding: 0 0 10px;
+        }
+
+        .toc-label,
+        .toc-meta {
+          display: none;
+        }
+
+        .toc nav {
+          min-width: max-content;
+          display: flex;
+          gap: 6px;
+        }
+
+        .toc a {
+          padding: 7px 10px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+        }
+
+        .toc a:hover,
+        .toc a.active {
+          border-color: var(--brand);
+          background: var(--brand-soft);
+        }
+
+        .journey,
+        .quality-flow {
+          grid-template-columns: repeat(7, 150px);
+          overflow-x: auto;
+        }
+
+        .quality-flow {
+          grid-template-columns: repeat(6, 150px);
+        }
+      }
+
+      @media (max-width: 820px) {
+        .topbar-inner {
+          width: min(calc(100% - 28px), var(--max));
+        }
+
+        .top-actions .button.secondary {
+          display: none;
+        }
+
+        .hero,
+        .metrics,
+        .report-shell,
+        .footer {
+          width: min(calc(100% - 28px), var(--max));
+        }
+
+        .hero {
+          padding-top: 62px;
+        }
+
+        .metrics {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .metric,
+        .metric:nth-child(3) {
+          border-right: 1px solid var(--line);
+          border-bottom: 1px solid var(--line);
+        }
+
+        .metric:nth-child(even) {
+          border-right: 0;
+        }
+
+        .metric:last-child {
+          grid-column: 1 / -1;
+          border-right: 0;
+          border-bottom: 0;
+        }
+
+        .section-head {
+          grid-template-columns: 46px minmax(0, 1fr);
+          gap: 10px;
+        }
+
+        .lead-grid,
+        .scenario-grid,
+        .feature-grid,
+        .mechanism-grid,
+        .inventory-groups,
+        .domain-map,
+        .summary-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .tech-layer {
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+
+        .timeline {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .timeline::before {
+          display: none;
+        }
+
+        .signal-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+
+      @media (max-width: 560px) {
+        html {
+          scroll-padding-top: 76px;
+        }
+
+        .topbar-inner {
+          min-height: 60px;
+        }
+
+        .brand-name span {
+          display: none;
+        }
+
+        .button {
+          min-height: 38px;
+          padding: 8px 11px;
+          font-size: 11px;
+        }
+
+        .hero {
+          padding: 48px 0 48px;
+        }
+
+        h1 {
+          font-size: 36px;
+          line-height: 1.14;
+          letter-spacing: -0.035em;
+        }
+
+        .hero-lede {
+          font-size: 16px;
+        }
+
+        .hero-note {
+          padding: 22px;
+        }
+
+        .metric {
+          min-height: 108px;
+          padding: 22px 18px;
+        }
+
+        .report-section {
+          padding-bottom: 76px;
+        }
+
+        .report-section + .report-section {
+          padding-top: 72px;
+        }
+
+        .section-head {
+          display: block;
+        }
+
+        .section-no {
+          margin-bottom: 12px;
+        }
+
+        .section-head h2 {
+          font-size: 36px;
+        }
+
+        .lead-grid,
+        .scenario-grid,
+        .feature-grid,
+        .mechanism-grid,
+        .inventory-groups,
+        .domain-map,
+        .summary-grid,
+        .timeline,
+        .signal-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .figure {
+          overflow-x: auto;
+          border-radius: 12px;
+        }
+
+        .figure svg {
+          width: 720px;
+          max-width: none;
+        }
+
+        .figure-header {
+          position: sticky;
+          left: 0;
+          display: block;
+        }
+
+        .figure-header p::after {
+          content: ' · 图表可横向滑动';
+        }
+
+        .figure-code {
+          margin-top: 8px;
+        }
+
+        figcaption {
+          position: sticky;
+          left: 0;
+          width: calc(100vw - 62px);
+        }
+
+        .security-layer {
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
+
+        .callout {
+          grid-template-columns: 1fr;
+        }
+
+        .footer {
+          display: block;
+        }
+
+        .footer > div + div {
+          margin-top: 18px;
+        }
+
+        .back-top {
+          right: 14px;
+          bottom: 14px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      @media print {
+        @page {
+          size: A4;
+          margin: 14mm;
+        }
+
+        html {
+          scroll-behavior: auto;
+        }
+
+        body {
+          color: #111111;
+          background: #ffffff;
+          font-size: 9pt;
+        }
+
+        .topbar,
+        .toc,
+        .back-top,
+        .reading-progress,
+        .button {
+          display: none !important;
+        }
+
+        .hero,
+        .metrics,
+        .report-shell,
+        .footer {
+          width: 100%;
+        }
+
+        .hero {
+          padding: 0 0 14mm;
+          grid-template-columns: 1fr;
+          gap: 8mm;
+        }
+
+        h1 {
+          font-size: 36pt;
+        }
+
+        .metrics {
+          margin-bottom: 14mm;
+        }
+
+        .report-shell {
+          display: block;
+        }
+
+        .report-section,
+        .report-section + .report-section {
+          padding: 10mm 0;
+        }
+
+        .figure,
+        .lead-card,
+        .scenario-card,
+        .feature-card,
+        .mechanism-card,
+        .summary-card,
+        .inventory-group,
+        .domain-group {
+          break-inside: avoid;
+          box-shadow: none;
+        }
+
+        .figure {
+          padding: 6mm;
+        }
+
+        .lead-grid,
+        .scenario-grid,
+        .feature-grid,
+        .mechanism-grid,
+        .summary-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .footer {
+          padding-bottom: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#report">跳到报告正文</a>
+    <div class="reading-progress" id="readingProgress" aria-hidden="true"></div>
+
+    <header class="topbar" id="top">
+      <div class="topbar-inner">
+        <a class="brand-lockup" href="#top" aria-label="返回 TokEMS 报告顶部">
+          <span class="brand-mark">T</span>
+          <span class="brand-name">
+            <strong>TokEMS</strong>
+            <span>Open source system report</span>
+          </span>
+        </a>
+        <div class="top-actions">
+          <button
+            class="button secondary"
+            type="button"
+            id="printButton"
+            aria-label="打印或导出 PDF"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M7 14h10v7H7z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            导出 PDF
+          </button>
+          <a
+            class="button primary"
+            href="https://github.com/yaojingang/TokEMS"
+            target="_blank"
+            rel="noreferrer"
+          >
+            查看 GitHub
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M5 12h13M13 6l6 6-6 6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">Open Source System Report · 2026.08.01</p>
+        <h1 id="hero-title">
+          <span class="hero-title-line">一套大会运营系统，</span>
+          <span class="hero-title-line">贯通发布、交易与现场</span>
+        </h1>
+        <p class="hero-lede">
+          TokEMS
+          是开源、自托管的一体化大会运营平台。它将大会官网、报名、票务、订单、发票、通知和现场签到收拢到统一业务模型，并通过发布快照、事务
+          Outbox、库存锁与幂等控制维持关键流程的一致性。
+        </p>
+        <div class="tag-row" aria-label="项目标签">
+          <span class="tag brand">v0.1.0 Public Preview</span>
+          <span class="tag">Self-hosted</span>
+          <span class="tag">AGPL-3.0-only</span>
+          <span class="tag">TypeScript Monorepo</span>
+          <span class="tag">Chinese-first · Global roadmap</span>
+        </div>
+      </div>
+      <aside class="hero-note" aria-label="报告结论">
+        <p class="kicker">Executive judgment</p>
+        <h2>适合有完整运营链路和数据主权要求的大会团队</h2>
+        <p>
+          当前版本已经形成可运行的业务骨架和较完整的工程边界。面向生产部署时，团队需要继续建设真实支付与消息集成、可观测性、容量验证、备份恢复和多语言体验。
+        </p>
+      </aside>
+    </section>
+
+    <section class="metrics" aria-label="项目量化概览">
+      <div class="metric">
+        <strong>83,576</strong>
+        <span>核心源码行数</span>
+      </div>
+      <div class="metric">
+        <strong>167</strong>
+        <span>API 操作</span>
+      </div>
+      <div class="metric">
+        <strong>59</strong>
+        <span>数据库表</span>
+      </div>
+      <div class="metric">
+        <strong>35</strong>
+        <span>数据库迁移</span>
+      </div>
+      <div class="metric">
+        <strong>96</strong>
+        <span>视觉回归截图</span>
+      </div>
+    </section>
+
+    <div class="report-shell">
+      <aside class="toc" aria-label="报告目录">
+        <p class="toc-label">Contents</p>
+        <nav id="tocNav">
+          <a href="#overview">01 项目定位</a>
+          <a href="#scenarios">02 适用场景</a>
+          <a href="#principles">03 技术原理</a>
+          <a href="#stack">04 技术栈</a>
+          <a href="#functions">05 系统功能</a>
+          <a href="#data-security">06 数据与安全</a>
+          <a href="#delivery">07 部署与质量</a>
+          <a href="#global">08 全球化路线</a>
+          <a href="#conclusion">09 综合判断</a>
+        </nav>
+        <p class="toc-meta">
+          报告基线：v0.1.0<br />
+          许可：AGPL-3.0-only<br />
+          形态：单文件 HTML<br />
+          背景：纯白
+        </p>
+      </aside>
+
+      <main id="report">
+        <section class="report-section" id="overview" data-section>
+          <header class="section-head">
+            <span class="section-no">01</span>
+            <div>
+              <h2>项目定位与价值主张</h2>
+              <p>
+                TokEMS
+                面向大会组织方、运营团队和活动技术服务商，覆盖活动生命周期中的内容、交易、履约和治理。统一数据模型让跨团队协作拥有稳定的业务事实。
+              </p>
+            </div>
+          </header>
+
+          <div class="lead-grid">
+            <article class="lead-card">
+              <span class="card-index">A</span>
+              <h3>完整运营闭环</h3>
+              <p>
+                公开官网承接流量，报名与票务完成转化，订单和发票处理交易，通知与签到完成履约，审计记录支撑复盘。
+              </p>
+            </article>
+            <article class="lead-card">
+              <span class="card-index">B</span>
+              <h3>业务一致性优先</h3>
+              <p>
+                库存、支付回调、候补释放、电子票、离线签到都配置了锁、幂等、哈希或唯一约束，降低重复执行和状态漂移。
+              </p>
+            </article>
+            <article class="lead-card">
+              <span class="card-index">C</span>
+              <h3>自托管与可扩展</h3>
+              <p>
+                Docker Compose 提供标准运行拓扑，模块化单体 API
+                便于早期交付，共享包和集成层为区域服务商及二次开发留出边界。
+              </p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <span class="callout-icon" aria-hidden="true">析</span>
+            <div>
+              <strong>核心判断</strong>
+              <p>
+                项目当前最有辨识度的能力集中在发布快照、交易一致性、候补履约、离线签到和多组织治理。这五类能力共同定义了“大会运营基础设施”的产品位置。
+              </p>
+            </div>
+          </div>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>产品价值链</h3>
+                <p>从触达到复盘的连续业务事实</p>
+              </div>
+              <span class="figure-code">FIG 01 · VALUE CHAIN</span>
+            </div>
+            <div
+              class="journey"
+              role="img"
+              aria-label="TokEMS 产品价值链：发布、触达、报名、交易、履约、现场和复盘"
+            >
+              <div class="journey-step">
+                <small>01</small><strong>内容发布</strong><span>大会官网与模板</span>
+              </div>
+              <div class="journey-step">
+                <small>02</small><strong>用户触达</strong><span>通知与公开页面</span>
+              </div>
+              <div class="journey-step">
+                <small>03</small><strong>报名转化</strong><span>表单、条款、资格</span>
+              </div>
+              <div class="journey-step">
+                <small>04</small><strong>交易结算</strong><span>票种、订单、支付</span>
+              </div>
+              <div class="journey-step">
+                <small>05</small><strong>履约交付</strong><span>电子票与发票</span>
+              </div>
+              <div class="journey-step">
+                <small>06</small><strong>现场核验</strong><span>设备、二维码、离线</span>
+              </div>
+              <div class="journey-step">
+                <small>07</small><strong>治理复盘</strong><span>审计、导出、指标</span>
+              </div>
+            </div>
+            <figcaption>
+              价值链内的状态由同一平台记录，运营、财务和现场团队能够沿着报名与订单关系回溯完整路径。
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="report-section" id="scenarios" data-section>
+          <header class="section-head">
+            <span class="section-no">02</span>
+            <div>
+              <h2>适用场景与选型边界</h2>
+              <p>
+                系统适配度随着活动链路复杂度、数据控制要求和现场运营压力提升。以下判断结合当前代码能力和公开版本边界。
+              </p>
+            </div>
+          </header>
+
+          <div class="scenario-grid">
+            <article class="scenario-card">
+              <span class="mini-label">Primary fit</span>
+              <h3>中大型行业大会</h3>
+              <p>
+                官网、报名、付费票、通知、现场签到和发票集中协作，适合拥有内容、运营、财务及现场分工的团队。
+              </p>
+            </article>
+            <article class="scenario-card">
+              <span class="mini-label">Multi-event</span>
+              <h3>多活动组织方</h3>
+              <p>
+                多组织隔离、事件级权限和模板发布能力支持持续办会，能够沉淀跨活动复用的运营资产。
+              </p>
+            </article>
+            <article class="scenario-card">
+              <span class="mini-label">Delivery</span>
+              <h3>活动技术服务商</h3>
+              <p>
+                模块化业务边界、共享契约和自托管部署便于定制交付，适合连接区域支付、短信、邮件和对象存储。
+              </p>
+            </article>
+            <article class="scenario-card">
+              <span class="mini-label">Commerce</span>
+              <h3>付费票与开票</h3>
+              <p>
+                库存预占、订单超时、支付回调、退款与发票生命周期提供完整底座，适合有交易核对需求的活动。
+              </p>
+            </article>
+            <article class="scenario-card">
+              <span class="mini-label">On-site</span>
+              <h3>高峰签到现场</h3>
+              <p>设备令牌、二维码核验、重复签到阻断和离线批量同步覆盖网络波动及多入口并发场景。</p>
+            </article>
+            <article class="scenario-card">
+              <span class="mini-label">Sovereignty</span>
+              <h3>数据主权部署</h3>
+              <p>
+                本地数据库、对象存储和内部网关可部署在自有环境，适合具有审计、合规或专有网络要求的团队。
+              </p>
+            </article>
+          </div>
+
+          <p class="section-label">适配判断矩阵</p>
+          <div class="table-scroll">
+            <table class="fit-table">
+              <thead>
+                <tr>
+                  <th>场景</th>
+                  <th>适配度</th>
+                  <th>当前证据</th>
+                  <th>落地前提</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>完整大会运营</td>
+                  <td><span class="dot high"></span>高</td>
+                  <td>官网、报名、订单、发票、通知、签到均有独立功能域</td>
+                  <td>配置真实支付、消息与存储集成</td>
+                </tr>
+                <tr>
+                  <td>多组织长期运营</td>
+                  <td><span class="dot high"></span>高</td>
+                  <td>组织隔离、成员关系、RBAC、审计日志</td>
+                  <td>补齐组织级运维规则和备份策略</td>
+                </tr>
+                <tr>
+                  <td>国际化大会</td>
+                  <td><span class="dot mid"></span>中</td>
+                  <td>全球化架构方向明确，管理端当前以中文为主</td>
+                  <td>完成 en-US、时区、货币、地址和区域集成</td>
+                </tr>
+                <tr>
+                  <td>超轻量单次聚会</td>
+                  <td><span class="dot low"></span>较低</td>
+                  <td>系统包含数据库、队列、对象存储和多个运行服务</td>
+                  <td>接受相应运维成本，或提供托管服务</td>
+                </tr>
+                <tr>
+                  <td>零运维 SaaS 采购</td>
+                  <td><span class="dot low"></span>较低</td>
+                  <td>项目交付形态为自托管开源软件</td>
+                  <td>由服务商承担部署、升级与值守</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>产品类别坐标</h3>
+                <p>横轴为运营链路范围，纵轴为流程与一致性复杂度</p>
+              </div>
+              <span class="figure-code">FIG 02 · PRODUCT FIT</span>
+            </div>
+            <svg viewBox="0 0 960 480" role="img" aria-labelledby="fitTitle fitDesc">
+              <title id="fitTitle">TokEMS 产品类别坐标</title>
+              <desc id="fitDesc">TokEMS 位于运营链路范围和业务复杂度都较高的区域。</desc>
+              <line x1="100" y1="404" x2="900" y2="404" class="svg-line" />
+              <line x1="100" y1="404" x2="100" y2="52" class="svg-line" />
+              <path d="M900 404 L888 398 M900 404 L888 410" class="svg-line" />
+              <path d="M100 52 L94 64 M100 52 L106 64" class="svg-line" />
+              <line x1="500" y1="68" x2="500" y2="404" class="svg-line svg-dash" />
+              <line x1="100" y1="228" x2="884" y2="228" class="svg-line svg-dash" />
+              <text x="864" y="438" class="svg-small">运营链路范围</text>
+              <text x="32" y="64" class="svg-small" transform="rotate(-90 32 64)">
+                流程与一致性复杂度
+              </text>
+              <text x="116" y="388" class="svg-tiny">单点工具</text>
+              <text x="812" y="388" class="svg-tiny">全生命周期</text>
+              <text x="116" y="84" class="svg-tiny">高</text>
+              <text x="116" y="384" class="svg-tiny">低</text>
+
+              <rect x="188" y="300" width="156" height="58" rx="8" class="svg-node" />
+              <text x="266" y="324" text-anchor="middle" class="svg-label">内容官网</text>
+              <text x="266" y="342" text-anchor="middle" class="svg-small">展示与线索收集</text>
+
+              <rect x="360" y="252" width="164" height="58" rx="8" class="svg-node" />
+              <text x="442" y="276" text-anchor="middle" class="svg-label">报名工具</text>
+              <text x="442" y="294" text-anchor="middle" class="svg-small">表单与名单</text>
+
+              <rect x="580" y="240" width="164" height="58" rx="8" class="svg-node" />
+              <text x="662" y="264" text-anchor="middle" class="svg-label">现场工具</text>
+              <text x="662" y="282" text-anchor="middle" class="svg-small">签到与设备</text>
+
+              <rect x="636" y="100" width="206" height="84" rx="10" class="svg-node-brand" />
+              <text x="739" y="130" text-anchor="middle" class="svg-label-light">TokEMS</text>
+              <text x="739" y="150" text-anchor="middle" class="svg-small-light">
+                内容 + 交易 + 履约 + 治理
+              </text>
+              <text x="739" y="166" text-anchor="middle" class="svg-small-light">
+                自托管大会运营平台
+              </text>
+            </svg>
+            <figcaption>
+              TokEMS
+              的选型优势来自业务链路完整度。相应的基础设施与运维责任也更高，适合把大会系统视为长期能力的团队。
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="report-section" id="principles" data-section>
+          <header class="section-head">
+            <span class="section-no">03</span>
+            <div>
+              <h2>技术原理与关键流程</h2>
+              <p>
+                系统采用模块化单体 API 与独立 Worker。同步请求负责确定业务事实，事务 Outbox
+                将后续任务可靠交给队列，前台发布内容通过不可变快照读取。
+              </p>
+            </div>
+          </header>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>逻辑架构</h3>
+                <p>体验层、业务层、异步层与数据层</p>
+              </div>
+              <span class="figure-code">FIG 03 · LOGICAL ARCHITECTURE</span>
+            </div>
+            <svg viewBox="0 0 960 520" role="img" aria-labelledby="archTitle archDesc">
+              <title id="archTitle">TokEMS 逻辑架构</title>
+              <desc id="archDesc">
+                Nuxt 公开站和 Vue 管理端通过网关访问 NestJS API，API 使用 PostgreSQL 并通过
+                Outbox、Redis 和 BullMQ 驱动 Worker。
+              </desc>
+
+              <text x="24" y="70" class="svg-tiny">EXPERIENCE</text>
+              <rect x="120" y="40" width="220" height="76" rx="10" class="svg-node" />
+              <text x="230" y="70" text-anchor="middle" class="svg-label">Public Web</text>
+              <text x="230" y="91" text-anchor="middle" class="svg-small">
+                Nuxt · 官网 · 报名 · 票务
+              </text>
+              <rect x="620" y="40" width="220" height="76" rx="10" class="svg-node" />
+              <text x="730" y="70" text-anchor="middle" class="svg-label">Admin Console</text>
+              <text x="730" y="91" text-anchor="middle" class="svg-small">
+                Vue · 运营 · 财务 · 现场
+              </text>
+
+              <path d="M230 116 L230 156 L390 156" class="svg-line-brand" />
+              <path d="M730 116 L730 156 L570 156" class="svg-line-brand" />
+              <path d="M390 156 L378 150 M390 156 L378 162" class="svg-line-brand" />
+              <path d="M570 156 L582 150 M570 156 L582 162" class="svg-line-brand" />
+
+              <rect x="390" y="128" width="180" height="56" rx="8" class="svg-node" />
+              <text x="480" y="153" text-anchor="middle" class="svg-label">Nginx Gateway</text>
+              <text x="480" y="170" text-anchor="middle" class="svg-small">统一入口与路由</text>
+
+              <line x1="480" y1="184" x2="480" y2="224" class="svg-line-brand" />
+              <path d="M480 224 L474 212 M480 224 L486 212" class="svg-line-brand" />
+
+              <text x="24" y="278" class="svg-tiny">BUSINESS CORE</text>
+              <rect x="206" y="224" width="548" height="112" rx="12" class="svg-node-brand" />
+              <text x="480" y="258" text-anchor="middle" class="svg-label-light">
+                NestJS Modular Monolith API
+              </text>
+              <text x="480" y="280" text-anchor="middle" class="svg-small-light">
+                组织 · 活动 · 发布 · 报名 · 交易 · 发票 · 候补 · 履约 · 通知 · 平台
+              </text>
+              <text x="480" y="306" text-anchor="middle" class="svg-small-light">
+                Fastify · Zod Contract · Drizzle ORM · RBAC · OpenAPI
+              </text>
+
+              <path d="M356 336 L356 376" class="svg-line-brand" />
+              <path d="M356 376 L350 364 M356 376 L362 364" class="svg-line-brand" />
+              <path d="M604 336 L604 376" class="svg-line-brand" />
+              <path d="M604 376 L598 364 M604 376 L610 364" class="svg-line-brand" />
+
+              <text x="24" y="430" class="svg-tiny">DATA &amp; ASYNC</text>
+              <rect x="120" y="376" width="224" height="78" rx="10" class="svg-node" />
+              <text x="232" y="405" text-anchor="middle" class="svg-label">PostgreSQL 16</text>
+              <text x="232" y="426" text-anchor="middle" class="svg-small">
+                业务事实 · Outbox · pgvector
+              </text>
+
+              <rect x="368" y="376" width="224" height="78" rx="10" class="svg-node" />
+              <text x="480" y="405" text-anchor="middle" class="svg-label">Redis + BullMQ</text>
+              <text x="480" y="426" text-anchor="middle" class="svg-small">
+                队列 · 延迟任务 · 重试
+              </text>
+
+              <rect x="616" y="376" width="224" height="78" rx="10" class="svg-node" />
+              <text x="728" y="405" text-anchor="middle" class="svg-label">Worker</text>
+              <text x="728" y="426" text-anchor="middle" class="svg-small">
+                通知 · 候补 · 导出 · 存储
+              </text>
+
+              <line x1="344" y1="415" x2="368" y2="415" class="svg-line" />
+              <path d="M368 415 L356 409 M368 415 L356 421" class="svg-line" />
+              <line x1="592" y1="415" x2="616" y2="415" class="svg-line" />
+              <path d="M616 415 L604 409 M616 415 L604 421" class="svg-line" />
+
+              <rect x="616" y="474" width="224" height="32" rx="6" class="svg-node" />
+              <text x="728" y="495" text-anchor="middle" class="svg-small">
+                MinIO · Mail · Regional Integrations
+              </text>
+              <line x1="728" y1="454" x2="728" y2="474" class="svg-line" />
+            </svg>
+            <figcaption>
+              交互入口保持独立，业务事实集中在 API 与 PostgreSQL。异步任务经由 Outbox
+              和队列执行，让通知、候补、导出等工作具备重试与恢复空间。
+            </figcaption>
+          </figure>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>发布快照机制</h3>
+                <p>运营编辑、公开读取与回滚形成清晰边界</p>
+              </div>
+              <span class="figure-code">FIG 04 · RELEASE SNAPSHOT</span>
+            </div>
+            <svg viewBox="0 0 960 392" role="img" aria-labelledby="releaseTitle releaseDesc">
+              <title id="releaseTitle">TokEMS 发布快照机制</title>
+              <desc id="releaseDesc">
+                后台编辑实时草稿，发布时解析模板版本、活动覆盖和业务数据生成不可变 JSON
+                快照，公开站通过 currentReleaseId 读取，回滚只切换指针。
+              </desc>
+              <rect x="56" y="72" width="160" height="74" rx="9" class="svg-node" />
+              <text x="136" y="100" text-anchor="middle" class="svg-label">实时草稿</text>
+              <text x="136" y="122" text-anchor="middle" class="svg-small">运营持续编辑</text>
+
+              <line x1="216" y1="109" x2="288" y2="109" class="svg-line-brand" />
+              <path d="M288 109 L276 103 M288 109 L276 115" class="svg-line-brand" />
+
+              <rect x="288" y="48" width="188" height="122" rx="9" class="svg-node" />
+              <text x="382" y="78" text-anchor="middle" class="svg-label">发布解析器</text>
+              <text x="382" y="101" text-anchor="middle" class="svg-small">模板版本</text>
+              <text x="382" y="120" text-anchor="middle" class="svg-small">活动覆盖</text>
+              <text x="382" y="139" text-anchor="middle" class="svg-small">业务数据</text>
+
+              <line x1="476" y1="109" x2="548" y2="109" class="svg-line-brand" />
+              <path d="M548 109 L536 103 M548 109 L536 115" class="svg-line-brand" />
+
+              <rect x="548" y="72" width="168" height="74" rx="9" class="svg-node-brand" />
+              <text x="632" y="100" text-anchor="middle" class="svg-label-light">不可变 JSON</text>
+              <text x="632" y="122" text-anchor="middle" class="svg-small-light">
+                Release Snapshot
+              </text>
+
+              <line x1="716" y1="109" x2="788" y2="109" class="svg-line-brand" />
+              <path d="M788 109 L776 103 M788 109 L776 115" class="svg-line-brand" />
+
+              <rect x="788" y="72" width="128" height="74" rx="9" class="svg-node" />
+              <text x="852" y="100" text-anchor="middle" class="svg-label">公开站</text>
+              <text x="852" y="122" text-anchor="middle" class="svg-small">稳定读取</text>
+
+              <rect x="548" y="222" width="168" height="68" rx="9" class="svg-node" />
+              <text x="632" y="249" text-anchor="middle" class="svg-label">历史快照</text>
+              <text x="632" y="270" text-anchor="middle" class="svg-small">可审计 · 可回滚</text>
+
+              <path d="M632 146 L632 222" class="svg-line svg-dash" />
+              <path d="M632 222 L626 210 M632 222 L638 210" class="svg-line" />
+              <path d="M716 256 L852 256 L852 146" class="svg-line-brand" />
+              <path d="M852 146 L846 158 M852 146 L858 158" class="svg-line-brand" />
+              <text x="782" y="246" text-anchor="middle" class="svg-small">
+                切换 currentReleaseId
+              </text>
+
+              <line x1="136" y1="250" x2="476" y2="250" class="svg-line svg-dash" />
+              <rect x="56" y="218" width="420" height="64" rx="9" class="svg-node" />
+              <text x="266" y="244" text-anchor="middle" class="svg-label">库存保持实时</text>
+              <text x="266" y="264" text-anchor="middle" class="svg-small">
+                容量、已售、预占和候补 offer 不进入内容快照
+              </text>
+
+              <text x="56" y="350" class="svg-small">编辑速度</text>
+              <line x1="124" y1="346" x2="400" y2="346" class="svg-line" />
+              <text x="548" y="350" class="svg-small">发布稳定性</text>
+              <line x1="628" y1="346" x2="904" y2="346" class="svg-line-brand" />
+            </svg>
+            <figcaption>
+              内容快照让公开页面不受后台继续编辑影响，指针式回滚降低恢复成本。库存继续实时计算，保障票务事实不会随页面版本冻结。
+            </figcaption>
+          </figure>
+
+          <p class="section-label">端到端事务流</p>
+          <div
+            class="journey"
+            role="img"
+            aria-label="端到端事务流：报名、库存预占、订单、支付回调、电子票、通知、签到"
+          >
+            <div class="journey-step">
+              <small>SYNC</small><strong>提交报名</strong><span>Zod 校验</span>
+            </div>
+            <div class="journey-step">
+              <small>LOCK</small><strong>预占库存</strong><span>15 分钟窗口</span>
+            </div>
+            <div class="journey-step">
+              <small>ORDER</small><strong>创建订单</strong><span>幂等键</span>
+            </div>
+            <div class="journey-step">
+              <small>WEBHOOK</small><strong>确认支付</strong><span>HMAC 与金额核对</span>
+            </div>
+            <div class="journey-step">
+              <small>OUTBOX</small><strong>记录事件</strong><span>同事务写入</span>
+            </div>
+            <div class="journey-step">
+              <small>WORKER</small><strong>生成电子票</strong><span>队列重试</span>
+            </div>
+            <div class="journey-step">
+              <small>ON-SITE</small><strong>扫码签到</strong><span>唯一约束</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="report-section" id="stack" data-section>
+          <header class="section-head">
+            <span class="section-no">04</span>
+            <div>
+              <h2>技术栈与工程结构</h2>
+              <p>
+                项目采用 TypeScript
+                Monorepo。四个运行应用和七个共享包在统一契约、数据库模型与工程配置下协作，适合快速迭代和领域拆分。
+              </p>
+            </div>
+          </header>
+
+          <div class="tech-stack" aria-label="TokEMS 技术栈">
+            <div class="tech-layer">
+              <strong>体验层</strong>
+              <div class="tech-tags">
+                <span>Nuxt 4.5.1</span><span>Vue 3.5.40</span><span>Vite 8.1.5</span
+                ><span>SSR / SPA</span>
+              </div>
+            </div>
+            <div class="tech-layer">
+              <strong>接口层</strong>
+              <div class="tech-tags">
+                <span>NestJS 11.1.28</span><span>Fastify 5.10.0</span><span>Zod 4.4.3</span
+                ><span>Swagger / OpenAPI</span>
+              </div>
+            </div>
+            <div class="tech-layer">
+              <strong>数据层</strong>
+              <div class="tech-tags">
+                <span>PostgreSQL 16</span><span>Drizzle 0.45.2</span><span>pgvector</span
+                ><span>35 migrations</span>
+              </div>
+            </div>
+            <div class="tech-layer">
+              <strong>异步层</strong>
+              <div class="tech-tags">
+                <span>BullMQ 5.81.2</span><span>Redis</span><span>Transactional Outbox</span
+                ><span>Worker</span>
+              </div>
+            </div>
+            <div class="tech-layer">
+              <strong>基础设施</strong>
+              <div class="tech-tags">
+                <span>Docker Compose</span><span>Nginx</span><span>MinIO</span><span>Mailpit</span>
+              </div>
+            </div>
+            <div class="tech-layer">
+              <strong>工程质量</strong>
+              <div class="tech-tags">
+                <span>TypeScript 6.0.3</span><span>pnpm 11.9.0</span><span>Turborepo 2.10.7</span
+                ><span>Vitest</span><span>Playwright 1.62.0</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="inventory-groups">
+            <article class="inventory-group">
+              <h3>产品表面</h3>
+              <div class="inventory-pair"><span>公开站页面</span><strong>10</strong></div>
+              <div class="inventory-pair"><span>管理端视图</span><strong>34</strong></div>
+              <div class="inventory-pair"><span>API Controllers</span><strong>23</strong></div>
+            </article>
+            <article class="inventory-group">
+              <h3>数据与契约</h3>
+              <div class="inventory-pair"><span>API Operations</span><strong>167</strong></div>
+              <div class="inventory-pair"><span>数据库表</span><strong>59</strong></div>
+              <div class="inventory-pair"><span>数据库迁移</span><strong>35</strong></div>
+            </article>
+            <article class="inventory-group">
+              <h3>质量资产</h3>
+              <div class="inventory-pair"><span>测试文件</span><strong>38</strong></div>
+              <div class="inventory-pair"><span>视觉截图</span><strong>96</strong></div>
+              <div class="inventory-pair"><span>工作区单元</span><strong>11</strong></div>
+            </article>
+          </div>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>核心文件类型构成</h3>
+                <p>v0.1.0 基线的 apps、packages、tooling 与 docs，报告文件未计入</p>
+              </div>
+              <span class="figure-code">FIG 05 · FILE MIX</span>
+            </div>
+            <div
+              class="bar-chart"
+              role="img"
+              aria-label="核心文件类型数量：TypeScript 100，JSON 57，Vue 55，SQL 35，MJS 27，Markdown 8，CSS 8，HTML 2"
+            >
+              <div class="bar-row">
+                <span class="bar-name">TS</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 100%"></div></div>
+                <span class="bar-value">100</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">JSON</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 57%"></div></div>
+                <span class="bar-value">57</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">VUE</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 55%"></div></div>
+                <span class="bar-value">55</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">SQL</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 35%"></div></div>
+                <span class="bar-value">35</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">MJS</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 27%"></div></div>
+                <span class="bar-value">27</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">MD</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 8%"></div></div>
+                <span class="bar-value">8</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">CSS</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 8%"></div></div>
+                <span class="bar-value">8</span>
+              </div>
+              <div class="bar-row">
+                <span class="bar-name">HTML</span>
+                <div class="bar-track"><div class="bar-fill" style="--value: 2%"></div></div>
+                <span class="bar-value">2</span>
+              </div>
+            </div>
+            <figcaption>
+              TypeScript、Vue 和 SQL
+              构成主要实现资产，契约、界面与数据库迁移均以可审查文本维护，符合开源协作和自动化验证需要。
+            </figcaption>
+          </figure>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>Monorepo 责任划分</h3>
+                <p>四个运行应用，七个共享能力包</p>
+              </div>
+              <span class="figure-code">FIG 06 · REPOSITORY MAP</span>
+            </div>
+            <svg viewBox="0 0 960 436" role="img" aria-labelledby="repoTitle repoDesc">
+              <title id="repoTitle">TokEMS Monorepo 责任划分</title>
+              <desc id="repoDesc">
+                运行应用包括 web、admin、api 和 worker，共享包包括
+                config、contracts、database、html-template、integrations、security 和 ui。
+              </desc>
+              <rect x="44" y="40" width="872" height="132" rx="12" class="svg-node" />
+              <text x="68" y="70" class="svg-small">RUNTIME APPLICATIONS · 4</text>
+
+              <rect x="68" y="92" width="184" height="52" rx="7" class="svg-node-brand" />
+              <text x="160" y="116" text-anchor="middle" class="svg-label-light">apps/web</text>
+              <text x="160" y="133" text-anchor="middle" class="svg-small-light">
+                Public experience
+              </text>
+
+              <rect x="280" y="92" width="184" height="52" rx="7" class="svg-node-brand" />
+              <text x="372" y="116" text-anchor="middle" class="svg-label-light">apps/admin</text>
+              <text x="372" y="133" text-anchor="middle" class="svg-small-light">
+                Operations console
+              </text>
+
+              <rect x="492" y="92" width="184" height="52" rx="7" class="svg-node-brand" />
+              <text x="584" y="116" text-anchor="middle" class="svg-label-light">apps/api</text>
+              <text x="584" y="133" text-anchor="middle" class="svg-small-light">
+                Business core
+              </text>
+
+              <rect x="704" y="92" width="184" height="52" rx="7" class="svg-node-brand" />
+              <text x="796" y="116" text-anchor="middle" class="svg-label-light">apps/worker</text>
+              <text x="796" y="133" text-anchor="middle" class="svg-small-light">
+                Async execution
+              </text>
+
+              <path d="M160 172 L160 208 L796 208 L796 172" class="svg-line svg-dash" />
+              <line x1="372" y1="172" x2="372" y2="208" class="svg-line svg-dash" />
+              <line x1="584" y1="172" x2="584" y2="208" class="svg-line svg-dash" />
+              <line x1="480" y1="208" x2="480" y2="244" class="svg-line-brand" />
+              <path d="M480 244 L474 232 M480 244 L486 232" class="svg-line-brand" />
+
+              <rect x="44" y="244" width="872" height="152" rx="12" class="svg-node" />
+              <text x="68" y="276" class="svg-small">SHARED PACKAGES · 7</text>
+
+              <rect x="68" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="120" y="326" text-anchor="middle" class="svg-label">config</text>
+              <text x="120" y="345" text-anchor="middle" class="svg-tiny">工程配置</text>
+
+              <rect x="188" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="240" y="326" text-anchor="middle" class="svg-label">contracts</text>
+              <text x="240" y="345" text-anchor="middle" class="svg-tiny">共享契约</text>
+
+              <rect x="308" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="360" y="326" text-anchor="middle" class="svg-label">database</text>
+              <text x="360" y="345" text-anchor="middle" class="svg-tiny">模型与迁移</text>
+
+              <rect x="428" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="480" y="326" text-anchor="middle" class="svg-label">html</text>
+              <text x="480" y="345" text-anchor="middle" class="svg-tiny">内容模板</text>
+
+              <rect x="548" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="600" y="326" text-anchor="middle" class="svg-label">integrations</text>
+              <text x="600" y="345" text-anchor="middle" class="svg-tiny">外部连接</text>
+
+              <rect x="668" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="720" y="326" text-anchor="middle" class="svg-label">security</text>
+              <text x="720" y="345" text-anchor="middle" class="svg-tiny">安全原语</text>
+
+              <rect x="788" y="300" width="104" height="60" rx="7" class="svg-node" />
+              <text x="840" y="326" text-anchor="middle" class="svg-label">ui</text>
+              <text x="840" y="345" text-anchor="middle" class="svg-tiny">界面资产</text>
+            </svg>
+            <figcaption>
+              共享包承接跨应用一致性，运行应用保留独立交付边界。该结构适合当前阶段，未来可沿异步任务、集成层或高负载领域继续拆分。
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="report-section" id="functions" data-section>
+          <header class="section-head">
+            <span class="section-no">05</span>
+            <div>
+              <h2>系统功能全景</h2>
+              <p>
+                功能覆盖会前策划、用户报名、交易结算、会中核验和会后治理。后台视图已经形成运营、财务、现场和平台管理的主要工作台。
+              </p>
+            </div>
+          </header>
+
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="mini-label">Experience</span>
+              <h3>大会官网与发布</h3>
+              <p>模板版本、活动覆盖和业务数据组合为稳定公开页面。</p>
+              <ul>
+                <li>主题与页面模板</li>
+                <li>预览、发布、回滚</li>
+                <li>不可变 Release Snapshot</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Registration</span>
+              <h3>报名与资格</h3>
+              <p>版本化表单和条款记录用户提交，支持运营审核与名单管理。</p>
+              <ul>
+                <li>表单与条款版本</li>
+                <li>报名状态管理</li>
+                <li>用户与公开标识</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Commerce</span>
+              <h3>票务与订单</h3>
+              <p>票种库存、订单预占、支付回调、退款和电子票形成交易链路。</p>
+              <ul>
+                <li>库存实时计算</li>
+                <li>幂等订单与回调</li>
+                <li>支付和退款状态</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Invoice</span>
+              <h3>发票与导出</h3>
+              <p>申请、审核、开票和批量导出支持财务团队日常处理。</p>
+              <ul>
+                <li>发票生命周期</li>
+                <li>异步导出任务</li>
+                <li>对象存储交付</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Waitlist</span>
+              <h3>候补与释放</h3>
+              <p>排队顺序、限时 offer 和单次领取令牌提升满额活动的转化率。</p>
+              <ul>
+                <li>首位自动邀请</li>
+                <li>两小时保留窗口</li>
+                <li>令牌哈希与防重放</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Fulfillment</span>
+              <h3>电子票与现场签到</h3>
+              <p>二维码、设备授权、重复检测和离线批量同步覆盖现场网络波动。</p>
+              <ul>
+                <li>多签到清单</li>
+                <li>设备级令牌</li>
+                <li>离线批次幂等</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Engagement</span>
+              <h3>通知与触达</h3>
+              <p>业务事件通过 Outbox 驱动异步消息，并保留重试与审计线索。</p>
+              <ul>
+                <li>通知模板</li>
+                <li>异步任务队列</li>
+                <li>失败重试</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Platform</span>
+              <h3>组织、安全与治理</h3>
+              <p>多组织、RBAC、系统设置、操作审计和接口文档构成管理底座。</p>
+              <ul>
+                <li>组织级数据隔离</li>
+                <li>权限与委派上限</li>
+                <li>审计日志与 Swagger</li>
+              </ul>
+            </article>
+            <article class="feature-card">
+              <span class="mini-label">Operations</span>
+              <h3>运营工作台</h3>
+              <p>活动、用户、报名、订单、发票、通知和系统状态聚合到管理端。</p>
+              <ul>
+                <li>34 个管理视图</li>
+                <li>发布与回滚操作</li>
+                <li>多角色协作入口</li>
+              </ul>
+            </article>
+          </div>
+
+          <p class="section-label">角色与功能域</p>
+          <div class="table-scroll">
+            <table class="role-table" aria-label="角色与功能域矩阵">
+              <thead>
+                <tr>
+                  <th>功能域</th>
+                  <th>内容运营</th>
+                  <th>报名运营</th>
+                  <th>财务</th>
+                  <th>现场团队</th>
+                  <th>系统管理员</th>
+                  <th>参会者</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>官网与发布</td>
+                  <td class="role-mark">●</td>
+                  <td>○</td>
+                  <td class="role-empty">·</td>
+                  <td class="role-empty">·</td>
+                  <td>○</td>
+                  <td>浏览</td>
+                </tr>
+                <tr>
+                  <td>报名与用户</td>
+                  <td>○</td>
+                  <td class="role-mark">●</td>
+                  <td>○</td>
+                  <td>○</td>
+                  <td>○</td>
+                  <td>提交</td>
+                </tr>
+                <tr>
+                  <td>票务与订单</td>
+                  <td class="role-empty">·</td>
+                  <td class="role-mark">●</td>
+                  <td class="role-mark">●</td>
+                  <td>○</td>
+                  <td>○</td>
+                  <td>购买</td>
+                </tr>
+                <tr>
+                  <td>发票与退款</td>
+                  <td class="role-empty">·</td>
+                  <td>○</td>
+                  <td class="role-mark">●</td>
+                  <td class="role-empty">·</td>
+                  <td>○</td>
+                  <td>申请</td>
+                </tr>
+                <tr>
+                  <td>候补与通知</td>
+                  <td>○</td>
+                  <td class="role-mark">●</td>
+                  <td class="role-empty">·</td>
+                  <td>○</td>
+                  <td>○</td>
+                  <td>接收</td>
+                </tr>
+                <tr>
+                  <td>签到与设备</td>
+                  <td class="role-empty">·</td>
+                  <td>○</td>
+                  <td class="role-empty">·</td>
+                  <td class="role-mark">●</td>
+                  <td>○</td>
+                  <td>出示票码</td>
+                </tr>
+                <tr>
+                  <td>权限与审计</td>
+                  <td class="role-empty">·</td>
+                  <td class="role-empty">·</td>
+                  <td>查看</td>
+                  <td class="role-empty">·</td>
+                  <td class="role-mark">●</td>
+                  <td class="role-empty">·</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="report-section" id="data-security" data-section>
+          <header class="section-head">
+            <span class="section-no">06</span>
+            <div>
+              <h2>数据一致性与安全设计</h2>
+              <p>
+                项目在身份、权限、交易、异步任务和现场设备五个层面设置控制点。高风险路径采用服务器重读、签名校验、哈希存储、时间窗口和幂等约束。
+              </p>
+            </div>
+          </header>
+
+          <div class="mechanism-grid">
+            <article class="mechanism-card">
+              <span class="mini-label">Inventory</span>
+              <h3>库存一致性</h3>
+              <p>
+                余量计算同时扣除已售、有效预占和候补 offer，创建订单时使用行锁与 advisory lock
+                控制竞争。
+              </p>
+              <div class="formula">capacity − sold − reservations − offers</div>
+              <ul>
+                <li>15 分钟订单预占</li>
+                <li>状态过期后释放</li>
+                <li>事务内更新业务事实</li>
+              </ul>
+            </article>
+            <article class="mechanism-card">
+              <span class="mini-label">Webhook</span>
+              <h3>支付回调防护</h3>
+              <p>支付回调校验 HMAC、时间窗口、金额、币种和外部交易号，重复请求落到相同结果。</p>
+              <div class="formula">HMAC + 5 min + amount + currency + txn id</div>
+              <ul>
+                <li>幂等键</li>
+                <li>外部交易号唯一</li>
+                <li>敏感错误收敛</li>
+              </ul>
+            </article>
+            <article class="mechanism-card">
+              <span class="mini-label">Check-in</span>
+              <h3>现场同步幂等</h3>
+              <p>
+                签到记录由票据和签到清单唯一约束，离线批次同时校验组织、活动、设备、批次与请求体哈希。
+              </p>
+              <div class="formula">org + event + device + batch + body hash</div>
+              <ul>
+                <li>设备令牌哈希</li>
+                <li>重复签到阻断</li>
+                <li>100 设备验收场景</li>
+              </ul>
+            </article>
+          </div>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>纵深安全控制</h3>
+                <p>从入口到数据的六层控制</p>
+              </div>
+              <span class="figure-code">FIG 07 · DEFENSE LAYERS</span>
+            </div>
+            <div class="layer-map" role="img" aria-label="TokEMS 六层安全控制">
+              <div class="security-layer" data-level="01">
+                <strong>边缘入口</strong
+                ><span>Helmet、CORS、body limit、trusted proxy、request ID、rate limit</span>
+              </div>
+              <div class="security-layer" data-level="02">
+                <strong>身份认证</strong
+                ><span>JWT、bcrypt、生产环境强密钥、服务器端重读成员关系</span>
+              </div>
+              <div class="security-layer" data-level="03">
+                <strong>组织授权</strong><span>组织范围查询、通配权限、委派上限、资源级检查</span>
+              </div>
+              <div class="security-layer" data-level="04">
+                <strong>交易防护</strong
+                ><span>幂等键、行锁、advisory lock、HMAC、时间窗口、唯一约束</span>
+              </div>
+              <div class="security-layer" data-level="05">
+                <strong>数据与令牌</strong
+                ><span>SHA-256 摘要、限时令牌、最小范围访问、对象存储隔离</span>
+              </div>
+              <div class="security-layer" data-level="06">
+                <strong>治理与审计</strong
+                ><span>操作审计、错误脱敏、构建元数据、AI 草稿人工确认</span>
+              </div>
+            </div>
+            <figcaption>
+              控制点分布在网络、应用、业务事务和数据存储各层。生产环境仍需结合部署边界完成密钥托管、日志留存、漏洞响应和恢复演练。
+            </figcaption>
+          </figure>
+
+          <p class="section-label">关键控制矩阵</p>
+          <div class="table-scroll">
+            <table class="control-table">
+              <thead>
+                <tr>
+                  <th>风险</th>
+                  <th>控制手段</th>
+                  <th>保护对象</th>
+                  <th>验证关注点</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>跨组织访问</td>
+                  <td>服务端重读成员关系，查询强制组织范围</td>
+                  <td>用户、活动、订单和配置</td>
+                  <td>越权测试与审计日志</td>
+                </tr>
+                <tr>
+                  <td>超卖</td>
+                  <td>行锁、advisory lock、实时余量公式</td>
+                  <td>票种库存</td>
+                  <td>高并发下的预占与过期释放</td>
+                </tr>
+                <tr>
+                  <td>回调伪造</td>
+                  <td>HMAC、五分钟窗口、金额币种核对</td>
+                  <td>订单支付状态</td>
+                  <td>签名轮换与重放测试</td>
+                </tr>
+                <tr>
+                  <td>候补令牌泄露</td>
+                  <td>通知仅发送原值，数据库保存 SHA-256 与尾四位</td>
+                  <td>限时购买资格</td>
+                  <td>单次领取与过期行为</td>
+                </tr>
+                <tr>
+                  <td>离线重复同步</td>
+                  <td>设备、批次、请求体哈希联合幂等</td>
+                  <td>签到记录</td>
+                  <td>网络恢复后的冲突处理</td>
+                </tr>
+                <tr>
+                  <td>异步消息丢失</td>
+                  <td>事务 Outbox、队列重试、Worker 消费</td>
+                  <td>通知、候补、导出</td>
+                  <td>积压、死信与恢复监控</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>领域上下文地图</h3>
+                <p>11 个业务上下文按职责归组</p>
+              </div>
+              <span class="figure-code">FIG 08 · DOMAIN CONTEXTS</span>
+            </div>
+            <div class="domain-map" role="img" aria-label="TokEMS 的 11 个领域上下文">
+              <article class="domain-group">
+                <h3>策划与体验</h3>
+                <div class="domain-pill">Organization · 组织与成员</div>
+                <div class="domain-pill">Event Planning · 活动策划</div>
+                <div class="domain-pill">Experience · 前台体验</div>
+                <div class="domain-pill">Release · 发布快照</div>
+              </article>
+              <article class="domain-group">
+                <h3>转化与交易</h3>
+                <div class="domain-pill">Registration · 报名</div>
+                <div class="domain-pill">Commerce · 票务与订单</div>
+                <div class="domain-pill">Invoice · 发票</div>
+                <div class="domain-pill">Waitlist · 候补</div>
+              </article>
+              <article class="domain-group">
+                <h3>履约与平台</h3>
+                <div class="domain-pill">Fulfillment · 电子票与签到</div>
+                <div class="domain-pill">Engagement · 通知触达</div>
+                <div class="domain-pill">Platform · 安全与治理</div>
+              </article>
+            </div>
+            <figcaption>
+              领域划分围绕业务语言展开，能够减少页面模块直接侵入数据层。后续拆分服务时，可优先观察
+              Commerce、Fulfillment 和 Engagement 的负载与独立演进需求。
+            </figcaption>
+          </figure>
+        </section>
+
+        <section class="report-section" id="delivery" data-section>
+          <header class="section-head">
+            <span class="section-no">07</span>
+            <div>
+              <h2>部署拓扑与质量保障</h2>
+              <p>
+                Docker Compose
+                统一编排网关、应用、数据库、队列、对象存储和邮件捕获服务。初始化任务、健康依赖、构建元数据和发布清单为可重复交付提供基础。
+              </p>
+            </div>
+          </header>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>自托管部署拓扑</h3>
+                <p>默认公开端口绑定 127.0.0.1，由外部入口决定暴露范围</p>
+              </div>
+              <span class="figure-code">FIG 09 · DEPLOYMENT</span>
+            </div>
+            <svg viewBox="0 0 960 488" role="img" aria-labelledby="deployTitle deployDesc">
+              <title id="deployTitle">TokEMS 自托管部署拓扑</title>
+              <desc id="deployDesc">
+                用户访问 Nginx 网关，网关路由到 web、admin 和 API，API 连接
+                PostgreSQL、Redis、MinIO，Worker 消费队列并发送邮件。
+              </desc>
+
+              <rect x="52" y="188" width="140" height="72" rx="10" class="svg-node" />
+              <text x="122" y="216" text-anchor="middle" class="svg-label">Users</text>
+              <text x="122" y="238" text-anchor="middle" class="svg-small">
+                Web · Admin · Device
+              </text>
+
+              <line x1="192" y1="224" x2="252" y2="224" class="svg-line-brand" />
+              <path d="M252 224 L240 218 M252 224 L240 230" class="svg-line-brand" />
+
+              <rect x="252" y="172" width="152" height="104" rx="10" class="svg-node-brand" />
+              <text x="328" y="207" text-anchor="middle" class="svg-label-light">Nginx</text>
+              <text x="328" y="228" text-anchor="middle" class="svg-small-light">Gateway</text>
+              <text x="328" y="248" text-anchor="middle" class="svg-small-light">
+                127.0.0.1:8088
+              </text>
+
+              <path d="M404 224 L452 224 L452 76 L500 76" class="svg-line" />
+              <path d="M500 76 L488 70 M500 76 L488 82" class="svg-line" />
+              <path d="M404 224 L500 224" class="svg-line" />
+              <path d="M500 224 L488 218 M500 224 L488 230" class="svg-line" />
+              <path d="M404 224 L452 224 L452 372 L500 372" class="svg-line" />
+              <path d="M500 372 L488 366 M500 372 L488 378" class="svg-line" />
+
+              <rect x="500" y="44" width="154" height="64" rx="9" class="svg-node" />
+              <text x="577" y="70" text-anchor="middle" class="svg-label">Web</text>
+              <text x="577" y="90" text-anchor="middle" class="svg-small">Nuxt runtime</text>
+
+              <rect x="500" y="192" width="154" height="64" rx="9" class="svg-node" />
+              <text x="577" y="218" text-anchor="middle" class="svg-label">Admin</text>
+              <text x="577" y="238" text-anchor="middle" class="svg-small">Vue assets</text>
+
+              <rect x="500" y="340" width="154" height="64" rx="9" class="svg-node-brand" />
+              <text x="577" y="366" text-anchor="middle" class="svg-label-light">API</text>
+              <text x="577" y="386" text-anchor="middle" class="svg-small-light">
+                NestJS + Fastify
+              </text>
+
+              <line x1="654" y1="372" x2="716" y2="372" class="svg-line-brand" />
+              <path d="M716 372 L704 366 M716 372 L704 378" class="svg-line-brand" />
+
+              <rect x="716" y="340" width="176" height="64" rx="9" class="svg-node" />
+              <text x="804" y="366" text-anchor="middle" class="svg-label">PostgreSQL</text>
+              <text x="804" y="386" text-anchor="middle" class="svg-small">Persistent volume</text>
+
+              <rect x="716" y="44" width="176" height="64" rx="9" class="svg-node" />
+              <text x="804" y="70" text-anchor="middle" class="svg-label">Redis + BullMQ</text>
+              <text x="804" y="90" text-anchor="middle" class="svg-small">Queue volume</text>
+
+              <rect x="716" y="140" width="176" height="64" rx="9" class="svg-node" />
+              <text x="804" y="166" text-anchor="middle" class="svg-label">Worker</text>
+              <text x="804" y="186" text-anchor="middle" class="svg-small">Async consumers</text>
+
+              <rect x="716" y="236" width="176" height="64" rx="9" class="svg-node" />
+              <text x="804" y="262" text-anchor="middle" class="svg-label">MinIO + Mail</text>
+              <text x="804" y="282" text-anchor="middle" class="svg-small">
+                Files · Notifications
+              </text>
+
+              <path d="M654 372 L680 372 L680 76 L716 76" class="svg-line svg-dash" />
+              <path d="M716 76 L704 70 M716 76 L704 82" class="svg-line" />
+              <line x1="804" y1="108" x2="804" y2="140" class="svg-line" />
+              <path d="M804 140 L798 128 M804 140 L810 128" class="svg-line" />
+              <line x1="804" y1="204" x2="804" y2="236" class="svg-line" />
+              <path d="M804 236 L798 224 M804 236 L810 224" class="svg-line" />
+
+              <rect x="500" y="432" width="392" height="32" rx="6" class="svg-node" />
+              <text x="696" y="453" text-anchor="middle" class="svg-small">
+                db-init · minio-init · health checks · release manifest
+              </text>
+            </svg>
+            <figcaption>
+              入口、运行服务和持久化组件具有清晰边界。生产环境应将
+              TLS、WAF、密钥管理、监控告警与异地备份放到这张拓扑的外围控制面。
+            </figcaption>
+          </figure>
+
+          <div class="table-scroll">
+            <table class="deploy-table">
+              <thead>
+                <tr>
+                  <th>入口或组件</th>
+                  <th>本地访问</th>
+                  <th>用途</th>
+                  <th>生产建议</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Public Web</td>
+                  <td><code>localhost:8088</code></td>
+                  <td>大会官网与用户流程</td>
+                  <td>TLS、CDN、缓存与域名</td>
+                </tr>
+                <tr>
+                  <td>Admin</td>
+                  <td><code>admin.localhost:8088/admin/login</code></td>
+                  <td>运营管理端</td>
+                  <td>独立子域、访问控制、MFA 规划</td>
+                </tr>
+                <tr>
+                  <td>API</td>
+                  <td><code>localhost:8088/api/v1</code></td>
+                  <td>业务接口</td>
+                  <td>限流、审计、追踪和容量告警</td>
+                </tr>
+                <tr>
+                  <td>Swagger</td>
+                  <td><code>localhost:8088/api/docs</code></td>
+                  <td>接口文档</td>
+                  <td>按环境控制暴露</td>
+                </tr>
+                <tr>
+                  <td>MinIO Console</td>
+                  <td><code>localhost:19001</code></td>
+                  <td>对象存储管理</td>
+                  <td>内网访问、备份与生命周期策略</td>
+                </tr>
+                <tr>
+                  <td>Mailpit</td>
+                  <td><code>localhost:8025</code></td>
+                  <td>开发邮件捕获</td>
+                  <td>替换为真实邮件服务商</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="section-label">发布质量流</p>
+          <div
+            class="quality-flow"
+            role="img"
+            aria-label="TokEMS 发布质量流：格式、静态检查、测试、构建、迁移与发布清单"
+          >
+            <div class="quality-step">
+              <small>01</small><strong>Format</strong><span>代码与文档格式</span>
+            </div>
+            <div class="quality-step">
+              <small>02</small><strong>Lint / Types</strong><span>静态规则与类型</span>
+            </div>
+            <div class="quality-step">
+              <small>03</small><strong>Unit / Integration</strong><span>业务与接口测试</span>
+            </div>
+            <div class="quality-step">
+              <small>04</small><strong>Visual / E2E</strong><span>关键页面与路径</span>
+            </div>
+            <div class="quality-step">
+              <small>05</small><strong>Build / Migrate</strong><span>产物与数据库</span>
+            </div>
+            <div class="quality-step">
+              <small>06</small><strong>Manifest</strong><span>哈希与构建元数据</span>
+            </div>
+          </div>
+
+          <div class="signal-grid" aria-label="运行信号">
+            <div class="signal"><strong>BUILD_SHA</strong><span>关联运行实例与提交</span></div>
+            <div class="signal"><strong>BUILD_TIME</strong><span>确认产物生成时间</span></div>
+            <div class="signal"><strong>MIGRATION</strong><span>记录数据库结构版本</span></div>
+            <div class="signal"><strong>REQUEST_ID</strong><span>串联接口日志和故障线索</span></div>
+          </div>
+        </section>
+
+        <section class="report-section" id="global" data-section>
+          <header class="section-head">
+            <span class="section-no">08</span>
+            <div>
+              <h2>全球化与多语言路线</h2>
+              <p>
+                项目当前以中文管理体验为主。全球化需要同时处理界面文案、通知模板、时间与货币格式、地址模型、区域支付及数据部署策略。
+              </p>
+            </div>
+          </header>
+
+          <div class="timeline" aria-label="TokEMS 国际化路线图">
+            <article class="timeline-item">
+              <small>FOUNDATION · CURRENT</small>
+              <h3>本地化基础</h3>
+              <p>提取硬编码文案，建立 locale 注册、命名空间、回退语言和翻译质量规则。</p>
+            </article>
+            <article class="timeline-item planned">
+              <small>PHASE 1 · PLANNED</small>
+              <h3>管理端双语</h3>
+              <p>优先交付 zh-CN 与 en-US，覆盖导航、表单、状态、错误、帮助文本和可访问性标签。</p>
+            </article>
+            <article class="timeline-item planned">
+              <small>PHASE 2 · PLANNED</small>
+              <h3>参会者体验</h3>
+              <p>扩展公开站、报名条款、通知模板、时区、货币和日期格式，并支持活动级语言配置。</p>
+            </article>
+            <article class="timeline-item planned">
+              <small>PHASE 3 · PLANNED</small>
+              <h3>区域化集成</h3>
+              <p>按地区接入支付、邮件、短信、税务和地址规范，规划数据驻留与隐私合规能力。</p>
+            </article>
+          </div>
+
+          <figure class="figure">
+            <div class="figure-header">
+              <div>
+                <h3>全球化能力分层</h3>
+                <p>语言只是第一层，交易与合规决定真实可用范围</p>
+              </div>
+              <span class="figure-code">FIG 10 · GLOBAL READINESS</span>
+            </div>
+            <svg viewBox="0 0 960 420" role="img" aria-labelledby="globalTitle globalDesc">
+              <title id="globalTitle">TokEMS 全球化能力分层</title>
+              <desc id="globalDesc">
+                全球化能力由界面语言、内容与通知、时间与货币、区域集成、合规与数据驻留五层构成。
+              </desc>
+              <rect x="80" y="318" width="800" height="62" rx="8" class="svg-node-brand" />
+              <text x="480" y="344" text-anchor="middle" class="svg-label-light">
+                01 · 界面语言
+              </text>
+              <text x="480" y="364" text-anchor="middle" class="svg-small-light">
+                locale · fallback · terminology · accessibility
+              </text>
+
+              <rect x="136" y="246" width="688" height="56" rx="8" class="svg-node" />
+              <text x="480" y="270" text-anchor="middle" class="svg-label">02 · 内容与通知</text>
+              <text x="480" y="289" text-anchor="middle" class="svg-small">
+                活动页面 · 表单条款 · 邮件短信 · 模板版本
+              </text>
+
+              <rect x="192" y="178" width="576" height="52" rx="8" class="svg-node" />
+              <text x="480" y="200" text-anchor="middle" class="svg-label">
+                03 · 时间、货币与地址
+              </text>
+              <text x="480" y="217" text-anchor="middle" class="svg-small">
+                timezone · currency · number · address
+              </text>
+
+              <rect x="248" y="114" width="464" height="48" rx="8" class="svg-node" />
+              <text x="480" y="135" text-anchor="middle" class="svg-label">04 · 区域服务集成</text>
+              <text x="480" y="151" text-anchor="middle" class="svg-small">
+                payment · mail · SMS · tax
+              </text>
+
+              <rect x="304" y="54" width="352" height="44" rx="8" class="svg-node" />
+              <text x="480" y="80" text-anchor="middle" class="svg-label">05 · 合规与数据驻留</text>
+
+              <text x="64" y="351" text-anchor="end" class="svg-small">基础</text>
+              <text x="292" y="80" text-anchor="end" class="svg-small">区域运营</text>
+            </svg>
+            <figcaption>
+              双语界面能够打开第一扇门，支付、税务、地址和数据驻留决定产品能否在目标地区完成真实交易与长期运营。
+            </figcaption>
+          </figure>
+
+          <div class="callout">
+            <span class="callout-icon" aria-hidden="true">序</span>
+            <div>
+              <strong>推荐实施顺序</strong>
+              <p>
+                先统一翻译键、术语和格式化基础，再从管理端双语扩展到公开站与通知，最后按目标市场逐个交付区域服务商和合规能力。每个阶段都配套截图回归与缺失键检查。
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="report-section" id="conclusion" data-section>
+          <header class="section-head">
+            <span class="section-no">09</span>
+            <div>
+              <h2>综合判断与开源演进重点</h2>
+              <p>
+                TokEMS
+                已具备清晰定位、完整核心链路和较扎实的工程基础。公开预览阶段的重点是缩短首次运行路径、提升生产可见性，并逐步验证真实大会负载。
+              </p>
+            </div>
+          </header>
+
+          <div class="summary-grid">
+            <article class="summary-card">
+              <span class="mini-label">Strengths</span>
+              <h3>当前优势</h3>
+              <ul>
+                <li>大会生命周期覆盖完整</li>
+                <li>交易与现场流程具有一致性控制</li>
+                <li>模块化单体便于早期交付与理解</li>
+                <li>自托管、开放接口与 AGPL 许可边界清楚</li>
+                <li>质量检查和发布清单已有基础</li>
+              </ul>
+            </article>
+            <article class="summary-card">
+              <span class="mini-label">Production</span>
+              <h3>生产责任</h3>
+              <ul>
+                <li>配置真实支付、邮件、短信和对象存储</li>
+                <li>建立日志、指标、追踪、队列积压告警</li>
+                <li>执行容量、故障恢复和安全演练</li>
+                <li>制定备份、升级与数据库迁移流程</li>
+                <li>依据部署地区完成隐私与税务评估</li>
+              </ul>
+            </article>
+            <article class="summary-card">
+              <span class="mini-label">Next</span>
+              <h3>优先演进</h3>
+              <ul>
+                <li>完善一键启动、演示数据与首次体验</li>
+                <li>补充架构决策记录和贡献者指南</li>
+                <li>推进管理端 zh-CN / en-US 双语</li>
+                <li>发布可观测性基线和容量数据</li>
+                <li>围绕真实大会案例沉淀部署手册</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">
+            <span class="callout-icon" aria-hidden="true">结</span>
+            <div>
+              <strong>一句话结论</strong>
+              <p>
+                TokEMS
+                已形成“内容发布、交易一致性、履约现场、组织治理”四条主线，适合继续建设为面向全球活动团队的开源大会运营基础设施。
+              </p>
+            </div>
+          </div>
+
+          <div class="source-list">
+            <strong>报告口径与来源</strong>
+            <p>
+              本报告描述 2026-08-01 工作区中的 v0.1.0
+              代码与公开文档。路线图和适配度属于基于当前实现的分析判断，规划项均已标记。
+            </p>
+            <ul>
+              <li><code>README.md</code>：项目定位、功能范围、快速开始和版本状态</li>
+              <li>
+                <code>docs/architecture.md</code
+                >、<code>docs/deployment.md</code>、<code>docs/security.md</code>：架构、部署与安全机制
+              </li>
+              <li>
+                <code>docs/generated/project-inventory.json</code>：页面、视图、数据库、API
+                和测试资产计数
+              </li>
+              <li><code>package.json</code> 与各工作区清单：框架及工具版本</li>
+              <li>
+                <a
+                  href="https://github.com/yaojingang/TokEMS/releases/tag/v0.1.0"
+                  target="_blank"
+                  rel="noreferrer"
+                  >v0.1.0 Public Preview Release</a
+                >
+              </li>
+            </ul>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <footer class="footer">
+      <div>
+        <strong>TokEMS Visual Report</strong>
+        <span>Open-source conference operations infrastructure.</span>
+      </div>
+      <div>
+        Generated with the Kami visual method ·
+        <a href="https://github.com/yaojingang/TokEMS" target="_blank" rel="noreferrer"
+          >github.com/yaojingang/TokEMS</a
+        >
+      </div>
+    </footer>
+
+    <a class="back-top" id="backTop" href="#top" aria-label="返回顶部">↑</a>
+
+    <script>
+      (function () {
+        var progress = document.getElementById('readingProgress');
+        var backTop = document.getElementById('backTop');
+        var printButton = document.getElementById('printButton');
+        var tocLinks = Array.prototype.slice.call(document.querySelectorAll('#tocNav a'));
+        var sections = Array.prototype.slice.call(document.querySelectorAll('[data-section]'));
+
+        function updateProgress() {
+          var doc = document.documentElement;
+          var scrollable = doc.scrollHeight - doc.clientHeight;
+          var ratio = scrollable > 0 ? doc.scrollTop / scrollable : 0;
+          progress.style.width = Math.min(100, Math.max(0, ratio * 100)) + '%';
+          backTop.classList.toggle('visible', doc.scrollTop > 620);
+        }
+
+        window.addEventListener('scroll', updateProgress, { passive: true });
+        window.addEventListener('resize', updateProgress);
+        updateProgress();
+
+        if (printButton) {
+          printButton.addEventListener('click', function () {
+            window.print();
+          });
+        }
+
+        if ('IntersectionObserver' in window) {
+          var observer = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (entry) {
+                if (!entry.isIntersecting) return;
+                tocLinks.forEach(function (link) {
+                  var active = link.getAttribute('href') === '#' + entry.target.id;
+                  link.classList.toggle('active', active);
+                  if (active) link.setAttribute('aria-current', 'true');
+                  else link.removeAttribute('aria-current');
+                });
+              });
+            },
+            { rootMargin: '-18% 0px -72% 0px', threshold: 0 },
+          );
+
+          sections.forEach(function (section) {
+            observer.observe(section);
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

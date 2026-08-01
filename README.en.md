@@ -12,6 +12,71 @@ TokEMS is built for conference organizers, operations teams, and event technolog
 
 > `v0.1.0` is an early preview for local evaluation, customization, and pre-production validation. Production deployments require region-specific security, compliance, payment, messaging, backup, and monitoring configuration. The admin console is currently Simplified Chinese-first, with English support on the near-term roadmap.
 
+## Project overview
+
+TokEMS covers the conference journey from content publishing to on-site verification. The public site handles content and registration, the API owns business state such as organizations, inventory, orders, and tickets, and the Worker runs notifications, waitlist jobs, exports, and other asynchronous work.
+
+The [full visual report](docs/tokems-visual-report.html) covers use cases, system design, technology, product areas, security controls, deployment, and the internationalization roadmap. It is a self-contained HTML file that can be downloaded, opened locally, or printed to PDF.
+
+### Where it fits
+
+| Scenario                       | What TokEMS provides                                                                                |
+| ------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Medium and large conferences   | One workflow for the event site, registration, paid tickets, notifications, invoicing, and check-in |
+| Organizers running many events | Multi-organization isolation, fine-grained RBAC, reusable templates, rollback, and audit records    |
+| Event technology providers     | Self-hosted deployment, modular applications, shared contracts, and payment or messaging boundaries |
+| Busy or unreliable venues      | Device tokens, QR verification, duplicate detection, offline batch sync, and multi-device testing   |
+
+### Current project size
+
+These numbers come from [`docs/generated/project-inventory.json`](docs/generated/project-inventory.json) and are checked by `pnpm docs:check`.
+
+| Public pages | Admin views | API controllers | API operations | Database tables | Migrations | Test files |
+| -----------: | ----------: | --------------: | -------------: | --------------: | ---------: | ---------: |
+|           10 |          34 |              23 |            167 |              59 |         35 |         38 |
+
+### End-to-end workflow
+
+```mermaid
+flowchart LR
+    Publish["Publish content"] --> Reach["Reach attendees"]
+    Reach --> Register["Registration and eligibility"]
+    Register --> Reserve["Inventory hold"]
+    Reserve --> Commerce["Order and payment"]
+    Commerce --> Deliver["Ticket, invoice, and notification"]
+    Deliver --> CheckIn["On-site check-in"]
+    CheckIn --> Audit["Audit and review"]
+```
+
+### System architecture
+
+```mermaid
+flowchart TB
+    subgraph Experience["Experience layer"]
+        Web["Public Web<br/>Nuxt 4 + Vue 3"]
+        Admin["Admin Console<br/>Vue 3 + Vite"]
+    end
+
+    Gateway["Nginx Gateway"]
+    API["NestJS 11 Modular Monolith API"]
+    PostgreSQL[("PostgreSQL 16 + pgvector")]
+    Outbox["Transactional Outbox"]
+    Queue["Redis + BullMQ"]
+    Worker["Worker"]
+    Integrations["MinIO / Email / Payment / Regional Services"]
+
+    Web --> Gateway
+    Admin --> Gateway
+    Gateway --> API
+    API --> PostgreSQL
+    API --> Outbox
+    Outbox --> Queue
+    Queue --> Worker
+    Worker --> Integrations
+```
+
+Immutable release snapshots keep public content stable while ticket inventory stays live. Locks, signatures, hashes, time windows, and idempotency keys protect order holds, payment callbacks, waitlist claims, and offline check-in.
+
 ## Features
 
 | Area               | Available today                                                                                                                              |
