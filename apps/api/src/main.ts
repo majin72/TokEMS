@@ -77,6 +77,8 @@ async function bootstrap() {
       'X-Payment-Timestamp',
       'X-Payment-Signature',
       'X-CSRF-Token',
+      'X-Wechat-OAuth-Session',
+      'X-Payment-Channel',
     ],
     exposedHeaders: ['Content-Disposition', 'X-Export-Row-Count'],
   });

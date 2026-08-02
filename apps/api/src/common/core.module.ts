@@ -15,6 +15,7 @@ import { CustomerAuthGuard } from './customer-auth.guard.js';
 import { CustomerAccountService } from './customer-account.service.js';
 import { AliyunSmsService } from './aliyun-sms.service.js';
 import { HtmlTemplateOperationsService } from './html-template-operations.service.js';
+import { RedisService } from './redis.service.js';
 
 @Global()
 @Module({
@@ -28,6 +29,7 @@ import { HtmlTemplateOperationsService } from './html-template-operations.servic
     InvoiceOperationsService,
     TemplateOperationsService,
     IdempotencyService,
+    RedisService,
     WeChatPayService,
     AuthGuard,
     CustomerAuthService,
@@ -46,6 +48,7 @@ import { HtmlTemplateOperationsService } from './html-template-operations.servic
     InvoiceOperationsService,
     TemplateOperationsService,
     IdempotencyService,
+    RedisService,
     WeChatPayService,
     AuthGuard,
     CustomerAuthService,

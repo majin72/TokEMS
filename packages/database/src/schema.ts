@@ -66,7 +66,14 @@ export const paymentStatus = pgEnum('payment_status', [
   'succeeded',
   'failed',
   'refunded',
+  'preparing',
+  'query_pending',
+  'close_pending',
+  'closed',
+  'unknown',
 ]);
+
+export const paymentChannel = pgEnum('payment_channel', ['native', 'jsapi', 'h5', 'free', 'mock']);
 
 export const membershipStatus = pgEnum('membership_status', ['active', 'disabled']);
 export const customerStatus = pgEnum('customer_status', ['active', 'blocked', 'closed']);
@@ -971,12 +978,12 @@ export const registrations = pgTable(
       table.attendeeMobileE164,
       table.createdAt,
     ),
-    uniqueIndex('registrations_event_mobile_active_unique')
+    index('registrations_event_mobile_idx')
       .on(table.eventId, table.attendeeMobileE164)
-      .where(sql`${table.attendeeMobileE164} <> '' and ${table.status} <> 'cancelled'`),
-    uniqueIndex('registrations_event_customer_active_unique')
+      .where(sql`${table.attendeeMobileE164} <> ''`),
+    index('registrations_event_customer_idx')
       .on(table.eventId, table.customerUserId)
-      .where(sql`${table.customerUserId} is not null and ${table.status} <> 'cancelled'`),
+      .where(sql`${table.customerUserId} is not null`),
   ],
 );
 
@@ -1068,15 +1075,57 @@ export const payments = pgTable(
       .notNull()
       .references(() => orders.id, { onDelete: 'cascade' }),
     provider: varchar('provider', { length: 40 }).notNull(),
+    channel: paymentChannel('channel'),
+    outTradeNo: varchar('out_trade_no', { length: 32 }),
     externalId: varchar('external_id', { length: 120 }),
     status: paymentStatus('status').notNull().default('pending'),
     amount: integer('amount').notNull(),
     currency: varchar('currency', { length: 3 }).notNull(),
+    wechatTradeState: varchar('wechat_trade_state', { length: 32 }),
+    credentialVersion: integer('credential_version').notNull().default(1),
+    preparedAt: timestamp('prepared_at', { withTimezone: true }),
+    prepayExpiresAt: timestamp('prepay_expires_at', { withTimezone: true }),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    lastQueriedAt: timestamp('last_queried_at', { withTimezone: true }),
+    queryCount: integer('query_count').notNull().default(0),
     payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
     ...timestamps,
   },
   (table) => [
     uniqueIndex('payments_provider_external_unique').on(table.provider, table.externalId),
+    uniqueIndex('payments_out_trade_no_unique').on(table.outTradeNo),
+    index('payments_order_status_channel_idx').on(table.orderId, table.status, table.channel),
+    uniqueIndex('payments_active_attempt_unique')
+      .on(table.orderId)
+      .where(
+        sql`${table.status} in ('preparing', 'pending', 'processing', 'query_pending', 'close_pending', 'unknown')`,
+      ),
+  ],
+);
+
+export const paymentNotificationInbox = pgTable(
+  'payment_notification_inbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    notificationId: varchar('notification_id', { length: 128 }).notNull(),
+    outTradeNo: varchar('out_trade_no', { length: 32 }).notNull(),
+    paymentId: uuid('payment_id').references(() => payments.id),
+    orderId: uuid('order_id').references(() => orders.id),
+    eventType: varchar('event_type', { length: 64 }).notNull(),
+    status: varchar('status', { length: 32 }).notNull().default('received'),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    lastError: text('last_error'),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex('payment_notification_inbox_notification_unique').on(table.notificationId),
+    index('payment_notification_inbox_status_idx').on(table.status, table.updatedAt),
+    index('payment_notification_inbox_out_trade_no_idx').on(table.outTradeNo),
   ],
 );
 

@@ -189,6 +189,8 @@ interface PaymentConfirmation {
   amount?: number;
   currency?: string;
   occurredAt?: string;
+  paymentId?: string;
+  outTradeNo?: string;
   payload: Record<string, unknown>;
   reason: string;
 }
@@ -1086,6 +1088,16 @@ export class ConferenceRepository {
       }
       this.memory.ticketRemaining.set(ticket.id, remaining - 1);
       const now = new Date();
+      let attendeeMobile: string;
+      try {
+        attendeeMobile = normalizeMainlandMobile(input.attendee.mobile);
+      } catch {
+        throw new DomainError(
+          API_ERROR_CODES.VALIDATION_ERROR,
+          '请输入有效的中国大陆手机号',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
       const attendee = customer
         ? {
             name:
@@ -1093,13 +1105,13 @@ export class ConferenceRepository {
               customer.profile.realName ||
               customer.profile.nickname ||
               '参会人',
-            mobile: customer.mobile,
+            mobile: attendeeMobile,
             email: input.attendee.email || customer.profile.email || '',
             company: input.attendee.company || customer.profile.company || '',
             title: input.attendee.title || customer.profile.title || '',
             city: input.attendee.city || customer.profile.city || '',
           }
-        : input.attendee;
+        : { ...input.attendee, mobile: attendeeMobile };
       const checkoutInput = { ...input, attendee };
       const formAnswers = this.normalizeRegistrationAnswers(
         this.demoEvent.registrationForm?.fields ?? [],
@@ -1269,13 +1281,6 @@ export class ConferenceRepository {
           HttpStatus.BAD_REQUEST,
         );
       }
-      if (customer && normalizedInputMobile !== customer.mobile) {
-        throw new DomainError(
-          API_ERROR_CODES.VALIDATION_ERROR,
-          '报名手机号需要与当前登录账号一致',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
       const checkoutInput: CreateRegistration = {
         ...input,
         attendee: customer
@@ -1285,13 +1290,13 @@ export class ConferenceRepository {
                 customer.profile.realName ||
                 customer.profile.nickname ||
                 '参会人',
-              mobile: customer.mobile,
+              mobile: normalizedInputMobile,
               email: input.attendee.email || customer.profile.email || '',
               company: input.attendee.company || customer.profile.company || '',
               title: input.attendee.title || customer.profile.title || '',
               city: input.attendee.city || customer.profile.city || '',
             }
-          : input.attendee,
+          : { ...input.attendee, mobile: normalizedInputMobile },
       };
       const releasedTicket = releaseSnapshot?.tickets?.find(
         (ticket) => ticket.id === input.ticketTypeId,
@@ -1336,28 +1341,6 @@ export class ConferenceRepository {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`registration-mobile:${input.eventId}:${attendeeMobile}`}, 0))`,
       );
-      const duplicateContacts: SQL[] = [eq(registrations.attendeeMobileE164, attendeeMobile)];
-      if (attendeeEmail) {
-        duplicateContacts.push(eq(registrations.attendeeEmailNormalized, attendeeEmail));
-      }
-      const [duplicateRegistration] = await tx
-        .select({ id: registrations.id })
-        .from(registrations)
-        .where(
-          and(
-            eq(registrations.eventId, input.eventId),
-            sql`${registrations.status} <> 'cancelled'`,
-            or(...duplicateContacts),
-          ),
-        )
-        .limit(1);
-      if (duplicateRegistration) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '该邮箱或手机号已经提交过本场大会报名',
-          HttpStatus.CONFLICT,
-        );
-      }
       let waitlistOffer: typeof waitlistEntries.$inferSelect | undefined;
       if (checkoutInput.waitlistOfferToken) {
         [waitlistOffer] = await tx
@@ -2000,17 +1983,42 @@ export class ConferenceRepository {
         .update(inventoryReservations)
         .set({ convertedAt: now, updatedAt: now })
         .where(eq(inventoryReservations.orderId, orderRow.id));
-      const [preparedPayment] = await tx
-        .select({ id: payments.id })
-        .from(payments)
-        .where(
-          and(
-            eq(payments.orderId, orderRow.id),
-            eq(payments.provider, confirmation.provider),
-            eq(payments.status, 'pending'),
-          ),
-        )
-        .limit(1);
+      const paymentId = confirmation.paymentId;
+      const outTradeNo =
+        confirmation.outTradeNo ??
+        (typeof confirmation.payload.outTradeNo === 'string'
+          ? confirmation.payload.outTradeNo
+          : undefined);
+      const [preparedPayment] = paymentId
+        ? await tx
+            .select({ id: payments.id })
+            .from(payments)
+            .where(and(eq(payments.id, paymentId), eq(payments.orderId, orderRow.id)))
+            .limit(1)
+        : outTradeNo
+          ? await tx
+              .select({ id: payments.id })
+              .from(payments)
+              .where(and(eq(payments.orderId, orderRow.id), eq(payments.outTradeNo, outTradeNo)))
+              .limit(1)
+          : await tx
+              .select({ id: payments.id })
+              .from(payments)
+              .where(
+                and(
+                  eq(payments.orderId, orderRow.id),
+                  eq(payments.provider, confirmation.provider),
+                  inArray(payments.status, [
+                    'preparing',
+                    'pending',
+                    'processing',
+                    'query_pending',
+                    'close_pending',
+                    'unknown',
+                  ]),
+                ),
+              )
+              .limit(1);
       if (preparedPayment) {
         await tx
           .update(payments)
@@ -2019,6 +2027,7 @@ export class ConferenceRepository {
             status: 'succeeded',
             amount: orderRow.amount,
             currency: orderRow.currency,
+            wechatTradeState: confirmation.provider === 'wechatpay' ? 'SUCCESS' : null,
             payload: confirmation.payload,
             updatedAt: now,
           })
@@ -2031,6 +2040,8 @@ export class ConferenceRepository {
           status: 'succeeded',
           amount: orderRow.amount,
           currency: orderRow.currency,
+          outTradeNo,
+          wechatTradeState: confirmation.provider === 'wechatpay' ? 'SUCCESS' : null,
           payload: confirmation.payload,
         });
       }
@@ -2218,15 +2229,32 @@ export class ConferenceRepository {
       .update(orderAccessTokens)
       .set({ lastUsedAt: new Date() })
       .where(eq(orderAccessTokens.id, token.id));
-    const [payment] = await db
-      .select({ payload: payments.payload })
+    const paymentRows = await db
+      .select({
+        payload: payments.payload,
+        channel: payments.channel,
+        status: payments.status,
+      })
       .from(payments)
       .where(and(eq(payments.orderId, row.id), eq(payments.provider, 'wechatpay')))
-      .limit(1);
+      .orderBy(desc(payments.updatedAt))
+      .limit(5);
+    const activeNative = paymentRows.find(
+      (item) =>
+        item.channel === 'native' &&
+        ['preparing', 'pending', 'processing', 'query_pending'].includes(item.status) &&
+        typeof item.payload?.codeUrl === 'string',
+    );
+    const anyCodeUrl = paymentRows.find(
+      (item) => typeof item.payload?.codeUrl === 'string' && item.payload.codeUrl,
+    );
     const paymentUrl =
-      payment?.payload && typeof payment.payload.codeUrl === 'string'
-        ? payment.payload.codeUrl
-        : undefined;
+      (activeNative?.payload && typeof activeNative.payload.codeUrl === 'string'
+        ? activeNative.payload.codeUrl
+        : undefined) ??
+      (anyCodeUrl?.payload && typeof anyCodeUrl.payload.codeUrl === 'string'
+        ? anyCodeUrl.payload.codeUrl
+        : undefined);
     return {
       id: row.id,
       orderNo: row.orderNo,

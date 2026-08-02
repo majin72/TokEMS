@@ -37,10 +37,34 @@ describe('ConferenceRepository in-memory operational loop', () => {
     };
   }
 
+  function customerActor() {
+    return {
+      customerUserId: '11111111-1111-4111-8111-111111111101',
+      organizationId: DEMO_EVENT.organizationId,
+      mobile: '+8613800138000',
+      profile: {
+        nickname: '江云舟',
+        realName: '江云舟',
+        email: 'jiang@example.com',
+        company: '湾区品牌实验室',
+        title: '增长负责人',
+        city: '深圳',
+      },
+    };
+  }
+
   it('returns one checkout for repeated registration idempotency keys', async () => {
     const before = await repository.getPublicEvent();
-    const first = await repository.createCheckout(registrationInput(), 'registration-test-key');
-    const second = await repository.createCheckout(registrationInput(), 'registration-test-key');
+    const first = await repository.createCheckout(
+      registrationInput(),
+      'registration-test-key',
+      customerActor(),
+    );
+    const second = await repository.createCheckout(
+      registrationInput(),
+      'registration-test-key',
+      customerActor(),
+    );
     const after = await repository.getPublicEvent();
 
     expect(second.order.id).toBe(first.order.id);
@@ -52,6 +76,7 @@ describe('ConferenceRepository in-memory operational loop', () => {
     const checkout = await repository.createCheckout(
       registrationInput(),
       'payment-registration-key',
+      customerActor(),
     );
     const first = await repository.confirmMockPayment(checkout.order.id, 'payment-confirm-key');
     const second = await repository.confirmMockPayment(checkout.order.id, 'payment-confirm-key');
@@ -68,7 +93,11 @@ describe('ConferenceRepository in-memory operational loop', () => {
     const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
     demoEvent.tickets[0]!.price = 0;
 
-    const checkout = await repository.createCheckout(registrationInput(), 'free-registration-key');
+    const checkout = await repository.createCheckout(
+      registrationInput(),
+      'free-registration-key',
+      customerActor(),
+    );
 
     expect(checkout.registration.status).toBe('confirmed');
     expect(checkout.order).toMatchObject({

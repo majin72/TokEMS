@@ -11,8 +11,11 @@ import { useCustomerSession } from '~/composables/useCustomerSession';
 const api = useConferenceApi();
 const customer = useCustomerSession();
 const router = useRouter();
-const event = ref<PublicEvent>(structuredClone(DEMO_EVENT));
-const selectedTicketId = ref(DEMO_EVENT.tickets[0]!.id);
+/** Real event only — never seed DEMO_EVENT prices into the first paint. */
+const event = ref<PublicEvent | null>(null);
+const pageLoading = ref(true);
+const loadError = ref('');
+const selectedTicketId = ref('');
 const pending = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
@@ -31,9 +34,10 @@ const preferences = reactive({
   termsAccepted: false,
 });
 
-const fallbackFields = DEMO_EVENT.registrationForm?.fields ?? [];
-const registrationFields = computed(() => event.value.registrationForm?.fields ?? fallbackFields);
-const experience = computed(() => resolveEventExperience(event.value));
+const registrationFields = computed(() => event.value?.registrationForm?.fields ?? []);
+const experience = computed(() =>
+  event.value ? resolveEventExperience(event.value) : resolveEventExperience(DEMO_EVENT),
+);
 const emptyTicket: PublicEvent['tickets'][number] = {
   id: '',
   name: '暂无可报名票种',
@@ -45,18 +49,21 @@ const emptyTicket: PublicEvent['tickets'][number] = {
   recommended: false,
 };
 
-const selectedTicket = computed(
-  () =>
+const selectedTicket = computed(() => {
+  if (!event.value) return emptyTicket;
+  return (
     event.value.tickets.find((ticket) => ticket.id === selectedTicketId.value) ??
     event.value.tickets[0] ??
-    emptyTicket,
-);
+    emptyTicket
+  );
+});
 
 const money = (amount: number) => `¥${(amount / 100).toLocaleString('zh-CN')}`;
 const priceLabel = (amount: number) => (amount === 0 ? '免费' : money(amount));
 const isFreeTicket = computed(() => selectedTicket.value.price === 0);
 const registrationAvailable = computed(
-  () => event.value.registration.registrationOpen && Boolean(event.value.tickets.length),
+  () =>
+    Boolean(event.value?.registration.registrationOpen && event.value.tickets.length),
 );
 const joiningWaitlist = computed(
   () =>
@@ -66,10 +73,12 @@ const joiningWaitlist = computed(
     !offerToken.value,
 );
 const flowSteps = computed(() =>
-  enabledFlowSteps(event.value, {
-    paymentRequired: !isFreeTicket.value,
-    invoiceRequired: preferences.invoiceRequired,
-  }),
+  event.value
+    ? enabledFlowSteps(event.value, {
+        paymentRequired: !isFreeTicket.value,
+        invoiceRequired: preferences.invoiceRequired,
+      })
+    : [],
 );
 const activeStep = computed(() => activeFlowStep(flowSteps.value, 'ticket-selection'));
 const registrationHelp = computed(
@@ -79,7 +88,7 @@ const registrationHelp = computed(
 );
 const answer = (key: string) => String(answers[key] ?? '').trim();
 const accountRequired = computed(
-  () => event.value.registration.accountMode === 'mobile_otp_required',
+  () => event.value?.registration.accountMode === 'mobile_otp_required',
 );
 const verifiedMobile = computed(() => customer.session.value?.customer.maskedMobile ?? '');
 const inputAutocomplete = (key: string) =>
@@ -92,6 +101,7 @@ const inputAutocomplete = (key: string) =>
     city: 'address-level2',
   })[key] ?? 'off';
 const dateRange = computed(() => {
+  if (!event.value) return '';
   const format = new Intl.DateTimeFormat('zh-CN', {
     timeZone: event.value.timezone,
     year: 'numeric',
@@ -100,7 +110,21 @@ const dateRange = computed(() => {
   });
   return `${format.format(new Date(event.value.startsAt))} 至 ${format.format(new Date(event.value.endsAt))}`;
 });
-useHead(() => ({ title: `报名 · ${event.value.name}` }));
+useHead(() => ({ title: `报名 · ${event.value?.name ?? '大会'}` }));
+
+/**
+ * Applies a loaded public event and selects the ticket from the query string when valid.
+ *
+ * @param loaded - Event payload from API or matching local cache
+ * @param ticketFromQuery - Optional ticket id from the URL
+ */
+function applyLoadedEvent(loaded: PublicEvent, ticketFromQuery = '') {
+  event.value = loaded;
+  selectedTicketId.value = loaded.tickets.some((ticket) => ticket.id === ticketFromQuery)
+    ? ticketFromQuery
+    : (loaded.tickets[0]?.id ?? '');
+  for (const field of registrationFields.value) answers[field.key] ??= '';
+}
 
 watch(isFreeTicket, (free) => {
   if (free) preferences.invoiceRequired = false;
@@ -110,7 +134,8 @@ watch(
   () => customer.session.value,
   (session) => {
     if (!session) return;
-    answers.mobile = session.customer.mobile;
+    // Prefill from profile; keep any value the user already typed (including a different mobile).
+    answers.mobile ||= session.customer.mobile;
     answers.name ||= session.customer.profile.realName || session.customer.profile.nickname || '';
     answers.email ||= session.customer.profile.email || '';
     answers.company ||= session.customer.profile.company || '';
@@ -140,22 +165,40 @@ async function registrationError(error: unknown, fallback: string) {
 
 onMounted(async () => {
   const query = new URL(window.location.href).searchParams;
-  offerToken.value = query.get('offer') ?? '';
-  event.value = await api.getEvent(query.get('event') ?? DEMO_EVENT.slug);
-  await customer.refresh().catch(() => null);
-  if (accountRequired.value && !customer.session.value) {
-    customer.openLogin();
-  }
-  for (const field of registrationFields.value) answers[field.key] ??= '';
+  const slug = query.get('event') ?? DEMO_EVENT.slug;
   const ticketFromQuery = query.get('ticket') ?? '';
-  selectedTicketId.value = event.value.tickets.some((ticket) => ticket.id === ticketFromQuery)
-    ? ticketFromQuery
-    : (event.value.tickets[0]?.id ?? '');
+  offerToken.value = query.get('offer') ?? '';
+
+  // Prefer a cache hit for the same slug; never paint DEMO_EVENT ticket prices.
+  const cached = api.readEvent();
+  if (cached?.slug === slug) {
+    applyLoadedEvent(cached, ticketFromQuery);
+    pageLoading.value = false;
+  }
+
+  try {
+    const loaded = await api.getEvent(slug);
+    applyLoadedEvent(loaded, ticketFromQuery);
+    await customer.refresh().catch(() => null);
+    if (accountRequired.value && !customer.session.value) {
+      customer.openLogin();
+    }
+  } catch (error) {
+    if (!event.value) {
+      loadError.value = error instanceof Error ? error.message : '报名信息加载失败，请刷新重试。';
+    }
+  } finally {
+    pageLoading.value = false;
+  }
 });
 
 async function submit() {
   errorMessage.value = '';
   successMessage.value = '';
+  if (!event.value) {
+    errorMessage.value = '报名信息仍在加载，请稍后再试。';
+    return;
+  }
   if (accountRequired.value && !customer.session.value) {
     errorMessage.value = '本场大会需要先登录，登录后会继续保留当前填写内容。';
     customer.openLogin();
@@ -234,12 +277,20 @@ async function submit() {
       });
       return;
     }
+    const accessToken = checkout.orderAccessToken ?? '';
+    const paymentCheckoutUrl = api.resolvePaymentCheckoutUrl(
+      checkout.order.id,
+      event.value.slug,
+      accessToken,
+    );
+    if (/^https?:\/\//i.test(paymentCheckoutUrl)) {
+      window.location.assign(paymentCheckoutUrl);
+      return;
+    }
     await router.push({
       path: `/order/${checkout.order.id}`,
       query: { event: event.value.slug },
-      ...(checkout.orderAccessToken
-        ? { hash: `#access=${encodeURIComponent(checkout.orderAccessToken)}` }
-        : {}),
+      ...(accessToken ? { hash: `#access=${encodeURIComponent(accessToken)}` } : {}),
     });
   } catch (error) {
     errorMessage.value = await registrationError(error, '提交失败，请检查报名信息后重试。');
@@ -253,176 +304,187 @@ async function submit() {
   <div class="flow-page">
     <FlowHeader />
     <main class="flow-shell" id="main-content">
-      <p class="flow-eyebrow">REGISTRATION</p>
-      <h1 class="flow-title">锁定你的大会席位</h1>
-      <p class="flow-lead">{{ registrationHelp }}</p>
-      <p v-if="offerToken" class="waitlist-offer-banner" role="status">
-        候补名额已为你保留，请使用收到邀请的邮箱，并在有效期内完成报名。
-      </p>
-      <p v-if="!registrationAvailable" class="waitlist-offer-banner" role="status">
-        当前大会已暂停报名。页面内容仍可查看，报名重新开放后可继续提交。
-      </p>
-      <FlowStepper
-        :active="activeStep"
-        :payment-required="!isFreeTicket"
-        :steps="flowSteps.map((step) => step.title)"
-        :variant="experience.registrationFlow.progressVariant"
-      />
-
       <div
-        class="flow-grid"
-        :class="{ 'is-single-column': !experience.registrationFlow.summaryCardEnabled }"
+        v-if="pageLoading && !event"
+        class="flow-card flow-card__body"
+        style="text-align: center"
+        role="status"
       >
-        <form class="flow-card" @submit.prevent="submit">
-          <div class="flow-card__head">
-            <h2>报名信息</h2>
-            <p>带 * 字段用于参会身份核验与会前通知。</p>
-          </div>
-          <div class="flow-card__body">
-            <h3 class="form-section-title" style="margin-top: 0; border-top: 0; padding-top: 0">
-              选择票种
-            </h3>
-            <div class="ticket-options">
-              <label
-                v-for="ticket in event.tickets"
-                :key="ticket.id"
-                class="ticket-option"
-                :class="{ 'is-selected': selectedTicketId === ticket.id }"
-              >
-                <input v-model="selectedTicketId" type="radio" name="ticket" :value="ticket.id" />
-                <span>
-                  <span class="ticket-option__name">
-                    {{ ticket.name }}
-                    <span v-if="ticket.recommended" class="ticket-option__tag">推荐</span>
-                  </span>
-                  <span class="ticket-option__desc">{{ ticket.description }}</span>
-                  <span class="ticket-option__stock">剩余 {{ ticket.remaining }} 席</span>
-                </span>
-                <strong class="ticket-option__price">{{ priceLabel(ticket.price) }}</strong>
-              </label>
-              <p v-if="!event.tickets.length" class="form-error">当前没有可报名票种。</p>
-            </div>
+        正在加载报名信息…
+      </div>
+      <div v-else-if="loadError && !event" class="form-error" role="alert">{{ loadError }}</div>
+      <template v-else-if="event">
+        <p class="flow-eyebrow">REGISTRATION</p>
+        <h1 class="flow-title">锁定你的大会席位</h1>
+        <p class="flow-lead">{{ registrationHelp }}</p>
+        <p v-if="offerToken" class="waitlist-offer-banner" role="status">
+          候补名额已为你保留，请使用收到邀请的邮箱，并在有效期内完成报名。
+        </p>
+        <p v-if="!registrationAvailable" class="waitlist-offer-banner" role="status">
+          当前大会已暂停报名。页面内容仍可查看，报名重新开放后可继续提交。
+        </p>
+        <FlowStepper
+          :active="activeStep"
+          :payment-required="!isFreeTicket"
+          :steps="flowSteps.map((step) => step.title)"
+          :variant="experience.registrationFlow.progressVariant"
+        />
 
-            <h3 class="form-section-title">参会人信息</h3>
-            <div
-              v-if="accountRequired"
-              class="registration-auth-status"
-              :class="{ 'is-verified': Boolean(customer.session.value) }"
-            >
-              <span aria-hidden="true">{{ customer.session.value ? '✓' : '•' }}</span>
-              <p v-if="customer.session.value">
-                手机号已验证：<strong>{{ verifiedMobile }}</strong>
-              </p>
-              <p v-else>本场大会需要先验证手机号，验证成功后会保留当前填写内容。</p>
-              <button v-if="!customer.session.value" type="button" @click="customer.openLogin">
-                登录 / 注册
+        <div
+          class="flow-grid"
+          :class="{ 'is-single-column': !experience.registrationFlow.summaryCardEnabled }"
+        >
+          <form class="flow-card" @submit.prevent="submit">
+            <div class="flow-card__head">
+              <h2>报名信息</h2>
+              <p>带 * 字段用于参会身份核验与会前通知。</p>
+            </div>
+            <div class="flow-card__body">
+              <h3 class="form-section-title" style="margin-top: 0; border-top: 0; padding-top: 0">
+                选择票种
+              </h3>
+              <div class="ticket-options">
+                <label
+                  v-for="ticket in event.tickets"
+                  :key="ticket.id"
+                  class="ticket-option"
+                  :class="{ 'is-selected': selectedTicketId === ticket.id }"
+                >
+                  <input v-model="selectedTicketId" type="radio" name="ticket" :value="ticket.id" />
+                  <span>
+                    <span class="ticket-option__name">
+                      {{ ticket.name }}
+                      <span v-if="ticket.recommended" class="ticket-option__tag">推荐</span>
+                    </span>
+                    <span class="ticket-option__desc">{{ ticket.description }}</span>
+                    <span class="ticket-option__stock">剩余 {{ ticket.remaining }} 席</span>
+                  </span>
+                  <strong class="ticket-option__price">{{ priceLabel(ticket.price) }}</strong>
+                </label>
+                <p v-if="!event.tickets.length" class="form-error">当前没有可报名票种。</p>
+              </div>
+
+              <h3 class="form-section-title">参会人信息</h3>
+              <div
+                v-if="accountRequired"
+                class="registration-auth-status"
+                :class="{ 'is-verified': Boolean(customer.session.value) }"
+              >
+                <span aria-hidden="true">{{ customer.session.value ? '✓' : '•' }}</span>
+                <p v-if="customer.session.value">
+                  手机号已验证：<strong>{{ verifiedMobile }}</strong>
+                  。报名手机号可单独填写，不必与登录号相同。
+                </p>
+                <p v-else>本场大会需要先验证手机号，验证成功后会保留当前填写内容。</p>
+                <button v-if="!customer.session.value" type="button" @click="customer.openLogin">
+                  登录 / 注册
+                </button>
+              </div>
+              <div class="form-grid">
+                <div v-for="field in registrationFields" :key="field.key" class="form-field">
+                  <label :for="`registration-${field.key}`">{{ field.label }}<em v-if="field.required">*</em></label>
+                  <select
+                    v-if="field.type === 'select'"
+                    :id="`registration-${field.key}`"
+                    v-model="answers[field.key]"
+                    class="form-input"
+                    :required="field.required"
+                  >
+                    <option value="">{{ field.placeholder ?? `请选择${field.label}` }}</option>
+                    <option v-for="option in field.options" :key="option" :value="option">
+                      {{ option }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    :id="`registration-${field.key}`"
+                    v-model="answers[field.key]"
+                    class="form-input"
+                    :required="field.required"
+                    :type="field.type"
+                    :autocomplete="inputAutocomplete(field.key)"
+                    :placeholder="field.placeholder ?? `请填写${field.label}`"
+                  />
+                </div>
+              </div>
+
+              <div class="form-checks">
+                <label v-if="!isFreeTicket" class="form-check">
+                  <input v-model="preferences.invoiceRequired" type="checkbox" />
+                  <span>需要开具发票，支付后可在订单页补充抬头与税号。</span>
+                </label>
+                <label class="form-check">
+                  <input v-model="preferences.marketingConsent" type="checkbox" />
+                  <span>同意接收本届大会议程、嘉宾与交通提醒。</span>
+                </label>
+                <label class="form-check">
+                  <input
+                    v-model="preferences.termsAccepted"
+                    type="checkbox"
+                    :required="!joiningWaitlist"
+                  />
+                  <span>
+                    我已阅读并同意《报名服务条款》和《隐私政策》
+                    <small v-if="event.registrationForm">（版本 {{ event.registrationForm.termsVersion }}）</small>。
+                  </span>
+                </label>
+              </div>
+
+              <p v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</p>
+              <p v-if="successMessage" class="form-success" role="status">{{ successMessage }}</p>
+              <button
+                class="flow-action is-full"
+                type="submit"
+                :disabled="pending || !registrationAvailable"
+                style="margin-top: 24px"
+              >
+                {{
+                  pending
+                    ? joiningWaitlist
+                      ? '正在加入候补…'
+                      : isFreeTicket
+                        ? '正在确认报名…'
+                        : '正在创建订单…'
+                    : joiningWaitlist
+                      ? '加入候补名单'
+                      : isFreeTicket
+                        ? '免费报名并领取电子票'
+                        : `提交报名并支付 ${money(selectedTicket.price)}`
+                }}
+                <span aria-hidden="true">→</span>
               </button>
             </div>
-            <div class="form-grid">
-              <div v-for="field in registrationFields" :key="field.key" class="form-field">
-                <label :for="`registration-${field.key}`">{{ field.label }}<em v-if="field.required">*</em></label>
-                <select
-                  v-if="field.type === 'select'"
-                  :id="`registration-${field.key}`"
-                  v-model="answers[field.key]"
-                  class="form-input"
-                  :required="field.required"
-                >
-                  <option value="">{{ field.placeholder ?? `请选择${field.label}` }}</option>
-                  <option v-for="option in field.options" :key="option" :value="option">
-                    {{ option }}
-                  </option>
-                </select>
-                <input
-                  v-else
-                  :id="`registration-${field.key}`"
-                  v-model="answers[field.key]"
-                  class="form-input"
-                  :required="field.required"
-                  :type="field.type"
-                  :autocomplete="inputAutocomplete(field.key)"
-                  :placeholder="field.placeholder ?? `请填写${field.label}`"
-                  :readonly="field.key === 'mobile' && Boolean(customer.session.value)"
-                />
+          </form>
+
+          <aside v-if="experience.registrationFlow.summaryCardEnabled" class="flow-card summary-card">
+            <div class="summary-event">
+              <div class="summary-event__label">TOKEMS CONFERENCE 2026</div>
+              <h3>{{ event.name }}</h3>
+              <p>{{ dateRange }}<br />{{ event.venue }} · {{ event.city }}</p>
+            </div>
+            <div class="summary-body">
+              <div class="summary-row">
+                <span>所选票种</span><strong>{{ selectedTicket.name }}</strong>
               </div>
+              <div class="summary-row"><span>电子票数量</span><strong>1 张</strong></div>
+              <div class="summary-row">
+                <span>退改规则</span><strong>{{ isFreeTicket ? '可取消报名' : '7 天内可退' }}</strong>
+              </div>
+              <div class="summary-row is-total">
+                <span>{{ isFreeTicket ? '报名费用' : '应付金额' }}</span>
+                <strong>{{ priceLabel(selectedTicket.price) }}</strong>
+              </div>
+              <p class="summary-note">
+                {{
+                  isFreeTicket
+                    ? '提交后即确认席位并签发电子票，请确保参会人信息准确。'
+                    : '支付窗口为 15 分钟。支付完成后可查看电子票，并继续申请发票。'
+                }}
+              </p>
             </div>
-
-            <div class="form-checks">
-              <label v-if="!isFreeTicket" class="form-check">
-                <input v-model="preferences.invoiceRequired" type="checkbox" />
-                <span>需要开具发票，支付后可在订单页补充抬头与税号。</span>
-              </label>
-              <label class="form-check">
-                <input v-model="preferences.marketingConsent" type="checkbox" />
-                <span>同意接收本届大会议程、嘉宾与交通提醒。</span>
-              </label>
-              <label class="form-check">
-                <input
-                  v-model="preferences.termsAccepted"
-                  type="checkbox"
-                  :required="!joiningWaitlist"
-                />
-                <span>
-                  我已阅读并同意《报名服务条款》和《隐私政策》
-                  <small v-if="event.registrationForm">（版本 {{ event.registrationForm.termsVersion }}）</small>。
-                </span>
-              </label>
-            </div>
-
-            <p v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</p>
-            <p v-if="successMessage" class="form-success" role="status">{{ successMessage }}</p>
-            <button
-              class="flow-action is-full"
-              type="submit"
-              :disabled="pending || !registrationAvailable"
-              style="margin-top: 24px"
-            >
-              {{
-                pending
-                  ? joiningWaitlist
-                    ? '正在加入候补…'
-                    : isFreeTicket
-                      ? '正在确认报名…'
-                      : '正在创建订单…'
-                  : joiningWaitlist
-                    ? '加入候补名单'
-                    : isFreeTicket
-                      ? '免费报名并领取电子票'
-                      : `提交报名并支付 ${money(selectedTicket.price)}`
-              }}
-              <span aria-hidden="true">→</span>
-            </button>
-          </div>
-        </form>
-
-        <aside v-if="experience.registrationFlow.summaryCardEnabled" class="flow-card summary-card">
-          <div class="summary-event">
-            <div class="summary-event__label">TOKEMS CONFERENCE 2026</div>
-            <h3>{{ event.name }}</h3>
-            <p>{{ dateRange }}<br />{{ event.venue }} · {{ event.city }}</p>
-          </div>
-          <div class="summary-body">
-            <div class="summary-row">
-              <span>所选票种</span><strong>{{ selectedTicket.name }}</strong>
-            </div>
-            <div class="summary-row"><span>电子票数量</span><strong>1 张</strong></div>
-            <div class="summary-row">
-              <span>退改规则</span><strong>{{ isFreeTicket ? '可取消报名' : '7 天内可退' }}</strong>
-            </div>
-            <div class="summary-row is-total">
-              <span>{{ isFreeTicket ? '报名费用' : '应付金额' }}</span>
-              <strong>{{ priceLabel(selectedTicket.price) }}</strong>
-            </div>
-            <p class="summary-note">
-              {{
-                isFreeTicket
-                  ? '提交后即确认席位并签发电子票，请确保参会人信息准确。'
-                  : '支付窗口为 15 分钟。支付完成后可查看电子票，并继续申请发票。'
-              }}
-            </p>
-          </div>
-        </aside>
-      </div>
+          </aside>
+        </div>
+      </template>
     </main>
   </div>
 </template>

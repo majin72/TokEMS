@@ -7,7 +7,13 @@ import {
   type RegistrationCheckout,
   type SubmitInvoiceDetails,
   type Ticket,
+  type WeChatH5Payment,
+  type WeChatJsapiPayment,
   type WeChatNativePayment,
+  type WeChatOAuthSession,
+  type WeChatOAuthStart,
+  type WeChatPaymentChannel,
+  type WeChatPaymentSwitchResult,
   type WaitlistEntry,
   type WaitlistJoin,
 } from '@conference/contracts';
@@ -171,6 +177,13 @@ export function useConferenceApi() {
     }
   }
 
+  /**
+   * Prepares a WeChat Native (QR) payment attempt for an order.
+   *
+   * @param orderId - Order identifier
+   * @param accessToken - Bearer order access token
+   * @returns Native prepare payload including codeUrl
+   */
   function prepareWeChatNativePayment(
     orderId: string,
     accessToken: string,
@@ -178,8 +191,160 @@ export function useConferenceApi() {
     return $fetch<WeChatNativePayment>(`/payments/wechat/${orderId}/native`, {
       method: 'POST',
       baseURL,
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Idempotency-Key': `wechat-native-${orderId}`,
+      },
     });
+  }
+
+  /**
+   * Prepares a WeChat JSAPI payment attempt bound to an OAuth session.
+   *
+   * @param orderId - Order identifier
+   * @param accessToken - Bearer order access token
+   * @param oauthSessionToken - Server OAuth session from handoff exchange (never an openid)
+   * @returns JSAPI prepare payload including signed jsapiParams
+   */
+  function prepareWeChatJsapiPayment(
+    orderId: string,
+    accessToken: string,
+    oauthSessionToken: string,
+  ): Promise<WeChatJsapiPayment> {
+    return $fetch<WeChatJsapiPayment>(`/payments/wechat/${orderId}/jsapi`, {
+      method: 'POST',
+      baseURL,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'X-Wechat-OAuth-Session': oauthSessionToken,
+        'Idempotency-Key': `wechat-jsapi-${orderId}`,
+      },
+    });
+  }
+
+  /**
+   * Prepares a WeChat H5 payment attempt for mobile external browsers.
+   *
+   * @param orderId - Order identifier
+   * @param accessToken - Bearer order access token
+   * @returns H5 prepare payload including h5Url
+   */
+  function prepareWeChatH5Payment(orderId: string, accessToken: string): Promise<WeChatH5Payment> {
+    return $fetch<WeChatH5Payment>(`/payments/wechat/${orderId}/h5`, {
+      method: 'POST',
+      baseURL,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Idempotency-Key': `wechat-h5-${orderId}`,
+      },
+    });
+  }
+
+  /**
+   * Starts WeChat snsapi_base OAuth for JSAPI checkout.
+   *
+   * @param orderId - Order identifier
+   * @param accessToken - Bearer order access token
+   * @param returnPath - Optional path under the payment base after callback
+   * @returns Authorize URL for browser redirect
+   */
+  function startWeChatOAuth(
+    orderId: string,
+    accessToken: string,
+    returnPath?: string,
+  ): Promise<WeChatOAuthStart> {
+    return $fetch<WeChatOAuthStart>(`/payments/wechat/${orderId}/oauth/start`, {
+      method: 'POST',
+      baseURL,
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: returnPath ? { returnPath } : {},
+    });
+  }
+
+  /**
+   * Exchanges a one-time OAuth handoff fragment code for a short-lived session token.
+   *
+   * @param handoffCode - Code from `#handoff=` after OAuth callback
+   * @returns OAuth session bound to the order
+   */
+  function exchangeWeChatOAuthHandoff(handoffCode: string): Promise<WeChatOAuthSession> {
+    return $fetch<WeChatOAuthSession>('/payments/wechat/oauth/handoff', {
+      method: 'POST',
+      baseURL,
+      body: { handoffCode },
+    });
+  }
+
+  /**
+   * Closes the active WeChat attempt so the next prepare can use a different channel.
+   *
+   * @param orderId - Order identifier
+   * @param accessToken - Bearer order access token
+   * @param channel - Target payment channel
+   * @returns Paid acknowledgement or the newly prepared channel payload
+   */
+  function switchWeChatPaymentChannel(
+    orderId: string,
+    accessToken: string,
+    channel: WeChatPaymentChannel,
+  ): Promise<WeChatPaymentSwitchResult> {
+    return $fetch<WeChatPaymentSwitchResult>(`/payments/wechat/${orderId}/switch`, {
+      method: 'POST',
+      baseURL,
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: { channel },
+    });
+  }
+
+  /**
+   * Builds the absolute or relative checkout URL for a paid registration order.
+   * When paymentOrigin is configured, returns the full PAYMENT_PUBLIC_URL order link.
+   * Access tokens are only placed in the fragment, never in the query string.
+   *
+   * @param orderId - Order identifier
+   * @param eventSlug - Event slug for query context
+   * @param accessToken - Optional fragment access token
+   * @returns Checkout URL safe for cross-origin redirect
+   */
+  function resolvePaymentCheckoutUrl(
+    orderId: string,
+    eventSlug: string,
+    accessToken?: string,
+  ): string {
+    const paymentOrigin = String(config.public.paymentOrigin ?? '').replace(/\/+$/, '');
+    const paymentBasePath = String(config.public.paymentBasePath ?? '/pay/hui').replace(/\/+$/, '');
+    const query = eventSlug ? `?event=${encodeURIComponent(eventSlug)}` : '';
+    const hash = accessToken ? `#access=${encodeURIComponent(accessToken)}` : '';
+    const path = `/order/${encodeURIComponent(orderId)}${query}${hash}`;
+    if (paymentOrigin) {
+      return `${paymentOrigin}${paymentBasePath}${path}`;
+    }
+    return path;
+  }
+
+  /**
+   * Resolves a conference-site URL. On the payment surface this becomes an absolute
+   * link back to conferenceOrigin so users leave www/pay/hui for 大会 / 报名 / 用户中心.
+   *
+   * @param path - Site-relative path beginning with `/`
+   * @returns Absolute conference URL or the original relative path
+   */
+  function resolveConferenceUrl(path: string): string {
+    const normalized = path.startsWith('/') ? path : `/${path}`;
+    const conferenceOrigin = String(config.public.conferenceOrigin ?? '').replace(/\/+$/, '');
+    if (config.public.paymentSurface && conferenceOrigin) {
+      return `${conferenceOrigin}${normalized}`;
+    }
+    return normalized;
+  }
+
+  /**
+   * Whether the current Nuxt instance is the payment-web surface (www/pay/hui).
+   *
+   * @returns True when NUXT_PUBLIC_PAYMENT_SURFACE=true
+   */
+  function isPaymentSurface(): boolean {
+    return config.public.paymentSurface === true;
   }
 
   async function submitInvoiceDetails(invoiceId: string, input: SubmitInvoiceDetails) {
@@ -221,10 +386,23 @@ export function useConferenceApi() {
     });
   }
 
-  async function getOrder(identifier: string, accessToken?: string) {
+  /**
+   * Loads an order by id, optionally forcing a WeChat transaction sync.
+   *
+   * @param identifier - Order UUID
+   * @param accessToken - Order access bearer token
+   * @param options - Pass `sync: true` after the user finishes paying to bypass query throttle
+   * @returns Latest order snapshot
+   */
+  async function getOrder(
+    identifier: string,
+    accessToken?: string,
+    options: { sync?: boolean } = {},
+  ) {
     try {
       return await $fetch<Order>(`/orders/${identifier}`, {
         baseURL,
+        query: options.sync ? { sync: '1' } : undefined,
         headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
       });
     } catch (error) {
@@ -363,6 +541,14 @@ export function useConferenceApi() {
     joinWaitlist,
     confirmPayment,
     prepareWeChatNativePayment,
+    prepareWeChatJsapiPayment,
+    prepareWeChatH5Payment,
+    startWeChatOAuth,
+    exchangeWeChatOAuthHandoff,
+    switchWeChatPaymentChannel,
+    resolvePaymentCheckoutUrl,
+    resolveConferenceUrl,
+    isPaymentSurface,
     getOrder,
     getTicket,
     getOrderTicket,

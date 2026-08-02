@@ -21,6 +21,44 @@ const productionAuthValues = {
   VITE_SIMPLE_AUTH: 'false',
 };
 const deprecatedCustomerAuthKeys = ['CUSTOMER_OTP_DEV_RESPONSE', 'NUXT_PUBLIC_SIMPLE_AUTH'];
+const placeholderSecrets = new Set([
+  'conference-local-development-secret-2026',
+  'conference-local-docker-jwt-secret-change-me-2026',
+  'replace-with-at-least-32-random-characters',
+]);
+const localSecretKeys = [
+  'JWT_SECRET',
+  'CUSTOMER_OTP_PEPPER',
+  'CUSTOMER_SESSION_SECRET',
+  'NOTIFICATION_PAYLOAD_ENCRYPTION_SECRET',
+  'PAYMENT_WEBHOOK_SECRET',
+  'NOTIFICATION_WEBHOOK_TOKEN',
+];
+
+/**
+ * Returns whether a secret is missing, too short, or a known placeholder.
+ *
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isUnusableSecret(value) {
+  return !value || value.length < 32 || placeholderSecrets.has(value);
+}
+
+/**
+ * Drops unusable secret overrides so workspace `.env` placeholders cannot
+ * clobber generated values from `.env.tokems.local`.
+ *
+ * @param {Record<string, string | undefined>} values
+ * @returns {Record<string, string | undefined>}
+ */
+function withoutUnusableSecretOverrides(values) {
+  const next = { ...values };
+  for (const key of localSecretKeys) {
+    if (isUnusableSecret(next[key])) delete next[key];
+  }
+  return next;
+}
 
 function isLoopbackBindAddress(value) {
   const normalized = String(value)
@@ -107,14 +145,16 @@ export function localComposeEnvironment(overrides = process.env) {
   const projectEnvironment = removeDeprecatedCustomerAuthValues(
     existsSync(projectEnvironmentPath) ? parse(readFileSync(projectEnvironmentPath, 'utf8')) : {},
   );
-  const currentOverrides = removeDeprecatedCustomerAuthValues(overrides);
+  const currentOverrides = withoutUnusableSecretOverrides(
+    removeDeprecatedCustomerAuthValues(overrides),
+  );
   const deploymentMode =
     currentOverrides.DEPLOYMENT_MODE ??
     projectEnvironment.DEPLOYMENT_MODE ??
     localAuthValues.DEPLOYMENT_MODE;
   if (deploymentMode === 'production') {
     return {
-      ...projectEnvironment,
+      ...withoutUnusableSecretOverrides(projectEnvironment),
       ...currentOverrides,
       ...productionAuthValues,
     };
@@ -136,10 +176,14 @@ export function localComposeEnvironment(overrides = process.env) {
   }
   return {
     ...saved,
+    ...withoutUnusableSecretOverrides(projectEnvironment),
     ...currentOverrides,
     ...localAuthValues,
     ...gatewayEnvironment,
-    SEED_DEMO_DATA: currentOverrides.SEED_DEMO_DATA ?? saved.SEED_DEMO_DATA ?? 'true',
+    // Local docker keeps demo seed on by default; project `.env` often ships
+    // `SEED_DEMO_DATA=false` for production templates and must not clobber it.
+    SEED_DEMO_DATA:
+      currentOverrides.SEED_DEMO_DATA ?? saved.SEED_DEMO_DATA ?? 'true',
   };
 }
 

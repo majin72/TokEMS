@@ -22,6 +22,13 @@ const form = reactive({
   apiV3Key: '',
   platformPublicKeyId: '',
   platformPublicKey: '',
+  appSecret: '',
+  oauthEnabled: false,
+  channels: {
+    native: true,
+    jsapi: false,
+    h5: false,
+  },
 });
 const canManage = computed(() => session.canAny(['org.settings.manage']));
 const { clearDirty, dirty, setBusy, setResetHandler } = useSettingsFormScope();
@@ -34,7 +41,21 @@ const statusLabel = computed(() => {
   };
   return labels[configuration.value?.status ?? 'unconfigured'];
 });
+const channelSummary = computed(() => {
+  const channels = configuration.value?.channels ?? form.channels;
+  const enabled = [
+    channels.native ? 'Native' : null,
+    channels.jsapi ? 'JSAPI' : null,
+    channels.h5 ? 'H5' : null,
+  ].filter(Boolean);
+  return enabled.length ? enabled.join(' · ') : '未开放通道';
+});
 
+/**
+ * Hydrates the editable form from a server configuration payload.
+ *
+ * @param value - Latest WeChat Pay configuration from the API
+ */
 function applyConfiguration(value: WeChatPayConfiguration) {
   configuration.value = value;
   Object.assign(form, {
@@ -46,11 +67,21 @@ function applyConfiguration(value: WeChatPayConfiguration) {
     apiV3Key: '',
     platformPublicKeyId: value.platformPublicKeyId,
     platformPublicKey: '',
+    appSecret: '',
+    oauthEnabled: value.oauthEnabled,
+    channels: {
+      native: value.channels.native,
+      jsapi: value.channels.jsapi,
+      h5: value.channels.h5,
+    },
   });
   showMerchantPrivateKey.value = false;
   clearDirty();
 }
 
+/**
+ * Restores the form to the last loaded configuration.
+ */
 function resetForm() {
   if (configuration.value) applyConfiguration(configuration.value);
 }
@@ -58,6 +89,9 @@ function resetForm() {
 setResetHandler(resetForm);
 watch([pending, testing], () => setBusy(pending.value || testing.value), { immediate: true });
 
+/**
+ * Loads the organization WeChat Pay configuration.
+ */
 async function load() {
   loading.value = true;
   loaded.value = false;
@@ -72,6 +106,9 @@ async function load() {
   }
 }
 
+/**
+ * Runs the WeChat Pay connection echo test.
+ */
 async function testConnection() {
   if (!loaded.value) {
     errorMessage.value = '请先重新载入微信支付配置';
@@ -95,6 +132,9 @@ async function testConnection() {
   }
 }
 
+/**
+ * Persists configuration changes and immediately re-validates the merchant link.
+ */
 async function save() {
   if (!loaded.value) {
     errorMessage.value = '请先重新载入微信支付配置';
@@ -110,6 +150,12 @@ async function save() {
       mchId: form.mchId.trim(),
       merchantCertificateSerial: form.merchantCertificateSerial.trim(),
       platformPublicKeyId: form.platformPublicKeyId.trim(),
+      oauthEnabled: form.oauthEnabled,
+      channels: {
+        native: form.channels.native,
+        jsapi: form.channels.jsapi,
+        h5: form.channels.h5,
+      },
       ...(form.merchantPrivateKey.trim()
         ? { merchantPrivateKey: form.merchantPrivateKey.trim() }
         : {}),
@@ -117,6 +163,7 @@ async function save() {
       ...(form.platformPublicKey.trim()
         ? { platformPublicKey: form.platformPublicKey.trim() }
         : {}),
+      ...(form.appSecret.trim() ? { appSecret: form.appSecret.trim() } : {}),
     });
     applyConfiguration(result);
     message.value = '配置已加密保存，正在验证微信支付连接。';
@@ -142,9 +189,9 @@ onMounted(load);
   <section v-else class="admin-panel settings-module">
     <header class="admin-panel-header settings-module-header">
       <div>
-        <p class="settings-module-kicker">WECHAT PAY · NATIVE</p>
+        <p class="settings-module-kicker">WECHAT PAY · THREE CHANNELS</p>
         <h1>支付服务</h1>
-        <p>为全部大会启用微信扫码支付，订单回调会自动完成出票。</p>
+        <p>配置 Native / JSAPI / H5 三通道。回调仍走大会主站稳定 notify 地址。</p>
       </div>
       <div class="settings-module-status">
         <span class="status-badge" :class="configuration?.status === 'verified' ? 'paid' : 'draft'">
@@ -171,23 +218,59 @@ onMounted(load);
     >
       <div class="settings-summary">
         <div>
-          <span>支付方式</span>
-          <strong>Native 扫码支付</strong>
+          <span>开放通道</span>
+          <strong>{{ channelSummary }}</strong>
         </div>
         <div>
-          <span>回调地址</span>
+          <span>支付回调</span>
           <code>{{ configuration?.notifyUrl }}</code>
+        </div>
+        <div>
+          <span>OAuth 回调</span>
+          <code>{{ configuration?.oauthRedirectUri || '未配置 PAYMENT_PUBLIC_URL' }}</code>
         </div>
         <label class="settings-toggle">
           <input v-model="form.enabled" type="checkbox" :disabled="!canManage" />
           <span>{{ form.enabled ? '已启用' : '已停用' }}</span>
         </label>
       </div>
+
+      <section class="settings-form-section" aria-labelledby="payment-channels-heading">
+        <div class="settings-form-section-head">
+          <div>
+            <h2 id="payment-channels-heading">通道开关</h2>
+            <p>默认仅开放 Native。JSAPI / H5 可灰度开启；关闭只阻止新建支付，不影响存量入账。</p>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label class="settings-toggle">
+            <input v-model="form.channels.native" type="checkbox" :disabled="!canManage" />
+            <span>Native 扫码</span>
+          </label>
+          <label class="settings-toggle">
+            <input
+              v-model="form.channels.jsapi"
+              type="checkbox"
+              :disabled="!canManage || (!form.oauthEnabled && !configuration?.secretsPresent.appSecret)"
+            />
+            <span>JSAPI（微信内）</span>
+          </label>
+          <label class="settings-toggle">
+            <input v-model="form.channels.h5" type="checkbox" :disabled="!canManage" />
+            <span>H5（手机浏览器）</span>
+          </label>
+          <label class="settings-toggle">
+            <input v-model="form.oauthEnabled" type="checkbox" :disabled="!canManage" />
+            <span>启用公众号 OAuth</span>
+          </label>
+        </div>
+      </section>
+
       <section class="settings-form-section" aria-labelledby="payment-identity-heading">
         <div class="settings-form-section-head">
           <div>
             <h2 id="payment-identity-heading">商户身份</h2>
-            <p>填写微信开放平台与商户平台中对应的账号和证书标识。</p>
+            <p>填写已绑定商户号的公众号 AppID、商户号与证书标识。</p>
           </div>
         </div>
         <div class="form-grid">
@@ -306,12 +389,30 @@ onMounted(load);
               :disabled="!canManage"
             />
           </div>
+          <div class="form-field full">
+            <label for="wechat-app-secret">公众号 AppSecret</label>
+            <input
+              id="wechat-app-secret"
+              v-model="form.appSecret"
+              type="password"
+              autocomplete="new-password"
+              maxlength="128"
+              :required="form.oauthEnabled && !configuration?.secretsPresent.appSecret"
+              :placeholder="
+                configuration?.secretsPresent.appSecret
+                  ? '已安全保存，留空保持原值'
+                  : '仅 OAuth / JSAPI 需要'
+              "
+              :disabled="!canManage"
+            />
+          </div>
         </div>
       </section>
       <div class="settings-security-note">
         <strong>安全策略</strong>
-        <span>三项密钥会使用 AES-256-GCM
-          加密保存，浏览器只会看到“已保存”状态。每次修改都会留下审计记录。</span>
+        <span>密钥使用 AES-256-GCM
+          加密保存。OAuth AppSecret 永不返回前端，也不写入代理或追踪日志。稳定 notify
+          固定在大会主站 API，支付页入口可单独回滚。</span>
       </div>
       <div v-if="configuration?.lastError" class="settings-inline-error">
         最近一次验证：{{ configuration.lastError }}

@@ -60,6 +60,7 @@ import {
   decryptIntegrationCredentials,
   openSecret,
   resolveDeploymentOrigins,
+  resolvePaymentPublicUrl,
   sealSecret,
 } from '@conference/security';
 import {
@@ -101,10 +102,54 @@ const inventoryReleaseInterval = Number(process.env.INVENTORY_RELEASE_INTERVAL_M
 const smsReceiptInterval = Number(process.env.SMS_RECEIPT_INTERVAL_MS ?? 30_000);
 let reconcilingSmsReceipts = false;
 
+const ACTIVE_WECHAT_PAYMENT_STATUSES = [
+  'preparing',
+  'pending',
+  'processing',
+  'query_pending',
+  'close_pending',
+  'unknown',
+] as const;
+
 type SmsDeliveryContext = {
   templateKey: AliyunSmsTemplateKey;
   parameters: Record<string, string>;
 };
+
+/**
+ * Returns the canonical conference site origin used for FAQ / registration links.
+ *
+ * @returns Absolute conference origin without a trailing slash
+ */
+function conferenceSiteUrl() {
+  return (
+    process.env.PUBLIC_SITE_URL ??
+    process.env.PUBLIC_ORIGIN ??
+    'http://localhost:3000'
+  ).replace(/\/+$/, '');
+}
+
+/**
+ * Builds an absolute order checkout URL on the payment surface when configured.
+ * Falls back to the conference site for local single-origin deployments.
+ *
+ * @param orderId - Order UUID
+ * @param eventSlug - Public event slug
+ * @param accessToken - Order access token placed only in the URL fragment
+ * @returns Absolute checkout URL
+ */
+function paymentOrderAccessUrl(orderId: string, eventSlug: string, accessToken: string) {
+  const path = `/order/${encodeURIComponent(orderId)}?event=${encodeURIComponent(eventSlug)}`;
+  const fragment = `#access=${encodeURIComponent(accessToken)}`;
+  try {
+    if (process.env.PAYMENT_PUBLIC_ORIGIN || process.env.PAYMENT_PUBLIC_URL) {
+      return `${resolvePaymentPublicUrl(path)}${fragment}`;
+    }
+  } catch {
+    // Fall through to conference origin for incomplete local configs.
+  }
+  return `${conferenceSiteUrl()}${path}${fragment}`;
+}
 
 function redisConnection(
   urlString: string,
@@ -1440,7 +1485,7 @@ async function deliverWaitlistOfferNotification(
   if (scope.entry.offerTokenHash !== tokenHash) {
     throw new Error(`Waitlist offer token no longer matches entry ${waitlistEntryId}`);
   }
-  const siteUrl = process.env.PUBLIC_SITE_URL ?? 'http://localhost:3000';
+  const siteUrl = conferenceSiteUrl();
   const registrationUrl = `${siteUrl}/register?ticket=${encodeURIComponent(scope.ticket.id)}&offer=${encodeURIComponent(token)}`;
   const expiresAt = scope.entry.expiresAt.toLocaleString('zh-CN', {
     timeZone: scope.event.timezone,
@@ -1559,8 +1604,7 @@ async function deliverOrderAccessNotification(
   }
   const recipient = String((payload.recipient ?? scope.attendee.email) || scope.attendeeMobileE164);
   const channel = recipient.includes('@') ? 'email' : 'sms';
-  const siteUrl = process.env.PUBLIC_SITE_URL ?? 'http://localhost:3000';
-  const accessUrl = `${siteUrl}/order/${encodeURIComponent(orderId)}?event=${encodeURIComponent(scope.event.slug)}#access=${encodeURIComponent(accessToken)}`;
+  const accessUrl = paymentOrderAccessUrl(orderId, scope.event.slug, accessToken);
   const renewal = eventType === 'OrderAccessLinkRequested';
   const body = renewal
     ? `新的订单访问链接有效至 ${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: scope.event.timezone })}：${accessUrl}`
@@ -1640,7 +1684,7 @@ async function deliverInvoiceAccessNotification(
   }
   const recipient = String((payload.recipient ?? scope.attendee.email) || scope.attendeeMobileE164);
   const channel = recipient.includes('@') ? 'email' : 'sms';
-  const siteUrl = process.env.PUBLIC_SITE_URL ?? 'http://localhost:3000';
+  const siteUrl = conferenceSiteUrl();
   const accessUrl = `${siteUrl}/invoice/${encodeURIComponent(invoiceId)}?order=${encodeURIComponent(scope.invoice.orderId)}&event=${encodeURIComponent(scope.event.slug)}#token=${encodeURIComponent(accessToken)}`;
   const issued = eventType === 'InvoiceIssued' || eventType === 'InvoiceDeliveryRequested';
   const body = issued
@@ -1721,7 +1765,7 @@ async function deliverRegistrationReviewNotification(
 
   const approved = eventType === 'RegistrationReviewApproved';
   const paymentRequired = payload.paymentRequired === true;
-  const siteUrl = process.env.PUBLIC_SITE_URL ?? 'http://localhost:3000';
+  const siteUrl = conferenceSiteUrl();
   let resultUrl = `${siteUrl}/faq?event=${encodeURIComponent(scope.event.slug)}`;
   if (approved) {
     const accessToken = randomBytes(32).toString('base64url');
@@ -1732,7 +1776,7 @@ async function deliverRegistrationReviewNotification(
       scopes: ['order:read'],
       expiresAt,
     });
-    resultUrl = `${siteUrl}/order/${encodeURIComponent(scope.order.id)}?event=${encodeURIComponent(scope.event.slug)}#access=${encodeURIComponent(accessToken)}`;
+    resultUrl = paymentOrderAccessUrl(scope.order.id, scope.event.slug, accessToken);
   }
   const reason = String(payload.reason ?? '').trim();
   const body = approved
@@ -1967,7 +2011,6 @@ async function processDomainEvent(job: Job<Record<string, unknown>>, db: Confere
   }
   return { handledAt: new Date().toISOString(), eventType };
 }
-
 async function releaseExpiredReservations(db: ConferenceDatabase) {
   const candidates = await db
     .select({ reservation: inventoryReservations, order: orders })
@@ -1978,7 +2021,7 @@ async function releaseExpiredReservations(db: ConferenceDatabase) {
       and(
         eq(payments.orderId, orders.id),
         eq(payments.provider, 'wechatpay'),
-        eq(payments.status, 'pending'),
+        inArray(payments.status, [...ACTIVE_WECHAT_PAYMENT_STATUSES]),
       ),
     )
     .where(
@@ -2002,7 +2045,7 @@ async function releaseExpiredReservations(db: ConferenceDatabase) {
           and(
             eq(payments.orderId, candidate.order.id),
             eq(payments.provider, 'wechatpay'),
-            eq(payments.status, 'pending'),
+            inArray(payments.status, [...ACTIVE_WECHAT_PAYMENT_STATUSES]),
           ),
         )
         .limit(1);

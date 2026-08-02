@@ -56,6 +56,9 @@ x-app-environment: &app-environment
   PUBLIC_ORGANIZATION_SLUG: ${PUBLIC_ORGANIZATION_SLUG:-tokems-demo}
   PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN must be the external scheme and host}
   ADMIN_ORIGIN: ${ADMIN_ORIGIN:?ADMIN_ORIGIN must be the external admin scheme and host}
+  PAYMENT_PUBLIC_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-}
+  PAYMENT_PUBLIC_BASE_PATH: ${PAYMENT_PUBLIC_BASE_PATH:-/pay/hui}
+  PAYMENT_PUBLIC_URL: ${PAYMENT_PUBLIC_URL:-}
   PUBLIC_WEB_URL: ${PUBLIC_ORIGIN}
   ADMIN_WEB_URL: ${ADMIN_ORIGIN}
   PUBLIC_SITE_URL: ${PUBLIC_ORIGIN}
@@ -184,10 +187,11 @@ services:
       <<: *app-build
       target: notification-sink
     environment:
+      # Container listen port stays fixed; only the host mapping below is env-driven.
       NOTIFICATION_SINK_PORT: 4080
       NOTIFICATION_SINK_TOKEN: ${NOTIFICATION_WEBHOOK_TOKEN:?NOTIFICATION_WEBHOOK_TOKEN is required}
     ports:
-      - '127.0.0.1:${NOTIFICATION_SINK_PORT:-4080}:4080'
+      - '127.0.0.1:${NOTIFICATION_SINK_HOST_PORT:-${NOTIFICATION_SINK_PORT:-4080}}:4080'
     healthcheck:
       test:
         - CMD
@@ -314,9 +318,15 @@ services:
         NUXT_PUBLIC_ORGANIZATION_SLUG: ${NUXT_PUBLIC_ORGANIZATION_SLUG:-tokems-demo}
         VITE_API_BASE: /api/v1
     environment:
+      # Conference site must stay at domain root; never inherit payment base path.
+      NUXT_APP_BASE_URL: /
       NUXT_API_INTERNAL_BASE: http://api:4100/api/v1
       NUXT_PUBLIC_API_BASE: /api/v1
       NUXT_PUBLIC_ORGANIZATION_SLUG: ${NUXT_PUBLIC_ORGANIZATION_SLUG:-tokems-demo}
+      NUXT_PUBLIC_PAYMENT_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-}
+      NUXT_PUBLIC_PAYMENT_BASE_PATH: ${PAYMENT_PUBLIC_BASE_PATH:-/pay/hui}
+      NUXT_PUBLIC_CONFERENCE_ORIGIN: ${PUBLIC_ORIGIN}
+      NUXT_PUBLIC_PAYMENT_SURFACE: 'false'
       BUILD_SHA: ${BUILD_SHA:-unknown}
       BUILD_TIME: ${BUILD_TIME:-unknown}
       BUILD_MIGRATION: ${BUILD_MIGRATION:-unknown}
@@ -333,7 +343,51 @@ services:
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:3000').then((response) => {
+          fetch('http://127.0.0.1:3000/version.json').then((response) => {
+            if (!response.ok) process.exit(1)
+          }).catch(() => process.exit(1))
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 10s
+
+  payment-web:
+    <<: *node-runtime
+    image: tokems-web:local
+    build:
+      <<: *app-build
+      target: web
+      args:
+        <<: *build-args
+        NUXT_PUBLIC_API_BASE: /api/v1
+        NUXT_PUBLIC_ORGANIZATION_SLUG: ${NUXT_PUBLIC_ORGANIZATION_SLUG:-tokems-demo}
+        VITE_API_BASE: /api/v1
+    environment:
+      NUXT_APP_BASE_URL: ${PAYMENT_PUBLIC_BASE_PATH:-/pay/hui}/
+      NUXT_API_INTERNAL_BASE: http://api:4100/api/v1
+      NUXT_PUBLIC_API_BASE: ${PAYMENT_PUBLIC_BASE_PATH:-/pay/hui}/api/v1
+      NUXT_PUBLIC_ORGANIZATION_SLUG: ${NUXT_PUBLIC_ORGANIZATION_SLUG:-tokems-demo}
+      NUXT_PUBLIC_PAYMENT_ORIGIN: ${PAYMENT_PUBLIC_ORIGIN:-}
+      NUXT_PUBLIC_PAYMENT_BASE_PATH: ${PAYMENT_PUBLIC_BASE_PATH:-/pay/hui}
+      NUXT_PUBLIC_CONFERENCE_ORIGIN: ${PUBLIC_ORIGIN}
+      NUXT_PUBLIC_PAYMENT_SURFACE: 'true'
+      BUILD_SHA: ${BUILD_SHA:-unknown}
+      BUILD_TIME: ${BUILD_TIME:-unknown}
+      BUILD_MIGRATION: ${BUILD_MIGRATION:-unknown}
+      HOST: 0.0.0.0
+      PORT: 3000
+    expose:
+      - '3000'
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000${PAYMENT_PUBLIC_BASE_PATH:-/pay/hui}/version.json').then((response) => {
             if (!response.ok) process.exit(1)
           }).catch(() => process.exit(1))
       interval: 5s
@@ -393,6 +447,8 @@ services:
       api:
         condition: service_healthy
       web:
+        condition: service_healthy
+      payment-web:
         condition: service_healthy
       admin:
         condition: service_healthy
