@@ -547,41 +547,10 @@
   text-align: center;
 }
 
-.payment-placeholder {
-  display: grid;
-  width: 144px;
-  height: 144px;
-  margin: 0 auto 14px;
-  place-items: center;
-  border: 9px solid white;
-  box-shadow: 0 0 0 1px var(--conference-line);
+.payment-status-note {
+  margin: 0 0 14px;
   color: var(--conference-ink-muted);
-  font-family: var(--conference-font-mono);
-  font-size: 10px;
-  background:
-    linear-gradient(90deg, #171717 8px, transparent 8px) 0 0 / 16px 16px,
-    linear-gradient(#171717 8px, transparent 8px) 0 0 / 16px 16px,
-    #fff;
-}
-
-.payment-placeholder.is-confirmed {
-  border-color: white;
-  background: #ecfdf5;
-  color: #047857;
-  font-size: 16px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-
-.payment-placeholder.is-jsapi,
-.payment-placeholder.is-h5 {
-  background:
-    linear-gradient(135deg, #07c160 0%, #06ad56 100%);
-  color: #fff;
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  box-shadow: 0 0 0 1px rgba(7, 193, 96, 0.35);
+  font-size: 14px;
 }
 
 .payment-qr {

@@ -22,7 +22,11 @@ import {
 } from './usePaymentEnvironment';
 
 const OAUTH_SESSION_PREFIX = 'conference.wechatOAuth.';
-const POLL_INTERVAL_MS = 3_000;
+/** 待支付状态轮询间隔（PC 扫码与手机支付统一） */
+const POLL_INTERVAL_MS = 1_000;
+const BURST_POLL_DURATION_MS = 12_000;
+/** 轮询期间强制向微信查单的最小间隔（绕过服务端 15s 节流） */
+const FORCE_SYNC_GAP_MS = 3_000;
 const PREPARE_BACKOFF_MS = 2_500;
 const MAX_AUTO_PREPARE_RETRIES = 1;
 
@@ -276,8 +280,10 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
   const pageVisible = ref(true);
   const autoPrepareRetries = ref(0);
 
-  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let prepareBackoffTimer: ReturnType<typeof setTimeout> | undefined;
+  let burstUntilMs = 0;
+  let lastForcedSyncAtMs = 0;
   let started = false;
 
   const switchOptions = computed(() => manualSwitchChannels(signals.value, channel.value));
@@ -326,27 +332,75 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
   }
 
   /**
-   * Stops the status polling interval.
+   * Stops the status polling timer.
    */
   function stopPolling() {
     if (pollTimer) {
-      clearInterval(pollTimer);
+      clearTimeout(pollTimer);
       pollTimer = undefined;
     }
     polling.value = false;
   }
 
   /**
-   * Starts status-only polling while the page is visible and the order is payable.
+   * Schedules the next status poll tick.
+   *
+   * @param delayMs - Delay before the next tick
    */
-  function startPolling() {
+  function scheduleNextPoll(delayMs: number) {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => {
+      void runPollTick();
+    }, delayMs);
+  }
+
+  /**
+   * Runs one poll tick. Forces a WeChat sync about every FORCE_SYNC_GAP_MS so PC QR
+   * watch and mobile return alike do not sit behind the server query throttle.
+   */
+  async function runPollTick() {
+    pollTimer = undefined;
+    if (!shouldPollOrderStatus(order.value) || !pageVisible.value) {
+      polling.value = false;
+      return;
+    }
+
+    const now = Date.now();
+    // During the post-pay window, sync every tick; otherwise sync about every FORCE_SYNC_GAP_MS.
+    const forceSync =
+      now < burstUntilMs ||
+      lastForcedSyncAtMs === 0 ||
+      now - lastForcedSyncAtMs >= FORCE_SYNC_GAP_MS;
+    if (forceSync) lastForcedSyncAtMs = now;
+
+    await refreshOrderStatus({ sync: forceSync });
+    if (!shouldPollOrderStatus(order.value) || !pageVisible.value) {
+      polling.value = false;
+      return;
+    }
+
+    polling.value = true;
+    scheduleNextPoll(POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Starts status polling while the page is visible and the order is payable.
+   * PC QR and mobile return share the same 1s cadence; `burst` only renews the force-sync window.
+   *
+   * @param options - Pass `burst: true` after JSAPI/H5 return to extend aggressive sync
+   */
+  function startPolling(options: { burst?: boolean } = {}) {
     if (!import.meta.client || !shouldPollOrderStatus(order.value) || !pageVisible.value) return;
-    if (pollTimer) return;
+    if (options.burst) {
+      burstUntilMs = Date.now() + BURST_POLL_DURATION_MS;
+      stopPolling();
+    } else if (pollTimer || polling.value) {
+      return;
+    }
     polling.value = true;
     if (phase.value === 'ready' || phase.value === 'idle') phase.value = 'polling';
-    pollTimer = setInterval(() => {
-      void refreshOrderStatus();
-    }, POLL_INTERVAL_MS);
+    // Kick immediately so PC QR pages do not wait a full interval before the first sync.
+    void runPollTick();
   }
 
   /**
@@ -453,16 +507,21 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
 
   /**
    * Queries order status only. Never re-POSTs prepare on failure or missing paymentUrl.
+   *
+   * @param refreshOptions - Pass `sync: true` to force a WeChat transaction query
    */
-  async function refreshOrderStatus() {
+  async function refreshOrderStatus(refreshOptions: { sync?: boolean } = {}) {
     if (!accessToken.value) return;
     try {
-      const latest = await api.getOrder(options.orderId, accessToken.value);
+      const latest = await api.getOrder(options.orderId, accessToken.value, {
+        sync: refreshOptions.sync,
+      });
       if (!latest) return;
       order.value = latest;
 
       if (latest.status === 'paid') {
         stopPolling();
+        burstUntilMs = 0;
         phase.value = 'paid';
         errorMessage.value = '';
         await options.onPaid?.(latest);
@@ -471,12 +530,14 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
 
       if (latest.status === 'closed') {
         stopPolling();
+        burstUntilMs = 0;
         phase.value = 'closed';
         return;
       }
 
       if (new Date(latest.expiresAt).getTime() <= Date.now()) {
         stopPolling();
+        burstUntilMs = 0;
         phase.value = 'expired';
         return;
       }
@@ -528,8 +589,9 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
         phase.value = 'ready';
       } else {
         phase.value = 'polling';
-        await refreshOrderStatus();
-        startPolling();
+        await refreshOrderStatus({ sync: true });
+        lastForcedSyncAtMs = Date.now();
+        startPolling({ burst: true });
       }
     } catch (error) {
       errorMessage.value = paymentErrorMessage(error, '无法调起微信支付，请稍后重试。');
@@ -579,8 +641,11 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
       return;
     }
     if (!shouldPollOrderStatus(order.value)) return;
-    void refreshOrderStatus().then(() => {
-      if (shouldPollOrderStatus(order.value) && pageVisible.value) startPolling();
+    void refreshOrderStatus({ sync: true }).then(() => {
+      lastForcedSyncAtMs = Date.now();
+      if (shouldPollOrderStatus(order.value) && pageVisible.value) {
+        startPolling({ burst: true });
+      }
     });
   }
 

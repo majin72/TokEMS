@@ -309,12 +309,19 @@ export function createOpaqueToken(bytes = 32) {
 }
 
 const TICKET_CODE_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const STRICT_TICKET_CODE_PATTERN = /^TOK-T-[A-Z0-9]{10}$/u;
+/** Newly issued codes use 16 CSPRNG chars (~82 bits); legacy 10-char codes remain readable. */
+const STRICT_TICKET_CODE_PATTERN = /^TOK-T-[A-Z0-9]{16}$/u;
 const READABLE_TICKET_CODE_PATTERN = /^TOK-T-[A-Z0-9_-]{8,32}$/u;
+const TICKET_CODE_SUFFIX_LENGTH = 16;
 
+/**
+ * Generates an unguessable ticket code for check-in QR payloads.
+ *
+ * @returns Ticket code in the form `TOK-T-` + 16 uppercase alphanumeric characters
+ */
 export function createTicketCode() {
   let suffix = '';
-  for (let index = 0; index < 10; index += 1) {
+  for (let index = 0; index < TICKET_CODE_SUFFIX_LENGTH; index += 1) {
     suffix += TICKET_CODE_ALPHABET[randomInt(0, TICKET_CODE_ALPHABET.length)];
   }
   return `TOK-T-${suffix}`;

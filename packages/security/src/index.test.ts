@@ -30,9 +30,11 @@ describe('ticket code security contract', () => {
     },
   );
 
-  it('BLK-01 keeps historical nanoid ticket codes readable without accepting unsafe paths', () => {
+  it('BLK-01 keeps historical ticket codes readable without accepting unsafe paths', () => {
     expect(isReadableTicketCode('TOK-T-08DPDRLZ_9')).toBe(true);
     expect(isReadableTicketCode('TOK-T-ABC-123_XY')).toBe(true);
+    expect(isReadableTicketCode('TOK-T-0000000001')).toBe(true);
+    expect(isStrictTicketCode('TOK-T-0000000001')).toBe(false);
     expect(isStrictTicketCode('TOK-T-08DPDRLZ_9')).toBe(false);
     expect(isReadableTicketCode('TOK-T-../../etc/passwd')).toBe(false);
     expect(isReadableTicketCode('tok-t-abcdefghij')).toBe(false);

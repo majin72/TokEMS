@@ -321,7 +321,7 @@ async function copyDeviceToken() {
             v-model="ticketCode"
             class="checkin-input"
             aria-label="电子票票号"
-            placeholder="例：TOK-T-0000000001"
+            placeholder="例：TOK-T-A1B2C3D4E5F6G7H8"
             autocomplete="off"
           />
           <button class="button" type="submit" :disabled="pending">

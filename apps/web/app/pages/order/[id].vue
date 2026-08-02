@@ -391,22 +391,21 @@ function switchChannelLabel(channel: string) {
         </section>
         <aside class="order-payment">
           <template v-if="awaitingReview">
-            <div class="payment-placeholder" aria-label="报名等待审核">REVIEW</div>
             <p>审核期间无需付款，请留意报名邮箱中的结果通知。</p>
             <a class="flow-action is-secondary is-full" :href="conferenceHomeHref">返回大会首页</a>
           </template>
           <template v-else-if="isFreeOrder && order.status === 'paid'">
-            <div class="payment-placeholder is-confirmed" aria-label="免费报名已确认">FREE</div>
             <p>席位已确认，电子票可立即用于现场签到。</p>
             <NuxtLink class="flow-action is-full" :to="ticketHref">查看电子票</NuxtLink>
           </template>
           <template v-else-if="order.status === 'pending_payment' || order.status === 'processing'">
             <div
               v-if="paymentPreparing || paymentPhase === 'authorizing'"
-              class="payment-placeholder"
+              class="payment-status-note"
+              role="status"
               :aria-label="paymentPhase === 'authorizing' ? '正在获取微信授权' : '正在准备支付'"
             >
-              …
+              {{ paymentPhase === 'authorizing' ? '正在获取微信授权…' : '正在准备支付…' }}
             </div>
             <QRCode
               v-else-if="paymentChannel === 'native' && paymentCodeUrl"
@@ -417,21 +416,6 @@ function switchChannelLabel(channel: string) {
               render-as="svg"
               aria-label="微信支付二维码"
             />
-            <div
-              v-else-if="paymentChannel === 'jsapi'"
-              class="payment-placeholder is-jsapi"
-              aria-label="微信支付"
-            >
-              WX
-            </div>
-            <div
-              v-else-if="paymentChannel === 'h5'"
-              class="payment-placeholder is-h5"
-              aria-label="微信 H5 支付"
-            >
-              H5
-            </div>
-            <div v-else class="payment-placeholder" aria-label="支付暂不可用">PAY</div>
 
             <p>{{ paymentHint }}</p>
             <p>
@@ -502,7 +486,7 @@ function switchChannelLabel(channel: string) {
               type="button"
               :disabled="paymentPreparing || !canPay"
               style="margin-top: 8px"
-              @click="refreshOrderStatus()"
+              @click="refreshOrderStatus({ sync: true })"
             >
               我已完成支付
             </button>
@@ -534,12 +518,10 @@ function switchChannelLabel(channel: string) {
             </a>
           </template>
           <template v-else-if="['paid', 'partially_refunded'].includes(order.status)">
-            <div class="payment-placeholder" aria-label="订单已支付">OK</div>
             <p>{{ statusLabel }}，电子票状态将从服务端实时读取。</p>
             <NuxtLink class="flow-action is-full" :to="ticketHref">查看电子票</NuxtLink>
           </template>
           <template v-else>
-            <div class="payment-placeholder" aria-label="订单已结束">END</div>
             <p>{{ stateLead }}</p>
             <a class="flow-action is-secondary is-full" :href="registerHref">重新报名</a>
           </template>

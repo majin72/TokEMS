@@ -28,7 +28,7 @@ describe('customer authentication input helpers', () => {
 describe('local ticket code fallback', () => {
   it('uses the same ten-character uppercase contract as server-issued tickets', () => {
     for (let index = 0; index < 1_000; index += 1) {
-      expect(createLocalTicketCode()).toMatch(/^TOK-T-[A-Z0-9]{10}$/u);
+      expect(createLocalTicketCode()).toMatch(/^TOK-T-[A-Z0-9]{16}$/u);
     }
   });
 

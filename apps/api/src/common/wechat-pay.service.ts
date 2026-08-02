@@ -1462,11 +1462,13 @@ export class WeChatPayService {
    *
    * @param orderId - Order UUID.
    * @param accessToken - Bearer order access token.
+   * @param options - Optional force flag to bypass the background query throttle.
    * @returns Success payload when trade_state is SUCCESS; otherwise undefined.
    */
   async queryPayment(
     orderId: string,
     accessToken: string,
+    options: { force?: boolean } = {},
   ): Promise<QueryPaymentSuccess | undefined> {
     const accessTokenHash = createHash('sha256').update(accessToken).digest('hex');
     const [row] = await this.db()
@@ -1499,6 +1501,7 @@ export class WeChatPayService {
     if (!attempt?.outTradeNo) return undefined;
 
     if (
+      !options.force &&
       attempt.lastQueriedAt &&
       Date.now() - attempt.lastQueriedAt.getTime() < QUERY_THROTTLE_MS
     ) {

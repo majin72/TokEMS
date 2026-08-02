@@ -10,6 +10,7 @@ import {
   Module,
   Param,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -404,12 +405,16 @@ class OrdersController {
   async getOrder(
     @Param('identifier') identifier: string,
     @Headers('authorization') authorization?: string,
+    @Query('sync') sync?: string,
   ) {
     const accessToken = orderAccessToken(authorization);
     const current = await this.repository.getOrder(identifier, accessToken);
     if (['pending_payment', 'processing'].includes(current.status)) {
       try {
-        const transaction = await this.weChatPay.queryPayment(current.id, accessToken);
+        const forceSync = sync === '1' || sync === 'true';
+        const transaction = await this.weChatPay.queryPayment(current.id, accessToken, {
+          force: forceSync,
+        });
         if (transaction) {
           await this.repository.confirmPayment(
             transaction.orderId,

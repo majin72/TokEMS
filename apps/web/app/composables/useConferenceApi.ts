@@ -388,10 +388,23 @@ export function useConferenceApi() {
     });
   }
 
-  async function getOrder(identifier: string, accessToken?: string) {
+  /**
+   * Loads an order by id, optionally forcing a WeChat transaction sync.
+   *
+   * @param identifier - Order UUID
+   * @param accessToken - Order access bearer token
+   * @param options - Pass `sync: true` after the user finishes paying to bypass query throttle
+   * @returns Latest order snapshot
+   */
+  async function getOrder(
+    identifier: string,
+    accessToken?: string,
+    options: { sync?: boolean } = {},
+  ) {
     try {
       return await $fetch<Order>(`/orders/${identifier}`, {
         baseURL,
+        query: options.sync ? { sync: '1' } : undefined,
         headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
       });
     } catch (error) {
