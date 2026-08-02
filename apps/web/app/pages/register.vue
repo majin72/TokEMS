@@ -11,8 +11,11 @@ import { useCustomerSession } from '~/composables/useCustomerSession';
 const api = useConferenceApi();
 const customer = useCustomerSession();
 const router = useRouter();
-const event = ref<PublicEvent>(structuredClone(DEMO_EVENT));
-const selectedTicketId = ref(DEMO_EVENT.tickets[0]!.id);
+/** Real event only — never seed DEMO_EVENT prices into the first paint. */
+const event = ref<PublicEvent | null>(null);
+const pageLoading = ref(true);
+const loadError = ref('');
+const selectedTicketId = ref('');
 const pending = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
@@ -31,9 +34,10 @@ const preferences = reactive({
   termsAccepted: false,
 });
 
-const fallbackFields = DEMO_EVENT.registrationForm?.fields ?? [];
-const registrationFields = computed(() => event.value.registrationForm?.fields ?? fallbackFields);
-const experience = computed(() => resolveEventExperience(event.value));
+const registrationFields = computed(() => event.value?.registrationForm?.fields ?? []);
+const experience = computed(() =>
+  event.value ? resolveEventExperience(event.value) : resolveEventExperience(DEMO_EVENT),
+);
 const emptyTicket: PublicEvent['tickets'][number] = {
   id: '',
   name: '暂无可报名票种',
@@ -45,18 +49,21 @@ const emptyTicket: PublicEvent['tickets'][number] = {
   recommended: false,
 };
 
-const selectedTicket = computed(
-  () =>
+const selectedTicket = computed(() => {
+  if (!event.value) return emptyTicket;
+  return (
     event.value.tickets.find((ticket) => ticket.id === selectedTicketId.value) ??
     event.value.tickets[0] ??
-    emptyTicket,
-);
+    emptyTicket
+  );
+});
 
 const money = (amount: number) => `¥${(amount / 100).toLocaleString('zh-CN')}`;
 const priceLabel = (amount: number) => (amount === 0 ? '免费' : money(amount));
 const isFreeTicket = computed(() => selectedTicket.value.price === 0);
 const registrationAvailable = computed(
-  () => event.value.registration.registrationOpen && Boolean(event.value.tickets.length),
+  () =>
+    Boolean(event.value?.registration.registrationOpen && event.value.tickets.length),
 );
 const joiningWaitlist = computed(
   () =>
@@ -66,10 +73,12 @@ const joiningWaitlist = computed(
     !offerToken.value,
 );
 const flowSteps = computed(() =>
-  enabledFlowSteps(event.value, {
-    paymentRequired: !isFreeTicket.value,
-    invoiceRequired: preferences.invoiceRequired,
-  }),
+  event.value
+    ? enabledFlowSteps(event.value, {
+        paymentRequired: !isFreeTicket.value,
+        invoiceRequired: preferences.invoiceRequired,
+      })
+    : [],
 );
 const activeStep = computed(() => activeFlowStep(flowSteps.value, 'ticket-selection'));
 const registrationHelp = computed(
@@ -79,7 +88,7 @@ const registrationHelp = computed(
 );
 const answer = (key: string) => String(answers[key] ?? '').trim();
 const accountRequired = computed(
-  () => event.value.registration.accountMode === 'mobile_otp_required',
+  () => event.value?.registration.accountMode === 'mobile_otp_required',
 );
 const verifiedMobile = computed(() => customer.session.value?.customer.maskedMobile ?? '');
 const inputAutocomplete = (key: string) =>
@@ -92,6 +101,7 @@ const inputAutocomplete = (key: string) =>
     city: 'address-level2',
   })[key] ?? 'off';
 const dateRange = computed(() => {
+  if (!event.value) return '';
   const format = new Intl.DateTimeFormat('zh-CN', {
     timeZone: event.value.timezone,
     year: 'numeric',
@@ -100,7 +110,21 @@ const dateRange = computed(() => {
   });
   return `${format.format(new Date(event.value.startsAt))} 至 ${format.format(new Date(event.value.endsAt))}`;
 });
-useHead(() => ({ title: `报名 · ${event.value.name}` }));
+useHead(() => ({ title: `报名 · ${event.value?.name ?? '大会'}` }));
+
+/**
+ * Applies a loaded public event and selects the ticket from the query string when valid.
+ *
+ * @param loaded - Event payload from API or matching local cache
+ * @param ticketFromQuery - Optional ticket id from the URL
+ */
+function applyLoadedEvent(loaded: PublicEvent, ticketFromQuery = '') {
+  event.value = loaded;
+  selectedTicketId.value = loaded.tickets.some((ticket) => ticket.id === ticketFromQuery)
+    ? ticketFromQuery
+    : (loaded.tickets[0]?.id ?? '');
+  for (const field of registrationFields.value) answers[field.key] ??= '';
+}
 
 watch(isFreeTicket, (free) => {
   if (free) preferences.invoiceRequired = false;
@@ -141,22 +165,40 @@ async function registrationError(error: unknown, fallback: string) {
 
 onMounted(async () => {
   const query = new URL(window.location.href).searchParams;
-  offerToken.value = query.get('offer') ?? '';
-  event.value = await api.getEvent(query.get('event') ?? DEMO_EVENT.slug);
-  await customer.refresh().catch(() => null);
-  if (accountRequired.value && !customer.session.value) {
-    customer.openLogin();
-  }
-  for (const field of registrationFields.value) answers[field.key] ??= '';
+  const slug = query.get('event') ?? DEMO_EVENT.slug;
   const ticketFromQuery = query.get('ticket') ?? '';
-  selectedTicketId.value = event.value.tickets.some((ticket) => ticket.id === ticketFromQuery)
-    ? ticketFromQuery
-    : (event.value.tickets[0]?.id ?? '');
+  offerToken.value = query.get('offer') ?? '';
+
+  // Prefer a cache hit for the same slug; never paint DEMO_EVENT ticket prices.
+  const cached = api.readEvent();
+  if (cached?.slug === slug) {
+    applyLoadedEvent(cached, ticketFromQuery);
+    pageLoading.value = false;
+  }
+
+  try {
+    const loaded = await api.getEvent(slug);
+    applyLoadedEvent(loaded, ticketFromQuery);
+    await customer.refresh().catch(() => null);
+    if (accountRequired.value && !customer.session.value) {
+      customer.openLogin();
+    }
+  } catch (error) {
+    if (!event.value) {
+      loadError.value = error instanceof Error ? error.message : '报名信息加载失败，请刷新重试。';
+    }
+  } finally {
+    pageLoading.value = false;
+  }
 });
 
 async function submit() {
   errorMessage.value = '';
   successMessage.value = '';
+  if (!event.value) {
+    errorMessage.value = '报名信息仍在加载，请稍后再试。';
+    return;
+  }
   if (accountRequired.value && !customer.session.value) {
     errorMessage.value = '本场大会需要先登录，登录后会继续保留当前填写内容。';
     customer.openLogin();
@@ -262,6 +304,16 @@ async function submit() {
   <div class="flow-page">
     <FlowHeader />
     <main class="flow-shell" id="main-content">
+      <div
+        v-if="pageLoading && !event"
+        class="flow-card flow-card__body"
+        style="text-align: center"
+        role="status"
+      >
+        正在加载报名信息…
+      </div>
+      <div v-else-if="loadError && !event" class="form-error" role="alert">{{ loadError }}</div>
+      <template v-else-if="event">
       <p class="flow-eyebrow">REGISTRATION</p>
       <h1 class="flow-title">锁定你的大会席位</h1>
       <p class="flow-lead">{{ registrationHelp }}</p>
@@ -432,6 +484,7 @@ async function submit() {
           </div>
         </aside>
       </div>
+      </template>
     </main>
   </div>
 </template>
