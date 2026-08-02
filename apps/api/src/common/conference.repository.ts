@@ -735,7 +735,7 @@ export class ConferenceRepository {
   ): Promise<WaitlistEntry> {
     const db = this.database.db;
     if (!db) {
-      if (!customer) {
+      if (this.demoEvent.registration.accountMode === 'mobile_otp_required' && !customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
@@ -837,14 +837,17 @@ export class ConferenceRepository {
         )
         .limit(1);
       const releaseSnapshot = release?.snapshot as EventReleaseSnapshot | undefined;
-      if (!customer) {
+      const releasedRegistration = this.registrationSettings(
+        releaseSnapshot?.event?.settings?.registration ?? eventSettings?.registration,
+      );
+      if (releasedRegistration.accountMode === 'mobile_otp_required' && !customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
           HttpStatus.UNAUTHORIZED,
         );
       }
-      if (customer.organizationId !== ticket.organizationId) {
+      if (customer && customer.organizationId !== ticket.organizationId) {
         throw new DomainError(
           API_ERROR_CODES.FORBIDDEN,
           '当前登录账号不属于本场大会',
@@ -1060,7 +1063,7 @@ export class ConferenceRepository {
     const db = this.database.db;
 
     if (!db) {
-      if (!customer) {
+      if (this.demoEvent.registration.accountMode === 'mobile_otp_required' && !customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
@@ -1095,18 +1098,20 @@ export class ConferenceRepository {
           HttpStatus.BAD_REQUEST,
         );
       }
-      const attendee = {
-        name:
-          input.attendee.name ||
-          customer.profile.realName ||
-          customer.profile.nickname ||
-          '参会人',
-        mobile: attendeeMobile,
-        email: input.attendee.email || customer.profile.email || '',
-        company: input.attendee.company || customer.profile.company || '',
-        title: input.attendee.title || customer.profile.title || '',
-        city: input.attendee.city || customer.profile.city || '',
-      };
+      const attendee = customer
+        ? {
+            name:
+              input.attendee.name ||
+              customer.profile.realName ||
+              customer.profile.nickname ||
+              '参会人',
+            mobile: attendeeMobile,
+            email: input.attendee.email || customer.profile.email || '',
+            company: input.attendee.company || customer.profile.company || '',
+            title: input.attendee.title || customer.profile.title || '',
+            city: input.attendee.city || customer.profile.city || '',
+          }
+        : { ...input.attendee, mobile: attendeeMobile };
       const checkoutInput = { ...input, attendee };
       const formAnswers = this.normalizeRegistrationAnswers(
         this.demoEvent.registrationForm?.fields ?? [],
@@ -1252,14 +1257,14 @@ export class ConferenceRepository {
       const releasedRegistration = this.registrationSettings(
         releaseSnapshot?.event?.settings?.registration ?? eventSettings.registration,
       );
-      if (!customer) {
+      if (releasedRegistration.accountMode === 'mobile_otp_required' && !customer) {
         throw new DomainError(
           API_ERROR_CODES.UNAUTHORIZED,
           '本场大会需要先登录',
           HttpStatus.UNAUTHORIZED,
         );
       }
-      if (customer.organizationId !== ticketRow.organizationId) {
+      if (customer && customer.organizationId !== ticketRow.organizationId) {
         throw new DomainError(
           API_ERROR_CODES.FORBIDDEN,
           '当前登录账号不属于本场大会',
@@ -1278,18 +1283,20 @@ export class ConferenceRepository {
       }
       const checkoutInput: CreateRegistration = {
         ...input,
-        attendee: {
-          name:
-            input.attendee.name ||
-            customer.profile.realName ||
-            customer.profile.nickname ||
-            '参会人',
-          mobile: normalizedInputMobile,
-          email: input.attendee.email || customer.profile.email || '',
-          company: input.attendee.company || customer.profile.company || '',
-          title: input.attendee.title || customer.profile.title || '',
-          city: input.attendee.city || customer.profile.city || '',
-        },
+        attendee: customer
+          ? {
+              name:
+                input.attendee.name ||
+                customer.profile.realName ||
+                customer.profile.nickname ||
+                '参会人',
+              mobile: normalizedInputMobile,
+              email: input.attendee.email || customer.profile.email || '',
+              company: input.attendee.company || customer.profile.company || '',
+              title: input.attendee.title || customer.profile.title || '',
+              city: input.attendee.city || customer.profile.city || '',
+            }
+          : { ...input.attendee, mobile: normalizedInputMobile },
       };
       const releasedTicket = releaseSnapshot?.tickets?.find(
         (ticket) => ticket.id === input.ticketTypeId,

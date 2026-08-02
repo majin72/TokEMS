@@ -78,7 +78,9 @@ const registrationHelp = computed(
     '选择参会票种并填写真实信息。提交后将进入下一步。',
 );
 const answer = (key: string) => String(answers[key] ?? '').trim();
-const accountRequired = computed(() => true);
+const accountRequired = computed(
+  () => event.value.registration.accountMode === 'mobile_otp_required',
+);
 const verifiedMobile = computed(() => customer.session.value?.customer.maskedMobile ?? '');
 const inputAutocomplete = (key: string) =>
   ({
@@ -318,10 +320,10 @@ async function submit() {
             >
               <span aria-hidden="true">{{ customer.session.value ? '✓' : '•' }}</span>
               <p v-if="customer.session.value">
-                已登录账号：<strong>{{ verifiedMobile }}</strong>
+                手机号已验证：<strong>{{ verifiedMobile }}</strong>
                 。报名手机号可单独填写，不必与登录号相同。
               </p>
-              <p v-else>请先登录后再填写报名信息，登录成功后会保留当前已填内容。</p>
+              <p v-else>本场大会需要先验证手机号，验证成功后会保留当前填写内容。</p>
               <button v-if="!customer.session.value" type="button" @click="customer.openLogin">
                 登录 / 注册
               </button>
