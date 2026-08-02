@@ -1999,9 +1999,7 @@ export class ConferenceRepository {
           ? await tx
               .select({ id: payments.id })
               .from(payments)
-              .where(
-                and(eq(payments.orderId, orderRow.id), eq(payments.outTradeNo, outTradeNo)),
-              )
+              .where(and(eq(payments.orderId, orderRow.id), eq(payments.outTradeNo, outTradeNo)))
               .limit(1)
           : await tx
               .select({ id: payments.id })
@@ -2029,7 +2027,7 @@ export class ConferenceRepository {
             status: 'succeeded',
             amount: orderRow.amount,
             currency: orderRow.currency,
-            wechatTradeState: 'SUCCESS',
+            wechatTradeState: confirmation.provider === 'wechatpay' ? 'SUCCESS' : null,
             payload: confirmation.payload,
             updatedAt: now,
           })
@@ -2043,7 +2041,7 @@ export class ConferenceRepository {
           amount: orderRow.amount,
           currency: orderRow.currency,
           outTradeNo,
-          wechatTradeState: 'SUCCESS',
+          wechatTradeState: confirmation.provider === 'wechatpay' ? 'SUCCESS' : null,
           payload: confirmation.payload,
         });
       }

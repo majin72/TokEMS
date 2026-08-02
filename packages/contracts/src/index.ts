@@ -2739,6 +2739,8 @@ export type WeChatNativePayment = z.infer<typeof WeChatNativePaymentSchema>;
 export type WeChatJsapiPayment = z.infer<typeof WeChatJsapiPaymentSchema>;
 export type WeChatH5Payment = z.infer<typeof WeChatH5PaymentSchema>;
 export type WeChatPaymentPrepareResult = z.infer<typeof WeChatPaymentPrepareResultSchema>;
+export type WeChatPaymentSwitchResult =
+  WeChatPaymentPrepareResult | { paid: true; orderId: string };
 export type WeChatOAuthStart = z.infer<typeof WeChatOAuthStartSchema>;
 export type WeChatOAuthHandoff = z.infer<typeof WeChatOAuthHandoffSchema>;
 export type WeChatOAuthSession = z.infer<typeof WeChatOAuthSessionSchema>;

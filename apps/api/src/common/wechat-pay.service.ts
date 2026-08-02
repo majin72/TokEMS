@@ -7,7 +7,15 @@ import {
   createHash,
   randomBytes,
 } from 'node:crypto';
-import { HttpStatus, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import {
   API_ERROR_CODES,
   type UpdateWeChatPayConfiguration,
@@ -31,7 +39,7 @@ import {
   payments,
 } from '@conference/database';
 import { resolvePaymentPublicUrl } from '@conference/security';
-import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { ConferenceRepository } from './conference.repository.js';
 import { DatabaseService } from './database.service.js';
 import { DomainError } from './domain-error.js';
@@ -57,6 +65,11 @@ const ACTIVE_ATTEMPT_STATUSES = [
 ] as const;
 const PREPARE_CLAIM_TTL_MS = 15_000;
 const QUERY_THROTTLE_MS = 15_000;
+const FORCE_QUERY_COALESCE_MS = 1_000;
+const PAYMENT_INBOX_MAX_ATTEMPTS = 10;
+const PAYMENT_INBOX_PROCESSING_LEASE_MS = 60_000;
+const PAYMENT_MAINTENANCE_INTERVAL_MS = 15_000;
+const PAYMENT_CLOSE_LEASE_MS = 30_000;
 const OAUTH_STATE_TTL_SECONDS = 600;
 const OAUTH_SESSION_TTL_SECONDS = 1800;
 const OAUTH_HANDOFF_TTL_SECONDS = 120;
@@ -337,14 +350,43 @@ function h5RedirectUrl(orderId: string) {
  * - Channel switches require query → close → CLOSED before a new attempt
  */
 @Injectable()
-export class WeChatPayService {
+export class WeChatPayService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(WeChatPayService.name);
+  private maintenanceTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     @Inject(DatabaseService) private readonly database: DatabaseService,
     @Optional() @Inject(RedisService) private readonly redis?: RedisService,
     @Optional() @Inject(ConferenceRepository) private readonly repository?: ConferenceRepository,
   ) {}
+
+  onApplicationBootstrap() {
+    if (!this.database.db) return;
+    void this.runPaymentMaintenance();
+    this.maintenanceTimer = setInterval(
+      () => void this.runPaymentMaintenance(),
+      PAYMENT_MAINTENANCE_INTERVAL_MS,
+    );
+    this.maintenanceTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+  }
+
+  /**
+   * Runs durable notification recovery and expired-attempt reconciliation.
+   */
+  private async runPaymentMaintenance() {
+    try {
+      await this.reconcilePaymentNotificationInbox();
+      await this.reconcileExpiredPaymentAttempts();
+    } catch (error) {
+      this.logger.error(
+        `Payment maintenance failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    }
+  }
 
   /**
    * Returns the Drizzle client or fails when PostgreSQL mode is unavailable.
@@ -1072,7 +1114,11 @@ export class WeChatPayService {
       .set({
         status: 'unknown',
         wechatTradeState: 'UNKNOWN',
-        payload: { ...payload, lastError: reason.slice(0, 500), unknownAt: new Date().toISOString() },
+        payload: {
+          ...payload,
+          lastError: reason.slice(0, 500),
+          unknownAt: new Date().toISOString(),
+        },
         updatedAt: new Date(),
       })
       .where(eq(payments.id, attemptId));
@@ -1098,7 +1144,11 @@ export class WeChatPayService {
       .update(payments)
       .set({
         status: 'failed',
-        payload: { ...payload, lastError: reason.slice(0, 500), failedAt: new Date().toISOString() },
+        payload: {
+          ...payload,
+          lastError: reason.slice(0, 500),
+          failedAt: new Date().toISOString(),
+        },
         updatedAt: new Date(),
       })
       .where(eq(payments.id, attemptId));
@@ -1247,11 +1297,7 @@ export class WeChatPayService {
     );
     this.assertChannelEnabled(config, 'jsapi');
     if (!config.oauthEnabled) {
-      throw new DomainError(
-        API_ERROR_CODES.FORBIDDEN,
-        '微信 OAuth 尚未启用',
-        HttpStatus.FORBIDDEN,
-      );
+      throw new DomainError(API_ERROR_CODES.FORBIDDEN, '微信 OAuth 尚未启用', HttpStatus.FORBIDDEN);
     }
     const openid = await this.resolveOpenIdFromSession(oauthSessionToken, orderId);
     const { attempt, reusedCredential } = await this.claimAttempt(
@@ -1500,15 +1546,9 @@ export class WeChatPayService {
     const attempt = await this.findActiveAttempt(orderId);
     if (!attempt?.outTradeNo) return undefined;
 
-    if (
-      !options.force &&
-      attempt.lastQueriedAt &&
-      Date.now() - attempt.lastQueriedAt.getTime() < QUERY_THROTTLE_MS
-    ) {
-      return undefined;
-    }
-
-    await this.db()
+    const queryGapMs = options.force ? FORCE_QUERY_COALESCE_MS : QUERY_THROTTLE_MS;
+    const queryCutoff = new Date(Date.now() - queryGapMs);
+    const [claimedAttempt] = await this.db()
       .update(payments)
       .set({
         lastQueriedAt: new Date(),
@@ -1516,7 +1556,14 @@ export class WeChatPayService {
         status: attempt.status === 'pending' ? 'query_pending' : attempt.status,
         updatedAt: new Date(),
       })
-      .where(eq(payments.id, attempt.id));
+      .where(
+        and(
+          eq(payments.id, attempt.id),
+          or(isNull(payments.lastQueriedAt), lt(payments.lastQueriedAt, queryCutoff)),
+        ),
+      )
+      .returning();
+    if (!claimedAttempt) return undefined;
 
     const { config, credentials } = await this.requiredIntegration(row.order.organizationId);
     const result = (await this.request(
@@ -1538,10 +1585,10 @@ export class WeChatPayService {
               ? 'closed'
               : result.trade_state === 'USERPAYING'
                 ? 'query_pending'
-                : attempt.status === 'query_pending'
+                : claimedAttempt.status === 'query_pending'
                   ? 'pending'
-                  : attempt.status,
-        closedAt: result.trade_state === 'CLOSED' ? new Date() : attempt.closedAt,
+                  : claimedAttempt.status,
+        closedAt: result.trade_state === 'CLOSED' ? new Date() : claimedAttempt.closedAt,
         updatedAt: new Date(),
       })
       .where(eq(payments.id, attempt.id));
@@ -1665,6 +1712,12 @@ export class WeChatPayService {
         )
         .limit(1);
       if (!attempt?.outTradeNo) return undefined;
+      if (
+        attempt.status === 'close_pending' &&
+        Date.now() - attempt.updatedAt.getTime() < PAYMENT_CLOSE_LEASE_MS
+      ) {
+        return { busy: true as const };
+      }
       const [updated] = await tx
         .update(payments)
         .set({ status: 'close_pending', updatedAt: new Date() })
@@ -1714,6 +1767,13 @@ export class WeChatPayService {
   }> {
     const orderId = authorized.order.id;
     const attempt = await this.beginCloseAttempt(orderId);
+    if (attempt && 'busy' in attempt) {
+      throw new DomainError(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '微信支付状态正在协调，请稍后重试',
+        HttpStatus.CONFLICT,
+      );
+    }
     if (!attempt?.outTradeNo) {
       return { closed: true };
     }
@@ -2217,8 +2277,7 @@ export class WeChatPayService {
         amount: Number((existingInbox.payload as Record<string, unknown>).amount ?? 0),
         currency: String((existingInbox.payload as Record<string, unknown>).currency ?? 'CNY'),
         occurredAt: String(
-          (existingInbox.payload as Record<string, unknown>).occurredAt ??
-            new Date().toISOString(),
+          (existingInbox.payload as Record<string, unknown>).occurredAt ?? new Date().toISOString(),
         ),
         alreadyProcessed: true,
         alreadyReceived: true,
@@ -2265,9 +2324,7 @@ export class WeChatPayService {
       .limit(1);
 
     let order = payment
-      ? (
-          await this.db().select().from(orders).where(eq(orders.id, payment.orderId)).limit(1)
-        )[0]
+      ? (await this.db().select().from(orders).where(eq(orders.id, payment.orderId)).limit(1))[0]
       : undefined;
     if (!order) {
       // Legacy Native attempts used orderNo as out_trade_no.
@@ -2376,7 +2433,7 @@ export class WeChatPayService {
 
   /**
    * Asynchronously confirms payment for a persisted notification inbox row.
-   * Intended for workers; may also be fire-and-forget from the HTTP notify path.
+   * Used by the HTTP notify path and the API maintenance reconciler.
    *
    * @param inboxId - payment_notification_inbox UUID.
    */
@@ -2385,12 +2442,25 @@ export class WeChatPayService {
       this.logger.error(`Cannot process notification ${inboxId}: ConferenceRepository missing`);
       return;
     }
+    const staleCutoff = new Date(Date.now() - PAYMENT_INBOX_PROCESSING_LEASE_MS);
     const [inbox] = await this.db()
-      .select()
-      .from(paymentNotificationInbox)
-      .where(eq(paymentNotificationInbox.id, inboxId))
-      .limit(1);
-    if (!inbox || inbox.status === 'processed') return;
+      .update(paymentNotificationInbox)
+      .set({ status: 'processing', updatedAt: new Date() })
+      .where(
+        and(
+          eq(paymentNotificationInbox.id, inboxId),
+          lt(paymentNotificationInbox.attemptCount, PAYMENT_INBOX_MAX_ATTEMPTS),
+          or(
+            inArray(paymentNotificationInbox.status, ['received', 'failed']),
+            and(
+              eq(paymentNotificationInbox.status, 'processing'),
+              lt(paymentNotificationInbox.updatedAt, staleCutoff),
+            ),
+          ),
+        ),
+      )
+      .returning();
+    if (!inbox) return;
 
     const payload = inbox.payload as Record<string, unknown>;
     const externalId = String(payload.externalId ?? '');
@@ -2439,17 +2509,125 @@ export class WeChatPayService {
         .where(eq(paymentNotificationInbox.id, inboxId));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'confirm failed';
+      const nextAttempts = inbox.attemptCount + 1;
       await this.db()
         .update(paymentNotificationInbox)
         .set({
-          status: 'failed',
+          status: nextAttempts >= PAYMENT_INBOX_MAX_ATTEMPTS ? 'dead' : 'failed',
           lastError: message.slice(0, 500),
-          attemptCount: sql`${paymentNotificationInbox.attemptCount} + 1`,
+          attemptCount: nextAttempts,
           updatedAt: new Date(),
         })
         .where(eq(paymentNotificationInbox.id, inboxId));
       throw error;
     }
+  }
+
+  /**
+   * Reclaims new, failed, and stale processing notification rows.
+   *
+   * @param limit - Maximum rows to schedule in one maintenance pass
+   * @returns Number of candidate rows handed to the canonical confirmation path
+   */
+  async reconcilePaymentNotificationInbox(limit = 50) {
+    const staleCutoff = new Date(Date.now() - PAYMENT_INBOX_PROCESSING_LEASE_MS);
+    const candidates = await this.db()
+      .select({ id: paymentNotificationInbox.id })
+      .from(paymentNotificationInbox)
+      .where(
+        and(
+          lt(paymentNotificationInbox.attemptCount, PAYMENT_INBOX_MAX_ATTEMPTS),
+          or(
+            inArray(paymentNotificationInbox.status, ['received', 'failed']),
+            and(
+              eq(paymentNotificationInbox.status, 'processing'),
+              lt(paymentNotificationInbox.updatedAt, staleCutoff),
+            ),
+          ),
+        ),
+      )
+      .orderBy(asc(paymentNotificationInbox.updatedAt))
+      .limit(Math.min(Math.max(limit, 1), 100));
+
+    for (const candidate of candidates) {
+      try {
+        await this.processPaymentNotificationAsync(candidate.id);
+      } catch (error) {
+        this.logger.error(
+          `Payment inbox retry failed id=${candidate.id}: ${error instanceof Error ? error.message : 'unknown error'}`,
+        );
+      }
+    }
+    return candidates.length;
+  }
+
+  /**
+   * Queries and safely closes provider attempts whose local payment window expired.
+   * Successful provider transactions are confirmed through ConferenceRepository.
+   *
+   * @param limit - Maximum attempts to reconcile in one maintenance pass
+   * @returns Counts of closed and paid attempts
+   */
+  async reconcileExpiredPaymentAttempts(limit = 50) {
+    if (!this.repository) return { closed: 0, paid: 0 };
+    const now = new Date();
+    const candidates = await this.db()
+      .select({ attempt: payments, order: orders })
+      .from(payments)
+      .innerJoin(orders, eq(orders.id, payments.orderId))
+      .where(
+        and(
+          eq(payments.provider, PROVIDER),
+          inArray(payments.status, [...ACTIVE_ATTEMPT_STATUSES]),
+          sql`coalesce(${payments.prepayExpiresAt}, ${orders.expiresAt}) < ${now}`,
+          lt(orders.expiresAt, now),
+          inArray(orders.status, ['pending_payment', 'processing']),
+        ),
+      )
+      .orderBy(asc(payments.updatedAt))
+      .limit(Math.min(Math.max(limit, 1), 100));
+
+    let closed = 0;
+    let paid = 0;
+    for (const candidate of candidates) {
+      try {
+        const result = await this.closeActiveAttemptLocked({
+          order: candidate.order,
+          eventName: '',
+          accessTokenHash: '',
+        });
+        if (result.paid) {
+          await this.repository.confirmPayment(
+            result.paid.orderId,
+            `wechatpay:${result.paid.externalId}`,
+            {
+              provider: PROVIDER,
+              externalId: result.paid.externalId,
+              amount: result.paid.amount,
+              currency: result.paid.currency,
+              occurredAt: result.paid.occurredAt,
+              paymentId: result.paid.paymentId,
+              outTradeNo: result.paid.outTradeNo,
+              payload: {
+                source: 'expired-attempt-reconciliation',
+                outTradeNo: result.paid.outTradeNo,
+                occurredAt: result.paid.occurredAt,
+                receivedAt: new Date().toISOString(),
+              },
+              reason: '支付窗口结束时查单确认成功',
+            },
+          );
+          paid += 1;
+        } else if (result.closed) {
+          closed += 1;
+        }
+      } catch (error) {
+        this.logger.error(
+          `Expired payment reconciliation failed id=${candidate.attempt.id}: ${error instanceof Error ? error.message : 'unknown error'}`,
+        );
+      }
+    }
+    return { closed, paid };
   }
 }
 

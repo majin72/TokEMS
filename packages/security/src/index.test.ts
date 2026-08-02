@@ -147,13 +147,23 @@ describe('deployment origin security', () => {
       paymentOrigin: 'https://www.ailingdaoli.com',
       paymentBasePath: '/pay/hui',
       paymentPublicUrl: 'https://www.ailingdaoli.com/pay/hui',
-      corsOrigins: [
-        'https://hui.ailingdaoli.com',
-        'https://admin.hui.ailingdaoli.com',
-        'https://www.ailingdaoli.com',
-      ],
+      corsOrigins: ['https://hui.ailingdaoli.com', 'https://admin.hui.ailingdaoli.com'],
     });
   });
+
+  it.each(['http://payments.example.com/pay/hui', 'https://localhost/pay/hui'])(
+    'rejects an unsafe production PAYMENT_PUBLIC_URL %s',
+    (paymentPublicUrl) => {
+      expect(() =>
+        resolveDeploymentOrigins({
+          DEPLOYMENT_MODE: 'production',
+          PUBLIC_ORIGIN: 'https://conference.example.com',
+          ADMIN_ORIGIN: 'https://admin.conference.example.com',
+          PAYMENT_PUBLIC_URL: paymentPublicUrl,
+        }),
+      ).toThrow(/Payment public origin/);
+    },
+  );
 
   it.each([
     ['/pay/hui/', '/pay/hui'],

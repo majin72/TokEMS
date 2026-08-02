@@ -13,6 +13,7 @@ import {
   type WeChatOAuthSession,
   type WeChatOAuthStart,
   type WeChatPaymentChannel,
+  type WeChatPaymentSwitchResult,
   type WaitlistEntry,
   type WaitlistJoin,
 } from '@conference/contracts';
@@ -280,22 +281,19 @@ export function useConferenceApi() {
    * @param orderId - Order identifier
    * @param accessToken - Bearer order access token
    * @param channel - Target payment channel
-   * @returns Acknowledgement payload from the API
+   * @returns Paid acknowledgement or the newly prepared channel payload
    */
   function switchWeChatPaymentChannel(
     orderId: string,
     accessToken: string,
     channel: WeChatPaymentChannel,
-  ): Promise<{ orderId: string; channel: WeChatPaymentChannel }> {
-    return $fetch<{ orderId: string; channel: WeChatPaymentChannel }>(
-      `/payments/wechat/${orderId}/switch`,
-      {
-        method: 'POST',
-        baseURL,
-        headers: { Authorization: `Bearer ${accessToken}` },
-        body: { channel },
-      },
-    );
+  ): Promise<WeChatPaymentSwitchResult> {
+    return $fetch<WeChatPaymentSwitchResult>(`/payments/wechat/${orderId}/switch`, {
+      method: 'POST',
+      baseURL,
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: { channel },
+    });
   }
 
   /**

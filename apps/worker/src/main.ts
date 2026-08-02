@@ -34,13 +34,9 @@ import {
   organizationIntegrations,
   organizations,
   outboxEvents,
-  paymentNotificationInbox,
   payments,
   registrations,
   ticketTypes,
-  tickets,
-  auditLogs,
-  invoiceStateLogs,
   templateHtmlImports,
   templateHtmlDocuments,
   templateAssetUploadReservations,
@@ -61,7 +57,6 @@ import {
   type AliyunSmsTemplateKey,
 } from '@conference/integrations';
 import {
-  createTicketCode,
   decryptIntegrationCredentials,
   openSecret,
   resolveDeploymentOrigins,
@@ -115,8 +110,6 @@ const ACTIVE_WECHAT_PAYMENT_STATUSES = [
   'close_pending',
   'unknown',
 ] as const;
-const PAYMENT_INBOX_MAX_ATTEMPTS = 10;
-const paymentInboxInterval = Number(process.env.PAYMENT_INBOX_INTERVAL_MS ?? 15_000);
 
 type SmsDeliveryContext = {
   templateKey: AliyunSmsTemplateKey;
@@ -129,10 +122,11 @@ type SmsDeliveryContext = {
  * @returns Absolute conference origin without a trailing slash
  */
 function conferenceSiteUrl() {
-  return (process.env.PUBLIC_SITE_URL ?? process.env.PUBLIC_ORIGIN ?? 'http://localhost:3000').replace(
-    /\/+$/,
-    '',
-  );
+  return (
+    process.env.PUBLIC_SITE_URL ??
+    process.env.PUBLIC_ORIGIN ??
+    'http://localhost:3000'
+  ).replace(/\/+$/, '');
 }
 
 /**
@@ -2017,321 +2011,6 @@ async function processDomainEvent(job: Job<Record<string, unknown>>, db: Confere
   }
   return { handledAt: new Date().toISOString(), eventType };
 }
-
-/**
- * Confirms a WeChat payment from a durable notification inbox row.
- * Used when the HTTP notify path persisted the inbox but async confirmation failed.
- *
- * @param db - Conference database handle
- * @param inbox - Inbox row awaiting confirmation
- */
-async function confirmPaymentFromInbox(
-  db: ConferenceDatabase,
-  inbox: typeof paymentNotificationInbox.$inferSelect,
-) {
-  const payload = inbox.payload as Record<string, unknown>;
-  const externalId = String(payload.externalId ?? '');
-  const amount = Number(payload.amount ?? 0);
-  const currency = String(payload.currency ?? 'CNY');
-  const occurredAtRaw = String(payload.occurredAt ?? new Date().toISOString());
-  const occurredAt = new Date(occurredAtRaw);
-  if (!inbox.orderId || !externalId) {
-    throw new Error('Missing orderId or externalId');
-  }
-
-  await db.transaction(async (tx) => {
-    const [orderRow] = await tx
-      .select()
-      .from(orders)
-      .where(eq(orders.id, inbox.orderId!))
-      .for('update')
-      .limit(1);
-    if (!orderRow) throw new Error('Order not found');
-    if (amount && amount !== orderRow.amount) throw new Error('Amount mismatch');
-    if (currency && currency !== orderRow.currency) throw new Error('Currency mismatch');
-
-    const idempotencyKey = `wechatpay:${externalId}`;
-    const [existingIdempotency] = await tx
-      .select({ id: idempotencyKeys.id })
-      .from(idempotencyKeys)
-      .where(and(eq(idempotencyKeys.scope, 'payment:confirm'), eq(idempotencyKeys.key, idempotencyKey)))
-      .limit(1);
-    if (existingIdempotency || orderRow.status === 'paid') {
-      return;
-    }
-    if (orderRow.status !== 'pending_payment' && orderRow.status !== 'processing') {
-      throw new Error(`Order status ${orderRow.status} cannot be paid`);
-    }
-    if (Number.isNaN(occurredAt.getTime()) || occurredAt < orderRow.createdAt) {
-      throw new Error('Invalid payment occurredAt');
-    }
-
-    const [registrationRow] = await tx
-      .select()
-      .from(registrations)
-      .where(eq(registrations.id, orderRow.registrationId))
-      .limit(1);
-    if (!registrationRow) throw new Error('Registration not found');
-    const [ticketTypeRow] = await tx
-      .select()
-      .from(ticketTypes)
-      .where(eq(ticketTypes.id, registrationRow.ticketTypeId))
-      .limit(1);
-    if (!ticketTypeRow) throw new Error('Ticket type not found');
-
-    const now = new Date();
-    await tx.update(orders).set({ status: 'paid', updatedAt: now }).where(eq(orders.id, orderRow.id));
-    await tx
-      .update(registrations)
-      .set({ status: 'confirmed', updatedAt: now })
-      .where(eq(registrations.id, registrationRow.id));
-    await tx
-      .update(ticketTypes)
-      .set({ sold: sql`${ticketTypes.sold} + 1`, updatedAt: now })
-      .where(eq(ticketTypes.id, ticketTypeRow.id));
-    await tx
-      .update(inventoryReservations)
-      .set({ convertedAt: now, updatedAt: now })
-      .where(eq(inventoryReservations.orderId, orderRow.id));
-
-    const [preparedPayment] = inbox.paymentId
-      ? await tx
-          .select({ id: payments.id })
-          .from(payments)
-          .where(and(eq(payments.id, inbox.paymentId), eq(payments.orderId, orderRow.id)))
-          .limit(1)
-      : await tx
-          .select({ id: payments.id })
-          .from(payments)
-          .where(
-            and(eq(payments.orderId, orderRow.id), eq(payments.outTradeNo, inbox.outTradeNo)),
-          )
-          .limit(1);
-    if (preparedPayment) {
-      await tx
-        .update(payments)
-        .set({
-          externalId,
-          status: 'succeeded',
-          amount: orderRow.amount,
-          currency: orderRow.currency,
-          wechatTradeState: 'SUCCESS',
-          payload: {
-            ...payload,
-            notificationId: inbox.notificationId,
-            inboxId: inbox.id,
-            source: 'worker-inbox-retry',
-          },
-          updatedAt: now,
-        })
-        .where(eq(payments.id, preparedPayment.id));
-    } else {
-      await tx.insert(payments).values({
-        orderId: orderRow.id,
-        provider: 'wechatpay',
-        externalId,
-        status: 'succeeded',
-        amount: orderRow.amount,
-        currency: orderRow.currency,
-        outTradeNo: inbox.outTradeNo,
-        wechatTradeState: 'SUCCESS',
-        payload: {
-          ...payload,
-          notificationId: inbox.notificationId,
-          inboxId: inbox.id,
-          source: 'worker-inbox-retry',
-        },
-      });
-    }
-
-    const [existingTicket] = await tx
-      .select({ id: tickets.id })
-      .from(tickets)
-      .where(eq(tickets.registrationId, registrationRow.id))
-      .limit(1);
-    let ticketId = existingTicket?.id;
-    if (!ticketId) {
-      const [ticketRow] = await tx
-        .insert(tickets)
-        .values({
-          eventId: orderRow.eventId,
-          registrationId: registrationRow.id,
-          ticketTypeId: ticketTypeRow.id,
-          code: createTicketCode(),
-        })
-        .returning({ id: tickets.id });
-      ticketId = ticketRow!.id;
-    }
-
-    await tx.insert(outboxEvents).values([
-      {
-        organizationId: orderRow.organizationId,
-        eventId: orderRow.eventId,
-        eventType: 'PaymentSucceeded',
-        correlationId: idempotencyKey,
-        payload: { orderId: orderRow.id, amount: orderRow.amount, currency: orderRow.currency },
-      },
-      {
-        organizationId: orderRow.organizationId,
-        eventId: orderRow.eventId,
-        eventType: 'TicketIssued',
-        correlationId: idempotencyKey,
-        payload: { ticketId, registrationId: registrationRow.id },
-      },
-    ]);
-    await tx.insert(auditLogs).values({
-      organizationId: orderRow.organizationId,
-      eventId: orderRow.eventId,
-      action: 'payment.confirm',
-      resourceType: 'order',
-      resourceId: orderRow.id,
-      before: { status: orderRow.status },
-      after: { status: 'paid', ticketId, paymentProvider: 'wechatpay', source: 'worker-inbox' },
-      traceId: idempotencyKey,
-    });
-    await tx.insert(orderStateLogs).values({
-      orderId: orderRow.id,
-      fromStatus: orderRow.status,
-      toStatus: 'paid',
-      reason: '微信支付回调确认成功（Worker 重试）',
-      metadata: { paymentProvider: 'wechatpay', externalId, inboxId: inbox.id },
-    });
-
-    if (registrationRow.invoiceRequired && orderRow.amount > 0) {
-      const [existingInvoice] = await tx
-        .select({ id: invoiceRequests.id })
-        .from(invoiceRequests)
-        .where(eq(invoiceRequests.orderId, orderRow.id))
-        .limit(1);
-      if (!existingInvoice) {
-        const accessToken = randomBytes(32).toString('base64url');
-        const tokenHash = createHash('sha256').update(accessToken).digest('hex');
-        const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60_000);
-        const [invoice] = await tx
-          .insert(invoiceRequests)
-          .values({
-            requestNo: `INV${now.getFullYear()}${randomBytes(6).toString('hex').toUpperCase()}`,
-            organizationId: orderRow.organizationId,
-            eventId: orderRow.eventId,
-            orderId: orderRow.id,
-            registrationId: registrationRow.id,
-            amount: orderRow.amount,
-            currency: 'CNY',
-            netPaidAmount: orderRow.amount,
-            status: 'awaiting_details',
-          })
-          .returning();
-        await tx.insert(invoiceStateLogs).values({
-          invoiceRequestId: invoice!.id,
-          fromStatus: null,
-          toStatus: 'awaiting_details',
-          reason: '支付成功，已根据报名开票意向创建申请',
-          metadata: { source: 'worker-inbox', orderId: orderRow.id },
-        });
-        await tx.insert(orderAccessTokens).values({
-          orderId: orderRow.id,
-          tokenHash,
-          scopes: ['order:read', 'invoice:read', 'invoice:write'],
-          expiresAt,
-        });
-        await tx.insert(outboxEvents).values({
-          organizationId: orderRow.organizationId,
-          eventId: orderRow.eventId,
-          eventType: 'InvoiceDetailsRequested',
-          correlationId: `invoice:details:${invoice!.id}`,
-          payload: {
-            invoiceId: invoice!.id,
-            orderId: orderRow.id,
-            recipient: registrationRow.attendee.email,
-            expiresAt: expiresAt.toISOString(),
-          },
-        });
-      }
-    }
-
-    await tx.insert(idempotencyKeys).values({
-      scope: 'payment:confirm',
-      key: idempotencyKey,
-      requestHash: createHash('sha256').update(idempotencyKey).digest('hex'),
-      responseCode: 200,
-      responseBody: { orderId: orderRow.id, ticketId, source: 'worker-inbox' },
-      expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
-    });
-  });
-}
-
-/**
- * Retries durable WeChat payment notification inbox rows that were not confirmed.
- *
- * @param db - Conference database handle
- * @returns Number of rows processed successfully
- */
-async function reconcilePaymentNotificationInbox(db: ConferenceDatabase) {
-  const candidates = await db
-    .select()
-    .from(paymentNotificationInbox)
-    .where(
-      and(
-        inArray(paymentNotificationInbox.status, ['received', 'failed']),
-        lt(paymentNotificationInbox.attemptCount, PAYMENT_INBOX_MAX_ATTEMPTS),
-      ),
-    )
-    .orderBy(asc(paymentNotificationInbox.updatedAt))
-    .limit(50);
-
-  let processed = 0;
-  for (const inbox of candidates) {
-    const [claimed] = await db
-      .update(paymentNotificationInbox)
-      .set({
-        status: 'processing',
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(paymentNotificationInbox.id, inbox.id),
-          inArray(paymentNotificationInbox.status, ['received', 'failed']),
-        ),
-      )
-      .returning();
-    if (!claimed) continue;
-
-    try {
-      await confirmPaymentFromInbox(db, claimed);
-      await db
-        .update(paymentNotificationInbox)
-        .set({
-          status: 'processed',
-          processedAt: new Date(),
-          attemptCount: sql`${paymentNotificationInbox.attemptCount} + 1`,
-          lastError: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(paymentNotificationInbox.id, claimed.id));
-      processed += 1;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'confirm failed';
-      const nextAttempts = claimed.attemptCount + 1;
-      await db
-        .update(paymentNotificationInbox)
-        .set({
-          status: nextAttempts >= PAYMENT_INBOX_MAX_ATTEMPTS ? 'dead' : 'failed',
-          lastError: message.slice(0, 500),
-          attemptCount: nextAttempts,
-          updatedAt: new Date(),
-        })
-        .where(eq(paymentNotificationInbox.id, claimed.id));
-      console.error(
-        `[payment-inbox] confirm failed id=${claimed.id} attempts=${nextAttempts} error=${message}`,
-      );
-    }
-  }
-  if (processed > 0) {
-    console.info(`[payment-inbox] processed=${processed}`);
-  }
-  return processed;
-}
-
 async function releaseExpiredReservations(db: ConferenceDatabase) {
   const candidates = await db
     .select({ reservation: inventoryReservations, order: orders })
@@ -3087,7 +2766,6 @@ async function start() {
     5 * 60_000,
   );
   await releaseExpiredReservations(db);
-  await reconcilePaymentNotificationInbox(db);
   await expireWaitlistOffers(db);
   await maintainInvoiceExports(db);
   await recoverStaleHtmlTemplateImports(db);
@@ -3099,13 +2777,6 @@ async function start() {
     void releaseExpiredReservations(db);
     void expireWaitlistOffers(db);
   }, inventoryReleaseInterval);
-  const paymentInboxTimer = setInterval(
-    () =>
-      void reconcilePaymentNotificationInbox(db).catch((error) =>
-        console.error('[payment-inbox] reconciliation failed', error),
-      ),
-    paymentInboxInterval,
-  );
   const exportMaintenanceTimer = setInterval(() => void maintainInvoiceExports(db), 5 * 60_000);
   const htmlImportMaintenanceTimer = setInterval(() => {
     void recoverStaleHtmlTemplateImports(db);
@@ -3129,7 +2800,6 @@ async function start() {
     clearInterval(timer);
     clearInterval(durableFailureTimer);
     clearInterval(inventoryTimer);
-    clearInterval(paymentInboxTimer);
     clearInterval(exportMaintenanceTimer);
     clearInterval(htmlImportMaintenanceTimer);
     clearInterval(customerAuthMaintenanceTimer);

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "webPages": 10,
   "adminViews": 34,
-  "migrations": 35,
-  "latestMigration": "0034_public-user-ids.sql",
-  "databaseTables": 59,
+  "migrations": 38,
+  "latestMigration": "0037_allow_duplicate_registrations.sql",
+  "databaseTables": 60,
   "apiControllers": 23,
-  "apiOperations": 167,
-  "testFiles": 38
+  "apiOperations": 175,
+  "testFiles": 42
 }

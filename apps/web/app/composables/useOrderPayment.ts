@@ -5,6 +5,7 @@ import type {
   WeChatNativePayment,
   WeChatPaymentChannel,
   WeChatPaymentPrepareResult,
+  WeChatPaymentSwitchResult,
 } from '@conference/contracts';
 import {
   captureOAuthHandoffFromUrl,
@@ -176,6 +177,18 @@ export function paymentErrorMessage(error: unknown, fallback: string): string {
 export function isTransientPaymentFailure(error: unknown): boolean {
   const failure = error as { response?: { status?: number }; statusCode?: number; status?: number };
   return !failure?.response?.status && !failure?.statusCode && !failure?.status;
+}
+
+/**
+ * Narrows a channel-switch response that reports an already-paid order.
+ *
+ * @param result - Channel-switch response from the API
+ * @returns True when the server confirmed payment during the switch
+ */
+export function isPaidSwitchResult(
+  result: WeChatPaymentSwitchResult,
+): result is { paid: true; orderId: string } {
+  return 'paid' in result && result.paid === true;
 }
 
 /**
@@ -618,14 +631,22 @@ export function useOrderPayment(options: UseOrderPaymentOptions) {
     clearPreparedPayload();
 
     try {
-      await api.switchWeChatPaymentChannel(options.orderId, accessToken.value, next);
-      channel.value = next;
-      preparing.value = false;
-      await preparePayment({ userInitiated: true });
+      const result = await api.switchWeChatPaymentChannel(options.orderId, accessToken.value, next);
+      if (isPaidSwitchResult(result)) {
+        const paidOrder = order.value ? { ...order.value, status: 'paid' as const } : undefined;
+        if (paidOrder) order.value = paidOrder;
+        phase.value = 'paid';
+        errorMessage.value = '';
+        if (paidOrder) await options.onPaid?.(paidOrder);
+        return;
+      }
+      applyPrepareResult(result);
+      startPolling();
     } catch (error) {
-      preparing.value = false;
       errorMessage.value = paymentErrorMessage(error, '切换支付方式失败，请稍后重试。');
       phase.value = 'error';
+    } finally {
+      preparing.value = false;
     }
   }
 

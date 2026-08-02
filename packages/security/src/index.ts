@@ -93,6 +93,10 @@ export function resolvePaymentPublicSurface(
     paymentOrigin && paymentBasePath ? `${paymentOrigin}${paymentBasePath}` : undefined;
   const paymentPublicUrl = environment.PAYMENT_PUBLIC_URL?.replace(/\/+$/, '') || undefined;
 
+  let resolvedPaymentOrigin = paymentOrigin;
+  let resolvedPaymentBasePath = paymentBasePath;
+  let resolvedPaymentPublicUrl = derivedPaymentUrl;
+
   if (paymentPublicUrl) {
     let url: URL;
     try {
@@ -111,27 +115,25 @@ export function resolvePaymentPublicSurface(
     if (paymentBasePath && expectedPath !== paymentBasePath) {
       throw new Error('PAYMENT_PUBLIC_URL path must match PAYMENT_PUBLIC_BASE_PATH');
     }
-    return {
-      paymentOrigin: paymentOrigin ?? expectedOrigin,
-      paymentBasePath: paymentBasePath ?? expectedPath,
-      paymentPublicUrl: `${expectedOrigin}${expectedPath}`,
-    };
+    resolvedPaymentOrigin = paymentOrigin ?? expectedOrigin;
+    resolvedPaymentBasePath = paymentBasePath ?? expectedPath;
+    resolvedPaymentPublicUrl = `${expectedOrigin}${expectedPath}`;
   }
 
-  if (environment.DEPLOYMENT_MODE === 'production' && paymentOrigin) {
-    const paymentUrl = new URL(paymentOrigin);
+  if (environment.DEPLOYMENT_MODE === 'production' && resolvedPaymentOrigin) {
+    const paymentUrl = new URL(resolvedPaymentOrigin);
     if (paymentUrl.protocol !== 'https:') {
-      throw new Error('PAYMENT_PUBLIC_ORIGIN must use HTTPS when DEPLOYMENT_MODE=production');
+      throw new Error('Payment public origin must use HTTPS when DEPLOYMENT_MODE=production');
     }
     if (isLoopbackHostname(paymentUrl.hostname)) {
-      throw new Error('PAYMENT_PUBLIC_ORIGIN must not use a loopback host in production');
+      throw new Error('Payment public origin must not use a loopback host in production');
     }
   }
 
   return {
-    paymentOrigin,
-    paymentBasePath,
-    paymentPublicUrl: derivedPaymentUrl,
+    paymentOrigin: resolvedPaymentOrigin,
+    paymentBasePath: resolvedPaymentBasePath,
+    paymentPublicUrl: resolvedPaymentPublicUrl,
   };
 }
 
@@ -192,7 +194,11 @@ export function resolveDeploymentOrigins(environment: DeploymentOriginEnvironmen
   if (publicOrigin && adminOrigin && publicOrigin === adminOrigin) {
     throw new Error('PUBLIC_ORIGIN and ADMIN_ORIGIN must use distinct browser origins');
   }
-  if (publicOrigin && paymentSurface.paymentOrigin && publicOrigin === paymentSurface.paymentOrigin) {
+  if (
+    publicOrigin &&
+    paymentSurface.paymentOrigin &&
+    publicOrigin === paymentSurface.paymentOrigin
+  ) {
     throw new Error('PAYMENT_PUBLIC_ORIGIN must differ from PUBLIC_ORIGIN');
   }
 
@@ -246,13 +252,12 @@ export function resolveDeploymentOrigins(environment: DeploymentOriginEnvironmen
     }
   }
 
-  const corsOrigins = [
-    publicOrigin,
-    adminOrigin,
-    publicWebOrigin,
-    adminWebOrigin,
-    paymentSurface.paymentOrigin,
-  ].filter((value): value is string => Boolean(value));
+  // The payment surface proxies its API path through the conference origin. Keeping
+  // its independent origin out of credentialed CORS prevents it from reading
+  // conference sessions or CSRF tokens if that content origin is compromised.
+  const corsOrigins = [publicOrigin, adminOrigin, publicWebOrigin, adminWebOrigin].filter(
+    (value): value is string => Boolean(value),
+  );
 
   return {
     publicOrigin,

@@ -98,6 +98,12 @@ for (const serviceName of ['api', 'web', 'payment-web', 'admin']) {
 if (!configuration.services.gateway.ports?.length) {
   throw new Error('Gateway does not publish the unified host port');
 }
+for (const serviceName of ['postgres', 'redis', 'minio', 'mailpit', 'notification-sink']) {
+  const publishedPorts = configuration.services[serviceName].ports ?? [];
+  if (!publishedPorts.length || publishedPorts.some((port) => port.host_ip !== '127.0.0.1')) {
+    throw new Error(`${serviceName} host ports must stay bound to 127.0.0.1`);
+  }
+}
 for (const [serviceName, imageName] of Object.entries({
   api: 'tokems-api:local',
   worker: 'tokems-worker:local',

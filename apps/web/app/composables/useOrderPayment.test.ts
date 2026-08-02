@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   interpretWeixinPayResult,
+  isPaidSwitchResult,
   isTransientPaymentFailure,
   manualSwitchChannels,
   paymentErrorMessage,
@@ -61,21 +62,15 @@ describe('interpretWeixinPayResult', () => {
   });
 
   it('maps cancel and failure to stable copy', () => {
-    expect(interpretWeixinPayResult({ err_msg: 'get_brand_wcpay_request:cancel' })).toMatch(
-      /取消/,
-    );
-    expect(interpretWeixinPayResult({ err_msg: 'get_brand_wcpay_request:fail' })).toMatch(
-      /未完成/,
-    );
+    expect(interpretWeixinPayResult({ err_msg: 'get_brand_wcpay_request:cancel' })).toMatch(/取消/);
+    expect(interpretWeixinPayResult({ err_msg: 'get_brand_wcpay_request:fail' })).toMatch(/未完成/);
   });
 });
 
 describe('paymentErrorMessage / isTransientPaymentFailure', () => {
   it('prefers Error.message and API message payloads', () => {
     expect(paymentErrorMessage(new Error('网络中断'), 'fallback')).toBe('网络中断');
-    expect(paymentErrorMessage({ data: { message: '通道未启用' } }, 'fallback')).toBe(
-      '通道未启用',
-    );
+    expect(paymentErrorMessage({ data: { message: '通道未启用' } }, 'fallback')).toBe('通道未启用');
     expect(paymentErrorMessage({}, 'fallback')).toBe('fallback');
   });
 
@@ -138,5 +133,21 @@ describe('manualSwitchChannels', () => {
         'native',
       ),
     ).toEqual([]);
+  });
+});
+
+describe('isPaidSwitchResult', () => {
+  it('keeps an already-paid switch response out of the prepare flow', () => {
+    expect(isPaidSwitchResult({ paid: true, orderId: 'ord_1' })).toBe(true);
+    expect(
+      isPaidSwitchResult({
+        orderId: 'ord_1',
+        channel: 'native',
+        attemptId: 'pay_1',
+        outTradeNo: 'TOKPAY1',
+        codeUrl: 'weixin://wxpay/bizpayurl?pr=test',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).toBe(false);
   });
 });

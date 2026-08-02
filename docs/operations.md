@@ -94,7 +94,6 @@ pnpm dev
 | `PUBLIC_ORIGIN`                            | 前台、API、站点链接和回调的外部 HTTPS 来源        |
 | `ADMIN_ORIGIN`                             | 后台独立的外部 HTTPS 来源                         |
 | `GATEWAY_BIND_ADDRESS` / `GATEWAY_PORT`    | 统一网关的宿主机监听地址与端口                    |
-| `DOCKER_PUBLISH_BIND_ADDRESS`              | Postgres/Redis/MinIO/Mailpit/通知接收器宿主机绑定，默认 `127.0.0.1` |
 | `POSTGRES_PORT` / `REDIS_PORT`             | 数据服务宿主机映射端口                            |
 | `MINIO_API_PORT` / `MINIO_CONSOLE_PORT`    | MinIO API / Console 宿主机映射端口                |
 | `MAILPIT_SMTP_PORT` / `MAILPIT_WEB_PORT`   | Mailpit SMTP / Web 宿主机映射端口                 |
@@ -209,11 +208,11 @@ node apps/web/.output/server/index.mjs
 
 TokEMS 将大会主站与支付入口拆分：
 
-| 用途 | 域名 / 路径 |
-| --- | --- |
-| 大会官网、报名、用户中心 | `PUBLIC_ORIGIN`（例如 `https://hui.ailingdaoli.com`） |
-| 订单支付、OAuth、H5 回跳、票券结果 | `PAYMENT_PUBLIC_URL`（例如 `https://www.ailingdaoli.com/pay/hui`） |
-| 微信支付 notify（稳定、不可单独撤销） | `{PUBLIC_ORIGIN}/api/v1/payments/wechat/notify/{organizationId}` |
+| 用途                                  | 域名 / 路径                                                        |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| 大会官网、报名、用户中心              | `PUBLIC_ORIGIN`（例如 `https://hui.ailingdaoli.com`）              |
+| 订单支付、OAuth、H5 回跳、票券结果    | `PAYMENT_PUBLIC_URL`（例如 `https://www.ailingdaoli.com/pay/hui`） |
+| 微信支付 notify（稳定、不可单独撤销） | `{PUBLIC_ORIGIN}/api/v1/payments/wechat/notify/{organizationId}`   |
 
 必填环境变量：
 

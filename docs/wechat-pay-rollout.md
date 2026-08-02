@@ -53,7 +53,7 @@ GROUP BY status;
 
 ## 通知 inbox 重试
 
-HTTP notify 在验签解密并写入 `payment_notification_inbox` 后立即返回 SUCCESS，并异步入账。若异步确认失败，Worker 会按 `PAYMENT_INBOX_INTERVAL_MS`（默认 15s）轮询 `received` / `failed` 行并重试入账；超过 10 次进入 `dead`，需人工按上线后 SQL 排查。
+HTTP notify 在验签解密并写入 `payment_notification_inbox` 后立即返回 SUCCESS，并异步入账。API 支付维护任务每 15 秒通过统一的 `ConferenceRepository.confirmPayment` 事务重试 `received` / `failed` 行，并回收超过 60 秒的 `processing` 租约；超过 10 次进入 `dead`，需人工按上线后 SQL 排查。支付窗口结束后，维护任务会先向微信查单并确认关单，随后 Worker 才释放库存。
 
 ### L1：关闭单个新通道
 

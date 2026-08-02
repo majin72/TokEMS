@@ -410,11 +410,9 @@ onMounted(load);
       </section>
       <div class="settings-security-note">
         <strong>安全策略</strong>
-        <span
-          >密钥使用 AES-256-GCM
+        <span>密钥使用 AES-256-GCM
           加密保存。OAuth AppSecret 永不返回前端，也不写入代理或追踪日志。稳定 notify
-          固定在大会主站 API，支付页入口可单独回滚。</span
-        >
+          固定在大会主站 API，支付页入口可单独回滚。</span>
       </div>
       <div v-if="configuration?.lastError" class="settings-inline-error">
         最近一次验证：{{ configuration.lastError }}
