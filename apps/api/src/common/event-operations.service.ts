@@ -1,18 +1,26 @@
-import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Optional } from '@nestjs/common';
 import type {
   ConferenceTemplateDefinition,
   CreateEvent,
   EventBlueprint,
+  EventContextOption,
   EventId,
   EventRelease,
+  EventSlugAvailability,
+  EventSlugUpdateResult,
   EventSummary,
   OrganizationMember,
   RegistrationField,
   RegistrationForm,
   TemplatePackage,
+  UpdateEventSlug,
   UpdateOrganizationMember,
 } from '@conference/contracts';
-import { API_ERROR_CODES, normalizeConferenceTemplateDefinition } from '@conference/contracts';
+import {
+  API_ERROR_CODES,
+  DEMO_IDS,
+  normalizeConferenceTemplateDefinition,
+} from '@conference/contracts';
 import {
   auditLogs,
   checkinLists,
@@ -20,12 +28,14 @@ import {
   conferenceTemplateVersions,
   eventBlueprints,
   eventReleases,
+  eventSlugAliases,
   eventTemplateBindings,
   eventTemplateOverrides,
   events,
   inventoryReservations,
   memberProfiles,
   memberships,
+  organizationHomepageEvents,
   organizations,
   outboxEvents,
   publicUserIds,
@@ -39,13 +49,28 @@ import {
   waitlistEntries,
 } from '@conference/database';
 import { and, asc, count, desc, eq, gt, isNull, max, sum } from 'drizzle-orm';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { DatabaseService } from './database.service.js';
 import { DomainError } from './domain-error.js';
+import { EventReleaseActivationService } from './event-release-activation.service.js';
 import { requirePublicUserId } from './public-user-id.js';
-import { mergeTemplateDefinition } from './template-operations.service.js';
+import { mergeTemplateDefinition } from './template-definition.js';
 
 type Database = NonNullable<DatabaseService['db']>;
+
+const generateEventShortSlug = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 6);
+
+function isConfiguredSuperAdministrator(
+  user: { id: string },
+  member: { role: string; grants: string[]; status: 'active' | 'disabled' },
+) {
+  return (
+    user.id === (process.env.ADMIN_USER_ID ?? DEMO_IDS.adminUser).trim() &&
+    member.status === 'active' &&
+    member.role === 'organization_admin' &&
+    member.grants.includes('*')
+  );
+}
 
 interface BlueprintSnapshot {
   event?: { tagline?: string; description?: string; timezone?: string; locale?: string };
@@ -116,7 +141,12 @@ function normalizeFields(fields: RegistrationField[]) {
 
 @Injectable()
 export class EventOperationsService {
-  constructor(@Inject(DatabaseService) private readonly database: DatabaseService) {}
+  constructor(
+    @Inject(DatabaseService) private readonly database: DatabaseService,
+    @Optional()
+    @Inject(EventReleaseActivationService)
+    private readonly releaseActivation?: EventReleaseActivationService,
+  ) {}
 
   private db(): Database {
     if (!this.database.db) {
@@ -127,6 +157,10 @@ export class EventOperationsService {
       );
     }
     return this.database.db;
+  }
+
+  private releases() {
+    return this.releaseActivation ?? new EventReleaseActivationService(this.database);
   }
 
   private async scopedEvent(organizationId: string, eventId: EventId) {
@@ -148,6 +182,7 @@ export class EventOperationsService {
   private releaseFromRow(
     row: typeof eventReleases.$inferSelect,
     currentReleaseId: string | null,
+    createdByName: string | null = null,
   ): EventRelease {
     return {
       id: row.id,
@@ -157,6 +192,10 @@ export class EventOperationsService {
       templateVersionId: row.templateVersionId,
       status: row.status,
       artifactKey: row.artifactKey,
+      changeSummary: row.changeSummary,
+      changeScope: row.changeScope as EventRelease['changeScope'],
+      activationKind: row.activationKind as EventRelease['activationKind'],
+      createdByName,
       publishedAt: row.publishedAt.toISOString(),
       rolledBackAt: row.rolledBackAt?.toISOString() ?? null,
       active: row.id === currentReleaseId,
@@ -200,6 +239,7 @@ export class EventOperationsService {
       role: membership.role,
       grants: membership.grants,
       status: membership.status,
+      isSuperAdministrator: isConfiguredSuperAdministrator(user, membership),
       profile: profile
         ? {
             company: profile.company,
@@ -298,6 +338,7 @@ export class EventOperationsService {
       role: result.membership.role,
       grants: result.membership.grants,
       status: result.membership.status,
+      isSuperAdministrator: isConfiguredSuperAdministrator(result.user, result.membership),
       profile: {
         company: result.profile.company,
         title: result.profile.title,
@@ -309,13 +350,20 @@ export class EventOperationsService {
   }
 
   async listEvents(organizationId: string): Promise<EventSummary[]> {
-    const rows = await this.db()
-      .select({ event: events, registrationCount: count(registrations.id) })
-      .from(events)
-      .leftJoin(registrations, eq(registrations.eventId, events.id))
-      .where(eq(events.organizationId, organizationId))
-      .groupBy(events.id)
-      .orderBy(desc(events.createdAt));
+    const [rows, homepage] = await Promise.all([
+      this.db()
+        .select({ event: events, registrationCount: count(registrations.id) })
+        .from(events)
+        .leftJoin(registrations, eq(registrations.eventId, events.id))
+        .where(eq(events.organizationId, organizationId))
+        .groupBy(events.id)
+        .orderBy(desc(events.createdAt)),
+      this.db()
+        .select({ eventId: organizationHomepageEvents.eventId })
+        .from(organizationHomepageEvents)
+        .where(eq(organizationHomepageEvents.organizationId, organizationId))
+        .limit(1),
+    ]);
 
     return Promise.all(
       rows.map(async ({ event, registrationCount }) => {
@@ -355,9 +403,165 @@ export class EventOperationsService {
           templateUpgradeAvailable:
             Boolean(binding?.currentPublishedVersionId) &&
             binding?.versionId !== binding?.currentPublishedVersionId,
+          isHomepageDefault: homepage[0]?.eventId === event.id,
         };
       }),
     );
+  }
+
+  async listEventOptions(organizationId: string): Promise<EventContextOption[]> {
+    const rows = await this.db()
+      .select({ event: events, registrationCount: count(registrations.id) })
+      .from(events)
+      .leftJoin(registrations, eq(registrations.eventId, events.id))
+      .where(eq(events.organizationId, organizationId))
+      .groupBy(events.id)
+      .orderBy(desc(events.createdAt));
+
+    return rows.map(({ event, registrationCount }) => ({
+      id: event.id,
+      slug: event.slug,
+      name: event.name,
+      shortName: event.shortName,
+      status: event.status,
+      startsAt: event.startsAt.toISOString(),
+      endsAt: event.endsAt.toISOString(),
+      city: event.city,
+      registrationCount: Number(registrationCount),
+    }));
+  }
+
+  async eventSlugAvailability(
+    organizationId: string,
+    slug: string,
+    eventId?: EventId,
+  ): Promise<EventSlugAvailability> {
+    const [currentRows, aliasRows] = await Promise.all([
+      this.db()
+        .select({ eventId: events.id })
+        .from(events)
+        .where(and(eq(events.organizationId, organizationId), eq(events.slug, slug)))
+        .limit(1),
+      this.db()
+        .select({ eventId: eventSlugAliases.eventId })
+        .from(eventSlugAliases)
+        .where(
+          and(eq(eventSlugAliases.organizationId, organizationId), eq(eventSlugAliases.slug, slug)),
+        )
+        .limit(1),
+    ]);
+    const currentOwner = currentRows[0]?.eventId;
+    const aliasOwner = aliasRows[0]?.eventId;
+    return {
+      slug,
+      available:
+        (!currentOwner || currentOwner === eventId) && (!aliasOwner || aliasOwner === eventId),
+      current: currentOwner === eventId,
+    };
+  }
+
+  async updateEventSlug(
+    organizationId: string,
+    eventId: EventId,
+    actorId: string,
+    input: UpdateEventSlug,
+  ): Promise<EventSlugUpdateResult> {
+    return this.db().transaction(async (tx) => {
+      const [organization] = await tx
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.id, organizationId))
+        .for('update')
+        .limit(1);
+      if (!organization) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '组织不存在或无权访问',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      const [event] = await tx
+        .select({ id: events.id, slug: events.slug })
+        .from(events)
+        .where(and(eq(events.id, eventId), eq(events.organizationId, organizationId)))
+        .for('update')
+        .limit(1);
+      if (!event) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '大会不存在或无权访问',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      if (event.slug === input.slug) {
+        return {
+          eventId,
+          slug: input.slug,
+          previousSlug: event.slug,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+
+      const [currentOwner] = await tx
+        .select({ eventId: events.id })
+        .from(events)
+        .where(and(eq(events.organizationId, organizationId), eq(events.slug, input.slug)))
+        .limit(1);
+      const [aliasOwner] = await tx
+        .select({ eventId: eventSlugAliases.eventId })
+        .from(eventSlugAliases)
+        .where(
+          and(
+            eq(eventSlugAliases.organizationId, organizationId),
+            eq(eventSlugAliases.slug, input.slug),
+          ),
+        )
+        .limit(1);
+      if (currentOwner || (aliasOwner && aliasOwner.eventId !== eventId)) {
+        throw new DomainError(
+          API_ERROR_CODES.VALIDATION_ERROR,
+          '当前组织已存在相同短地址，请更换后重试',
+          HttpStatus.CONFLICT,
+        );
+      }
+
+      if (aliasOwner?.eventId === eventId) {
+        await tx
+          .delete(eventSlugAliases)
+          .where(
+            and(
+              eq(eventSlugAliases.organizationId, organizationId),
+              eq(eventSlugAliases.slug, input.slug),
+            ),
+          );
+      }
+      await tx
+        .insert(eventSlugAliases)
+        .values({ organizationId, eventId, slug: event.slug })
+        .onConflictDoNothing();
+      const now = new Date();
+      await tx
+        .update(events)
+        .set({ slug: input.slug, updatedAt: now })
+        .where(and(eq(events.id, eventId), eq(events.organizationId, organizationId)));
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        action: 'event.public_url.update',
+        resourceType: 'event',
+        resourceId: String(eventId),
+        before: { slug: event.slug },
+        after: { slug: input.slug },
+        traceId: crypto.randomUUID(),
+      });
+      return {
+        eventId,
+        slug: input.slug,
+        previousSlug: event.slug,
+        updatedAt: now.toISOString(),
+      };
+    });
   }
 
   async listBlueprints(organizationId: string): Promise<EventBlueprint[]> {
@@ -403,9 +607,10 @@ export class EventOperationsService {
     try {
       return await db.transaction(async (tx) => {
         const [organization] = await tx
-          .select({ settings: organizations.settings })
+          .select({ id: organizations.id })
           .from(organizations)
           .where(eq(organizations.id, organizationId))
+          .for('key share')
           .limit(1);
         if (!organization) {
           throw new DomainError(
@@ -414,17 +619,8 @@ export class EventOperationsService {
             HttpStatus.NOT_FOUND,
           );
         }
-        const organizationSettings = organization.settings as {
-          defaultTimezone?: string;
-          defaultBlueprintId?: string | null;
-          customerAccounts?: {
-            defaultAccountMode?: 'mobile_otp_required' | 'guest_allowed';
-          };
-        };
-        const effectiveTimezone =
-          input.timezone ?? organizationSettings.defaultTimezone ?? 'Asia/Shanghai';
-        const effectiveBlueprintId =
-          input.blueprintId ?? organizationSettings.defaultBlueprintId ?? undefined;
+        const effectiveTimezone = input.timezone ?? 'Asia/Shanghai';
+        const effectiveBlueprintId = input.blueprintId;
         const [selectedTemplate] = await tx
           .select({
             version: conferenceTemplateVersions,
@@ -456,15 +652,42 @@ export class EventOperationsService {
             HttpStatus.NOT_FOUND,
           );
         }
-        const [duplicate] = await tx
-          .select({ id: events.id })
-          .from(events)
-          .where(and(eq(events.organizationId, organizationId), eq(events.slug, input.slug)))
-          .limit(1);
-        if (duplicate) {
+        const slugAvailable = async (candidate: string) => {
+          const [currentRows, aliasRows] = await Promise.all([
+            tx
+              .select({ eventId: events.id })
+              .from(events)
+              .where(and(eq(events.organizationId, organizationId), eq(events.slug, candidate)))
+              .limit(1),
+            tx
+              .select({ eventId: eventSlugAliases.eventId })
+              .from(eventSlugAliases)
+              .where(
+                and(
+                  eq(eventSlugAliases.organizationId, organizationId),
+                  eq(eventSlugAliases.slug, candidate),
+                ),
+              )
+              .limit(1),
+          ]);
+          return !currentRows[0] && !aliasRows[0];
+        };
+        let effectiveSlug = input.slug;
+        for (let attempt = 0; !effectiveSlug && attempt < 10; attempt += 1) {
+          const candidate = `e${generateEventShortSlug()}`;
+          if (await slugAvailable(candidate)) effectiveSlug = candidate;
+        }
+        if (!effectiveSlug) {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '暂时无法生成大会短地址，请重试',
+            HttpStatus.SERVICE_UNAVAILABLE,
+          );
+        }
+        if (!(await slugAvailable(effectiveSlug))) {
           throw new DomainError(
             API_ERROR_CODES.VALIDATION_ERROR,
-            '当前组织已存在相同路径的大会',
+            '当前组织已存在相同短地址',
             HttpStatus.CONFLICT,
           );
         }
@@ -508,7 +731,7 @@ export class EventOperationsService {
           .insert(events)
           .values({
             organizationId,
-            slug: input.slug,
+            slug: effectiveSlug,
             name: input.name,
             shortName: input.shortName,
             tagline: snapshot.event?.tagline ?? `${input.name}，连接行业洞察与增长实践`,
@@ -530,10 +753,9 @@ export class EventOperationsService {
                 paymentMode: 'ticketed',
                 currency: 'CNY',
                 registrationOpen: true,
-                accountMode:
-                  organizationSettings.customerAccounts?.defaultAccountMode === 'guest_allowed'
-                    ? 'guest_allowed'
-                    : 'mobile_otp_required',
+                accountMode: 'mobile_otp_required',
+                additionalPurchaseEnabled: false,
+                maxActiveSeatsPerPurchaser: 5,
               },
               stats: { seats: 0, speakers: 0, days: 1, attendeeSatisfaction: 0 },
               faqs: templateDefinition.faq.items
@@ -632,6 +854,13 @@ export class EventOperationsService {
         return event!;
       });
     } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === '23505') {
+        throw new DomainError(
+          API_ERROR_CODES.VALIDATION_ERROR,
+          '当前组织已存在相同短地址',
+          HttpStatus.CONFLICT,
+        );
+      }
       if (error && typeof error === 'object' && 'code' in error && error.code === '22003') {
         throw new DomainError(
           API_ERROR_CODES.INVALID_STATE_TRANSITION,
@@ -648,11 +877,14 @@ export class EventOperationsService {
     const settings = event.settings as { currentReleaseId?: string };
     return (
       await this.db()
-        .select()
+        .select({ release: eventReleases, createdByName: users.name })
         .from(eventReleases)
+        .leftJoin(users, eq(users.id, eventReleases.createdBy))
         .where(eq(eventReleases.eventId, eventId))
         .orderBy(desc(eventReleases.version))
-    ).map((row) => this.releaseFromRow(row, settings.currentReleaseId ?? null));
+    ).map((row) =>
+      this.releaseFromRow(row.release, settings.currentReleaseId ?? null, row.createdByName),
+    );
   }
 
   async publishEvent(
@@ -661,6 +893,26 @@ export class EventOperationsService {
     actorId: string,
     templateKey?: string,
   ): Promise<EventRelease> {
+    if (this.releaseActivation) {
+      const activation = await this.releaseActivation.activate({
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'site',
+        changeSummary: '手动激活大会站点',
+        activationKind: 'manual',
+        ...(templateKey ? { templateKey } : {}),
+        bringOnlineFromConfiguring: true,
+      });
+      if (!activation.release) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '大会当前没有可以激活的版本',
+          HttpStatus.CONFLICT,
+        );
+      }
+      return this.releaseFromRow(activation.release, activation.release.id);
+    }
     const db = this.db();
     return db.transaction(async (tx) => {
       const [event] = await tx
@@ -776,11 +1028,18 @@ export class EventOperationsService {
         registrationOpen:
           !('registrationOpen' in eventRegistration) ||
           eventRegistration.registrationOpen !== false,
-        accountMode:
-          'accountMode' in eventRegistration &&
-          eventRegistration.accountMode === 'mobile_otp_required'
-            ? ('mobile_otp_required' as const)
-            : ('guest_allowed' as const),
+        accountMode: 'mobile_otp_required' as const,
+        additionalPurchaseEnabled:
+          'additionalPurchaseEnabled' in eventRegistration &&
+          eventRegistration.additionalPurchaseEnabled === true,
+        maxActiveSeatsPerPurchaser:
+          'maxActiveSeatsPerPurchaser' in eventRegistration &&
+          typeof eventRegistration.maxActiveSeatsPerPurchaser === 'number' &&
+          Number.isInteger(eventRegistration.maxActiveSeatsPerPurchaser) &&
+          eventRegistration.maxActiveSeatsPerPurchaser >= 1 &&
+          eventRegistration.maxActiveSeatsPerPurchaser <= 20
+            ? eventRegistration.maxActiveSeatsPerPurchaser
+            : 5,
       };
       if (registration.paymentMode === 'free' && ticketRows.some((ticket) => ticket.price !== 0)) {
         throw new DomainError(
@@ -994,40 +1253,60 @@ export class EventOperationsService {
               paymentMode?: 'free' | 'ticketed';
               registrationOpen?: boolean;
               accountMode?: 'mobile_otp_required' | 'guest_allowed';
+              additionalPurchaseEnabled?: boolean;
+              maxActiveSeatsPerPurchaser?: number;
             };
           };
         };
       };
-      const registrationOpen = snapshot.event?.settings?.registration?.registrationOpen !== false;
+      const targetRegistrationOpen =
+        snapshot.event?.settings?.registration?.registrationOpen !== false;
+      const registrationOpen =
+        event.status === 'registration_open'
+          ? true
+          : ['prepublished', 'in_progress', 'ended'].includes(event.status)
+            ? false
+            : targetRegistrationOpen;
       if (settings.currentReleaseId && settings.currentReleaseId !== releaseId) {
         await tx
           .update(eventReleases)
           .set({ rolledBackAt: new Date() })
           .where(eq(eventReleases.id, settings.currentReleaseId));
       }
+      const nextSettings: Record<string, unknown> = {
+        ...settings,
+        registration: {
+          paymentMode:
+            snapshot.event?.settings?.registration &&
+            'paymentMode' in snapshot.event.settings.registration &&
+            snapshot.event.settings.registration.paymentMode === 'free'
+              ? ('free' as const)
+              : ('ticketed' as const),
+          currency: 'CNY' as const,
+          registrationOpen,
+          accountMode: 'mobile_otp_required' as const,
+          additionalPurchaseEnabled:
+            snapshot.event?.settings?.registration?.additionalPurchaseEnabled === true,
+          maxActiveSeatsPerPurchaser:
+            typeof snapshot.event?.settings?.registration?.maxActiveSeatsPerPurchaser ===
+              'number' &&
+            Number.isInteger(
+              snapshot.event.settings.registration.maxActiveSeatsPerPurchaser,
+            ) &&
+            snapshot.event.settings.registration.maxActiveSeatsPerPurchaser >= 1 &&
+            snapshot.event.settings.registration.maxActiveSeatsPerPurchaser <= 20
+              ? snapshot.event.settings.registration.maxActiveSeatsPerPurchaser
+              : 5,
+        },
+        currentReleaseId: target.id,
+        templateKey: target.templateKey,
+      };
+      if (target.templateVersionId) nextSettings.templateVersionId = target.templateVersionId;
+      else delete nextSettings.templateVersionId;
       await tx
         .update(events)
         .set({
-          status: registrationOpen ? 'registration_open' : 'prepublished',
-          settings: {
-            ...settings,
-            registration: {
-              paymentMode:
-                snapshot.event?.settings?.registration &&
-                'paymentMode' in snapshot.event.settings.registration &&
-                snapshot.event.settings.registration.paymentMode === 'free'
-                  ? 'free'
-                  : 'ticketed',
-              currency: 'CNY',
-              registrationOpen,
-              accountMode:
-                snapshot.event?.settings?.registration?.accountMode === 'mobile_otp_required'
-                  ? 'mobile_otp_required'
-                  : 'guest_allowed',
-            },
-            currentReleaseId: target.id,
-            templateKey: target.templateKey,
-          },
+          settings: nextSettings,
           updatedAt: new Date(),
         })
         .where(eq(events.id, eventId));
@@ -1079,22 +1358,33 @@ export class EventOperationsService {
       'id' | 'organizationId' | 'eventId' | 'sold' | 'createdAt' | 'updatedAt'
     >,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [row] = await this.db()
-      .insert(ticketTypes)
-      .values({ ...input, organizationId, eventId })
-      .returning();
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'ticket_type.create',
-      'ticket_type',
-      row!.id,
-      undefined,
-      row,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'ticket',
+        changeSummary: `新增票种“${input.name}”`,
+      },
+      async (tx) => {
+        const [row] = await tx
+          .insert(ticketTypes)
+          .values({ ...input, organizationId, eventId })
+          .returning();
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'ticket_type.create',
+          resourceType: 'ticket_type',
+          resourceId: row!.id,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row!;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async listArchivedTicketTypes(organizationId: string, eventId: EventId) {
@@ -1112,24 +1402,37 @@ export class EventOperationsService {
     ticketTypeId: string,
     actorId: string,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [row] = await this.db()
-      .update(ticketTypes)
-      .set({ active: true, updatedAt: new Date() })
-      .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
-      .returning();
-    if (!row) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '票种不存在', HttpStatus.NOT_FOUND);
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'ticket_type.restore',
-      'ticket_type',
-      ticketTypeId,
-      undefined,
-      row,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'ticket',
+        changeSummary: '恢复票种',
+      },
+      async (tx) => {
+        const [row] = await tx
+          .update(ticketTypes)
+          .set({ active: true, updatedAt: new Date() })
+          .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
+          .returning();
+        if (!row) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '票种不存在', HttpStatus.NOT_FOUND);
+        }
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'ticket_type.restore',
+          resourceType: 'ticket_type',
+          resourceId: ticketTypeId,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async updateTicketType(
@@ -1139,63 +1442,76 @@ export class EventOperationsService {
     actorId: string,
     patch: Record<string, unknown>,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const db = this.db();
-    const [before] = await db
-      .select()
-      .from(ticketTypes)
-      .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
-      .limit(1);
-    if (!before)
-      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '票种不存在', HttpStatus.NOT_FOUND);
-    if (typeof patch.capacity === 'number') {
-      const [held] = await db
-        .select({ quantity: sum(inventoryReservations.quantity) })
-        .from(inventoryReservations)
-        .where(
-          and(
-            eq(inventoryReservations.ticketTypeId, ticketTypeId),
-            isNull(inventoryReservations.convertedAt),
-            isNull(inventoryReservations.releasedAt),
-            gt(inventoryReservations.expiresAt, new Date()),
-          ),
-        );
-      const [waitlistHeld] = await db
-        .select({ quantity: count() })
-        .from(waitlistEntries)
-        .where(
-          and(
-            eq(waitlistEntries.ticketTypeId, ticketTypeId),
-            eq(waitlistEntries.status, 'invited'),
-            gt(waitlistEntries.expiresAt, new Date()),
-          ),
-        );
-      const minimumCapacity =
-        before.sold + Number(held?.quantity ?? 0) + Number(waitlistHeld?.quantity ?? 0);
-      if (patch.capacity < minimumCapacity) {
-        throw new DomainError(
-          API_ERROR_CODES.INVENTORY_UNAVAILABLE,
-          `容量不能低于已售与占用合计 ${minimumCapacity}`,
-          HttpStatus.CONFLICT,
-        );
-      }
-    }
-    const [row] = await db
-      .update(ticketTypes)
-      .set({ ...(patch as Partial<typeof ticketTypes.$inferInsert>), updatedAt: new Date() })
-      .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
-      .returning();
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'ticket_type.update',
-      'ticket_type',
-      ticketTypeId,
-      before,
-      row,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'ticket',
+        changeSummary: '更新票种配置',
+      },
+      async (tx) => {
+        const [before] = await tx
+          .select()
+          .from(ticketTypes)
+          .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
+          .for('update')
+          .limit(1);
+        if (!before) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '票种不存在', HttpStatus.NOT_FOUND);
+        }
+        if (typeof patch.capacity === 'number') {
+          const [held] = await tx
+            .select({ quantity: sum(inventoryReservations.quantity) })
+            .from(inventoryReservations)
+            .where(
+              and(
+                eq(inventoryReservations.ticketTypeId, ticketTypeId),
+                isNull(inventoryReservations.convertedAt),
+                isNull(inventoryReservations.releasedAt),
+                gt(inventoryReservations.expiresAt, new Date()),
+              ),
+            );
+          const [waitlistHeld] = await tx
+            .select({ quantity: count() })
+            .from(waitlistEntries)
+            .where(
+              and(
+                eq(waitlistEntries.ticketTypeId, ticketTypeId),
+                eq(waitlistEntries.status, 'invited'),
+                gt(waitlistEntries.expiresAt, new Date()),
+              ),
+            );
+          const minimumCapacity =
+            before.sold + Number(held?.quantity ?? 0) + Number(waitlistHeld?.quantity ?? 0);
+          if (patch.capacity < minimumCapacity) {
+            throw new DomainError(
+              API_ERROR_CODES.INVENTORY_UNAVAILABLE,
+              `容量不能低于已售与占用合计 ${minimumCapacity}`,
+              HttpStatus.CONFLICT,
+            );
+          }
+        }
+        const [row] = await tx
+          .update(ticketTypes)
+          .set({ ...(patch as Partial<typeof ticketTypes.$inferInsert>), updatedAt: new Date() })
+          .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
+          .returning();
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'ticket_type.update',
+          resourceType: 'ticket_type',
+          resourceId: ticketTypeId,
+          before: before as unknown as Record<string, unknown>,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row!;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async deleteTicketType(
@@ -1204,22 +1520,34 @@ export class EventOperationsService {
     ticketTypeId: string,
     actorId: string,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const db = this.db();
-    const [row] = await db
-      .update(ticketTypes)
-      .set({ active: false, updatedAt: new Date() })
-      .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
-      .returning();
-    if (!row) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '票种不存在', HttpStatus.NOT_FOUND);
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'ticket_type.archive',
-      'ticket_type',
-      ticketTypeId,
-      row,
+    await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'ticket',
+        changeSummary: '下架票种',
+      },
+      async (tx) => {
+        const [row] = await tx
+          .update(ticketTypes)
+          .set({ active: false, updatedAt: new Date() })
+          .where(and(eq(ticketTypes.id, ticketTypeId), eq(ticketTypes.eventId, eventId)))
+          .returning();
+        if (!row) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '票种不存在', HttpStatus.NOT_FOUND);
+        }
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'ticket_type.archive',
+          resourceType: 'ticket_type',
+          resourceId: ticketTypeId,
+          before: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+      },
     );
     return { deleted: true, archived: true };
   }
@@ -1233,22 +1561,33 @@ export class EventOperationsService {
       'id' | 'organizationId' | 'eventId' | 'createdAt' | 'updatedAt'
     >,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [row] = await this.db()
-      .insert(speakers)
-      .values({ ...input, organizationId, eventId })
-      .returning();
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'speaker.create',
-      'speaker',
-      row!.id,
-      undefined,
-      row,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'content',
+        changeSummary: `新增嘉宾“${input.name}”`,
+      },
+      async (tx) => {
+        const [row] = await tx
+          .insert(speakers)
+          .values({ ...input, organizationId, eventId })
+          .returning();
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'speaker.create',
+          resourceType: 'speaker',
+          resourceId: row!.id,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row!;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async updateSpeaker(
@@ -1258,35 +1597,49 @@ export class EventOperationsService {
     actorId: string,
     patch: Record<string, unknown>,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [before] = await this.db()
-      .select()
-      .from(speakers)
-      .where(and(eq(speakers.id, speakerId), eq(speakers.eventId, eventId)))
-      .limit(1);
-    if (!before)
-      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '嘉宾不存在', HttpStatus.NOT_FOUND);
-    const [row] = await this.db()
-      .update(speakers)
-      .set({
-        ...(patch as Partial<typeof speakers.$inferInsert>),
-        organizationId: before.organizationId,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
         eventId,
-        updatedAt: new Date(),
-      })
-      .where(eq(speakers.id, speakerId))
-      .returning();
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'speaker.update',
-      'speaker',
-      speakerId,
-      before,
-      row,
+        actorId,
+        changeScope: 'content',
+        changeSummary: '更新嘉宾资料',
+      },
+      async (tx) => {
+        const [before] = await tx
+          .select()
+          .from(speakers)
+          .where(and(eq(speakers.id, speakerId), eq(speakers.eventId, eventId)))
+          .for('update')
+          .limit(1);
+        if (!before) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '嘉宾不存在', HttpStatus.NOT_FOUND);
+        }
+        const [row] = await tx
+          .update(speakers)
+          .set({
+            ...(patch as Partial<typeof speakers.$inferInsert>),
+            organizationId: before.organizationId,
+            eventId,
+            updatedAt: new Date(),
+          })
+          .where(eq(speakers.id, speakerId))
+          .returning();
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'speaker.update',
+          resourceType: 'speaker',
+          resourceId: speakerId,
+          before: before as unknown as Record<string, unknown>,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row!;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async deleteSpeaker(
@@ -1295,13 +1648,34 @@ export class EventOperationsService {
     speakerId: string,
     actorId: string,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [row] = await this.db()
-      .delete(speakers)
-      .where(and(eq(speakers.id, speakerId), eq(speakers.eventId, eventId)))
-      .returning();
-    if (!row) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '嘉宾不存在', HttpStatus.NOT_FOUND);
-    await this.audit(organizationId, eventId, actorId, 'speaker.delete', 'speaker', speakerId, row);
+    await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'content',
+        changeSummary: '删除嘉宾',
+      },
+      async (tx) => {
+        const [row] = await tx
+          .delete(speakers)
+          .where(and(eq(speakers.id, speakerId), eq(speakers.eventId, eventId)))
+          .returning();
+        if (!row) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '嘉宾不存在', HttpStatus.NOT_FOUND);
+        }
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'speaker.delete',
+          resourceType: 'speaker',
+          resourceId: speakerId,
+          before: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+      },
+    );
     return { deleted: true };
   }
 
@@ -1311,22 +1685,33 @@ export class EventOperationsService {
     actorId: string,
     input: Omit<typeof sessions.$inferInsert, 'id' | 'eventId' | 'createdAt' | 'updatedAt'>,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [row] = await this.db()
-      .insert(sessions)
-      .values({ ...input, eventId })
-      .returning();
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'session.create',
-      'session',
-      row!.id,
-      undefined,
-      row,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'content',
+        changeSummary: `新增议程“${input.title}”`,
+      },
+      async (tx) => {
+        const [row] = await tx
+          .insert(sessions)
+          .values({ ...input, eventId })
+          .returning();
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'session.create',
+          resourceType: 'session',
+          resourceId: row!.id,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row!;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async updateSession(
@@ -1336,30 +1721,48 @@ export class EventOperationsService {
     actorId: string,
     patch: Record<string, unknown>,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [before] = await this.db()
-      .select()
-      .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.eventId, eventId)))
-      .limit(1);
-    if (!before)
-      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '议程不存在', HttpStatus.NOT_FOUND);
-    const [row] = await this.db()
-      .update(sessions)
-      .set({ ...(patch as Partial<typeof sessions.$inferInsert>), eventId, updatedAt: new Date() })
-      .where(eq(sessions.id, sessionId))
-      .returning();
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'session.update',
-      'session',
-      sessionId,
-      before,
-      row,
+    const result = await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'content',
+        changeSummary: '更新议程',
+      },
+      async (tx) => {
+        const [before] = await tx
+          .select()
+          .from(sessions)
+          .where(and(eq(sessions.id, sessionId), eq(sessions.eventId, eventId)))
+          .for('update')
+          .limit(1);
+        if (!before) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '议程不存在', HttpStatus.NOT_FOUND);
+        }
+        const [row] = await tx
+          .update(sessions)
+          .set({
+            ...(patch as Partial<typeof sessions.$inferInsert>),
+            eventId,
+            updatedAt: new Date(),
+          })
+          .where(eq(sessions.id, sessionId))
+          .returning();
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'session.update',
+          resourceType: 'session',
+          resourceId: sessionId,
+          before: before as unknown as Record<string, unknown>,
+          after: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return row!;
+      },
     );
-    return row;
+    return result.value;
   }
 
   async deleteSession(
@@ -1368,13 +1771,34 @@ export class EventOperationsService {
     sessionId: string,
     actorId: string,
   ) {
-    await this.scopedEvent(organizationId, eventId);
-    const [row] = await this.db()
-      .delete(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.eventId, eventId)))
-      .returning();
-    if (!row) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '议程不存在', HttpStatus.NOT_FOUND);
-    await this.audit(organizationId, eventId, actorId, 'session.delete', 'session', sessionId, row);
+    await this.releases().mutate(
+      {
+        organizationId,
+        eventId,
+        actorId,
+        changeScope: 'content',
+        changeSummary: '删除议程',
+      },
+      async (tx) => {
+        const [row] = await tx
+          .delete(sessions)
+          .where(and(eq(sessions.id, sessionId), eq(sessions.eventId, eventId)))
+          .returning();
+        if (!row) {
+          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '议程不存在', HttpStatus.NOT_FOUND);
+        }
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'session.delete',
+          resourceType: 'session',
+          resourceId: sessionId,
+          before: row as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+      },
+    );
     return { deleted: true };
   }
 
@@ -1410,51 +1834,78 @@ export class EventOperationsService {
       termsContent: string;
     },
   ): Promise<RegistrationForm> {
-    await this.scopedEvent(organizationId, eventId);
-    const db = this.db();
-    const row = await db.transaction(async (tx) => {
-      const versions = await tx
-        .select({ version: max(registrationForms.version) })
-        .from(registrationForms)
-        .where(eq(registrationForms.eventId, eventId));
-      await tx
-        .update(registrationForms)
-        .set({ status: 'archived', updatedAt: new Date() })
-        .where(
-          and(eq(registrationForms.eventId, eventId), eq(registrationForms.status, 'published')),
-        );
-      const [created] = await tx
-        .insert(registrationForms)
-        .values({
-          eventId,
-          name: input.name,
-          version: (versions[0]?.version ?? 0) + 1,
-          status: 'published',
-          fields: normalizeFields(input.fields),
-          termsVersion: input.termsVersion,
-          termsContent: input.termsContent,
-          publishedAt: new Date(),
-        })
-        .returning();
-      await tx.insert(outboxEvents).values({
+    const normalizedFields = normalizeFields(input.fields);
+    const result = await this.releases().mutate(
+      {
         organizationId,
         eventId,
-        eventType: 'RegistrationFormPublished',
-        correlationId: `form:publish:${created!.id}`,
-        payload: { eventId, formId: created!.id, version: created!.version },
-      });
-      return created!;
-    });
-    await this.audit(
-      organizationId,
-      eventId,
-      actorId,
-      'registration_form.publish',
-      'registration_form',
-      row.id,
-      undefined,
-      row,
+        actorId,
+        changeScope: 'form',
+        changeSummary: `更新报名表与条款“${input.termsVersion}”`,
+      },
+      async (tx) => {
+        const [current] = await tx
+          .select()
+          .from(registrationForms)
+          .where(
+            and(eq(registrationForms.eventId, eventId), eq(registrationForms.status, 'published')),
+          )
+          .orderBy(desc(registrationForms.version))
+          .for('update')
+          .limit(1);
+        if (
+          current &&
+          current.name === input.name &&
+          current.termsVersion === input.termsVersion &&
+          current.termsContent === input.termsContent &&
+          JSON.stringify(normalizeFields(current.fields)) === JSON.stringify(normalizedFields)
+        ) {
+          return current;
+        }
+        const versions = await tx
+          .select({ version: max(registrationForms.version) })
+          .from(registrationForms)
+          .where(eq(registrationForms.eventId, eventId));
+        await tx
+          .update(registrationForms)
+          .set({ status: 'archived', updatedAt: new Date() })
+          .where(
+            and(eq(registrationForms.eventId, eventId), eq(registrationForms.status, 'published')),
+          );
+        const [created] = await tx
+          .insert(registrationForms)
+          .values({
+            eventId,
+            name: input.name,
+            version: (versions[0]?.version ?? 0) + 1,
+            status: 'published',
+            fields: normalizedFields,
+            termsVersion: input.termsVersion,
+            termsContent: input.termsContent,
+            publishedAt: new Date(),
+          })
+          .returning();
+        await tx.insert(outboxEvents).values({
+          organizationId,
+          eventId,
+          eventType: 'RegistrationFormPublished',
+          correlationId: `form:publish:${created!.id}`,
+          payload: { eventId, formId: created!.id, version: created!.version },
+        });
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'registration_form.publish',
+          resourceType: 'registration_form',
+          resourceId: created!.id,
+          after: created as unknown as Record<string, unknown>,
+          traceId: crypto.randomUUID(),
+        });
+        return created!;
+      },
     );
+    const row = result.value;
     return {
       id: row.id,
       eventId: row.eventId,
@@ -1487,30 +1938,5 @@ export class EventOperationsService {
       termsContent: row.termsContent,
       publishedAt: row.publishedAt?.toISOString() ?? null,
     };
-  }
-
-  private async audit(
-    organizationId: string,
-    eventId: EventId,
-    actorId: string,
-    action: string,
-    resourceType: string,
-    resourceId: string,
-    before?: unknown,
-    after?: unknown,
-  ) {
-    await this.db()
-      .insert(auditLogs)
-      .values({
-        organizationId,
-        eventId,
-        actorId,
-        action,
-        resourceType,
-        resourceId,
-        ...(before ? { before: before as Record<string, unknown> } : {}),
-        ...(after ? { after: after as Record<string, unknown> } : {}),
-        traceId: crypto.randomUUID(),
-      });
   }
 }

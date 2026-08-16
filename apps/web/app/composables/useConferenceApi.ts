@@ -1,9 +1,12 @@
 import {
   DEMO_EVENT,
   type CreateRegistration,
+  type CustomerOrderAccess,
   type Order,
   type PublicSiteConfiguration,
   type PublicEvent,
+  type PublicEventMemberDetail,
+  type PublicEventMemberList,
   type RegistrationCheckout,
   type SubmitInvoiceDetails,
   type Ticket,
@@ -18,6 +21,8 @@ import {
   type WaitlistJoin,
 } from '@conference/contracts';
 import { createLocalTicketIdentity } from '../utils/ticket-code';
+import { MEMBER_DIRECTORY_REQUEST_TIMEOUT_MS } from '../utils/member-directory-refresh';
+import { registrationIdempotencyKey } from '../utils/purchase-journey';
 
 type WebRegistrationCheckout = RegistrationCheckout & { ticket?: Ticket };
 export interface WebInvoiceAccess {
@@ -30,7 +35,7 @@ export interface WebInvoiceAccess {
 
 type PaymentResult = {
   order: Order;
-  ticket: Ticket;
+  ticket?: Ticket;
   invoice?: WebInvoiceAccess;
 };
 
@@ -38,6 +43,14 @@ export function useConferenceApi() {
   const config = useRuntimeConfig();
   const baseURL = import.meta.server ? config.apiInternalBase : config.public.apiBase;
   const organizationSlug = config.public.organizationSlug;
+  const eventState = useState<PublicEvent>('conference.public-event', () =>
+    structuredClone(DEMO_EVENT),
+  );
+
+  function publicApiResourceUrl(path: string | undefined) {
+    if (!path || /^https?:\/\//i.test(path)) return path;
+    return `${String(config.public.apiBase).replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+  }
 
   function isNetworkFailure(error: unknown) {
     const failure = error as { response?: { status?: number }; statusCode?: number };
@@ -61,6 +74,54 @@ export function useConferenceApi() {
       }
       throw error;
     }
+  }
+
+  async function getHomepageEvent() {
+    try {
+      const event = await $fetch<PublicEvent>('/homepage', {
+        baseURL,
+        timeout: 4_000,
+        headers: { 'X-Organization-Slug': organizationSlug },
+      });
+      saveEvent(event);
+      return event;
+    } catch (error) {
+      if (import.meta.dev && isNetworkFailure(error)) return getEvent(DEMO_EVENT.slug);
+      throw error;
+    }
+  }
+
+  async function getEventMembers(slug: string, page = 1, industry?: string) {
+    const result = await $fetch<PublicEventMemberList>(
+      `/events/${encodeURIComponent(slug)}/members`,
+      {
+        baseURL,
+        timeout: MEMBER_DIRECTORY_REQUEST_TIMEOUT_MS,
+        headers: { 'X-Organization-Slug': organizationSlug },
+        query: { page, ...(industry ? { industry } : {}) },
+      },
+    );
+    return {
+      ...result,
+      items: result.items.map((item) => ({
+        ...item,
+        ...(item.avatarUrl ? { avatarUrl: publicApiResourceUrl(item.avatarUrl) } : {}),
+      })),
+    };
+  }
+
+  async function getEventMember(slug: string, publicSlug: string) {
+    const result = await $fetch<PublicEventMemberDetail>(
+      `/events/${encodeURIComponent(slug)}/members/${encodeURIComponent(publicSlug)}`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+      },
+    );
+    return {
+      ...result,
+      ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
+    };
   }
 
   async function getSiteConfiguration(): Promise<PublicSiteConfiguration> {
@@ -100,7 +161,7 @@ export function useConferenceApi() {
   }
 
   async function createRegistration(input: CreateRegistration): Promise<WebRegistrationCheckout> {
-    const key = `registration-${crypto.randomUUID()}`;
+    const key = registrationIdempotencyKey(input.purchaseIntentId);
     try {
       return await $fetch<WebRegistrationCheckout>('/registrations', {
         method: 'POST',
@@ -152,12 +213,27 @@ export function useConferenceApi() {
     }
   }
 
-  async function confirmPayment(order: Order, registrationId: string): Promise<PaymentResult> {
+  async function localPaymentSimulationCapability(orderId: string, accessToken: string) {
+    return $fetch<{ allowed: boolean }>(`/payments/mock/${orderId}/capability`, {
+      baseURL,
+      timeout: 4_000,
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  }
+
+  async function confirmPayment(
+    order: Order,
+    registrationId: string,
+    accessToken: string,
+  ): Promise<PaymentResult> {
     try {
       return await $fetch<PaymentResult>(`/payments/mock/${order.id}/confirm`, {
         method: 'POST',
         baseURL,
-        headers: { 'Idempotency-Key': `payment-${order.id}` },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Idempotency-Key': `payment-${order.id}`,
+        },
       });
     } catch (error) {
       if (!import.meta.dev || !isNetworkFailure(error)) throw error;
@@ -400,13 +476,18 @@ export function useConferenceApi() {
     options: { sync?: boolean } = {},
   ) {
     try {
-      return await $fetch<Order>(`/orders/${identifier}`, {
+      return await $fetch<CustomerOrderAccess>(`/orders/${identifier}`, {
         baseURL,
         query: options.sync ? { sync: '1' } : undefined,
         headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
       });
     } catch (error) {
-      if (import.meta.dev && isNetworkFailure(error)) return readCheckout()?.order;
+      if (import.meta.dev && isNetworkFailure(error)) {
+        const checkout = readCheckout();
+        return checkout
+          ? { ...checkout.order, isProxyPurchase: checkout.isProxyPurchase }
+          : undefined;
+      }
       throw error;
     }
   }
@@ -454,6 +535,7 @@ export function useConferenceApi() {
         }
       : undefined;
     return {
+      isProxyPurchase: input.purchaseFor === 'other',
       registration: {
         id: registrationId,
         eventId: input.eventId,
@@ -491,12 +573,13 @@ export function useConferenceApi() {
   }
 
   function readEvent(): PublicEvent | undefined {
-    if (!import.meta.client) return undefined;
+    if (!import.meta.client) return eventState.value;
     const value = sessionStorage.getItem('conference.event');
-    return value ? (JSON.parse(value) as PublicEvent) : undefined;
+    return value ? (JSON.parse(value) as PublicEvent) : eventState.value;
   }
 
   function saveEvent(event: PublicEvent) {
+    eventState.value = event;
     if (import.meta.client) sessionStorage.setItem('conference.event', JSON.stringify(event));
   }
 
@@ -535,11 +618,16 @@ export function useConferenceApi() {
   }
 
   return {
+    eventState,
     getEvent,
+    getHomepageEvent,
+    getEventMembers,
+    getEventMember,
     getSiteConfiguration,
     createRegistration,
     joinWaitlist,
     confirmPayment,
+    localPaymentSimulationCapability,
     prepareWeChatNativePayment,
     prepareWeChatJsapiPayment,
     prepareWeChatH5Payment,

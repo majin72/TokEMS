@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import type { WeChatPayConfiguration } from '@conference/contracts';
+import SaveStatus from '../components/SaveStatus.vue';
 import SettingsFormActions from '../components/SettingsFormActions.vue';
 import { useSettingsFormScope } from '../composables/settings-form-state';
 import { conferenceApi, session } from '../lib/api';
@@ -179,8 +180,7 @@ onMounted(load);
 </script>
 
 <template>
-  <p v-if="message" class="admin-success" role="status">{{ message }}</p>
-  <p v-if="errorMessage" class="admin-error" role="alert">{{ errorMessage }}</p>
+  <SaveStatus :message="message" :error="errorMessage" />
   <div v-if="loading" class="admin-loading">正在载入支付设置…</div>
   <div v-else-if="!loaded" class="admin-loading">
     <button class="btn btn-secondary" type="button" @click="load">重新载入</button>
@@ -238,8 +238,8 @@ onMounted(load);
       <section class="settings-form-section" aria-labelledby="payment-channels-heading">
         <div class="settings-form-section-head">
           <div>
-            <h2 id="payment-channels-heading">通道开关</h2>
-            <p>默认仅开放 Native。JSAPI / H5 可灰度开启；关闭只阻止新建支付，不影响存量入账。</p>
+            <h2 id="payment-channels-heading">支付通道</h2>
+            <p>Native 扫码是当前默认通道，关闭只阻止新建支付，存量入账不受影响。</p>
           </div>
         </div>
         <div class="form-grid">
@@ -247,23 +247,48 @@ onMounted(load);
             <input v-model="form.channels.native" type="checkbox" :disabled="!canManage" />
             <span>Native 扫码</span>
           </label>
-          <label class="settings-toggle">
-            <input
-              v-model="form.channels.jsapi"
-              type="checkbox"
-              :disabled="!canManage || (!form.oauthEnabled && !configuration?.secretsPresent.appSecret)"
-            />
-            <span>JSAPI（微信内）</span>
-          </label>
-          <label class="settings-toggle">
-            <input v-model="form.channels.h5" type="checkbox" :disabled="!canManage" />
-            <span>H5（手机浏览器）</span>
-          </label>
-          <label class="settings-toggle">
-            <input v-model="form.oauthEnabled" type="checkbox" :disabled="!canManage" />
-            <span>启用公众号 OAuth</span>
-          </label>
         </div>
+        <details class="settings-advanced-block">
+          <summary>高级通道：JSAPI、H5 与公众号 OAuth</summary>
+          <p>仅在微信内支付或手机浏览器支付上线时配置。</p>
+          <div class="form-grid">
+            <label class="settings-toggle">
+              <input
+                v-model="form.channels.jsapi"
+                type="checkbox"
+                :disabled="
+                  !canManage || (!form.oauthEnabled && !configuration?.secretsPresent.appSecret)
+                "
+              />
+              <span>JSAPI（微信内）</span>
+            </label>
+            <label class="settings-toggle">
+              <input v-model="form.channels.h5" type="checkbox" :disabled="!canManage" />
+              <span>H5（手机浏览器）</span>
+            </label>
+            <label class="settings-toggle">
+              <input v-model="form.oauthEnabled" type="checkbox" :disabled="!canManage" />
+              <span>启用公众号 OAuth</span>
+            </label>
+            <div class="form-field full">
+              <label for="wechat-app-secret">公众号 AppSecret</label>
+              <input
+                id="wechat-app-secret"
+                v-model="form.appSecret"
+                type="password"
+                autocomplete="new-password"
+                maxlength="128"
+                :required="form.oauthEnabled && !configuration?.secretsPresent.appSecret"
+                :placeholder="
+                  configuration?.secretsPresent.appSecret
+                    ? '已安全保存，留空保持原值'
+                    : '仅 OAuth / JSAPI 需要'
+                "
+                :disabled="!canManage"
+              />
+            </div>
+          </div>
+        </details>
       </section>
 
       <section class="settings-form-section" aria-labelledby="payment-identity-heading">
@@ -389,30 +414,12 @@ onMounted(load);
               :disabled="!canManage"
             />
           </div>
-          <div class="form-field full">
-            <label for="wechat-app-secret">公众号 AppSecret</label>
-            <input
-              id="wechat-app-secret"
-              v-model="form.appSecret"
-              type="password"
-              autocomplete="new-password"
-              maxlength="128"
-              :required="form.oauthEnabled && !configuration?.secretsPresent.appSecret"
-              :placeholder="
-                configuration?.secretsPresent.appSecret
-                  ? '已安全保存，留空保持原值'
-                  : '仅 OAuth / JSAPI 需要'
-              "
-              :disabled="!canManage"
-            />
-          </div>
         </div>
       </section>
       <div class="settings-security-note">
         <strong>安全策略</strong>
-        <span>密钥使用 AES-256-GCM
-          加密保存。OAuth AppSecret 永不返回前端，也不写入代理或追踪日志。稳定 notify
-          固定在大会主站 API，支付页入口可单独回滚。</span>
+        <span>密钥使用 AES-256-GCM 加密保存。OAuth AppSecret 永不返回前端，也不写入代理或追踪日志。稳定
+          notify 固定在大会主站 API，支付页入口可单独回滚。</span>
       </div>
       <div v-if="configuration?.lastError" class="settings-inline-error">
         最近一次验证：{{ configuration.lastError }}

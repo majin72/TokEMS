@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import {
-  DEMO_EVENT,
   isCustomerInvoiceEditableStatus,
-  type PublicEvent,
+  publicEventHomePath,
+  publicEventScopedPath,
   type SubmitInvoiceDetails,
 } from '@conference/contracts';
 import { watch } from 'vue';
@@ -14,7 +14,7 @@ import {
 
 const route = useRoute();
 const api = useConferenceApi();
-const event = ref<PublicEvent>(api.readEvent() ?? structuredClone(DEMO_EVENT));
+const event = api.eventState;
 const access = ref(api.readInvoiceAccess(String(route.params.id)));
 const checkout = ref(api.readCheckout());
 const orderId = ref(checkout.value?.order.id ?? '');
@@ -74,8 +74,8 @@ const ticketHref = computed(() => {
   const ticket = api.readTicket(checkout.value?.registration.id ?? '');
   const identifier = ticket?.code ?? checkout.value?.registration.id ?? '';
   return identifier
-    ? `/ticket/${encodeURIComponent(identifier)}?event=${encodeURIComponent(event.value.slug)}`
-    : `/?event=${encodeURIComponent(event.value.slug)}`;
+    ? publicEventScopedPath(`/ticket/${encodeURIComponent(identifier)}`, event.value.slug)
+    : publicEventHomePath(event.value.slug);
 });
 
 useHead(() => ({

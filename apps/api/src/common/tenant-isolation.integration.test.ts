@@ -27,12 +27,20 @@ describePersistent('PostgreSQL tenant isolation', () => {
   const issuedTicketB = randomUUID();
   const slug = `tenant-same-slug-${randomUUID().slice(0, 8)}`;
   const organizationBSlug = `tenant-b-${randomUUID().slice(0, 8)}`;
+  let organizationASlug: string;
   const database = new DatabaseService();
   const repository = new ConferenceRepository(database);
   const operations = new EventOperationsService(database);
 
   beforeAll(async () => {
     const db = database.db!;
+    const [organizationA] = await db
+      .select({ slug: organizations.slug })
+      .from(organizations)
+      .where(eq(organizations.id, DEMO_IDS.organization))
+      .limit(1);
+    expect(organizationA?.slug).toBeTruthy();
+    organizationASlug = organizationA!.slug;
     await db.insert(organizations).values({
       id: organizationB,
       slug: organizationBSlug,
@@ -164,7 +172,7 @@ describePersistent('PostgreSQL tenant isolation', () => {
 
   it('resolves the same public slug inside its organization scope', async () => {
     const [publicA, publicB] = await Promise.all([
-      repository.getPublicEvent(slug, 'tokems-demo', false),
+      repository.getPublicEvent(slug, organizationASlug, false),
       repository.getPublicEvent(slug, organizationBSlug, false),
     ]);
     expect(publicA.id).toBe(eventA);
@@ -192,9 +200,48 @@ describePersistent('PostgreSQL tenant isolation', () => {
     expect((await repository.listRegistrations(eventB, {}, DEMO_IDS.organization)).items).toEqual(
       [],
     );
-    expect(await repository.listOrders(eventB, {}, DEMO_IDS.organization)).toEqual([]);
+    expect((await repository.listOrders(eventB, {}, DEMO_IDS.organization)).items).toEqual([]);
     const ownEvent = await repository.getAdminEvent(eventA, DEMO_IDS.organization);
     expect(ownEvent.name).toBe('租户 A 同路径大会');
+  });
+
+  it('returns a zero-filled custom dashboard trend in the event timezone', async () => {
+    const dashboard = await repository.getDashboard(eventB, organizationB, {
+      from: '2020-01-01',
+      to: '2020-01-03',
+    });
+
+    expect(dashboard.registrationTrend).toEqual([
+      { date: '2020-01-01', value: 0 },
+      { date: '2020-01-02', value: 0 },
+      { date: '2020-01-03', value: 0 },
+    ]);
+  });
+
+  it('serializes computed registration activity timestamps', async () => {
+    const result = await repository.listRegistrations(eventB, {}, organizationB);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.lastBusinessAt).toBe(
+      new Date(result.items[0]!.lastBusinessAt).toISOString(),
+    );
+  });
+
+  it('returns preset dashboard trend days and tolerates legacy invalid timezones', async () => {
+    const presetDashboard = await repository.getDashboard(eventB, organizationB, { days: 30 });
+    expect(presetDashboard.registrationTrend).toHaveLength(30);
+
+    const db = database.db!;
+    await db.update(events).set({ timezone: 'Legacy/Invalid' }).where(eq(events.id, eventB));
+    try {
+      const fallbackDashboard = await repository.getDashboard(eventB, organizationB, {
+        from: '2020-01-01',
+        to: '2020-01-03',
+      });
+      expect(fallbackDashboard.registrationTrend).toHaveLength(3);
+    } finally {
+      await db.update(events).set({ timezone: 'Asia/Shanghai' }).where(eq(events.id, eventB));
+    }
   });
 
   it('rejects cross-organization ticket check-in without mutating the ticket', async () => {

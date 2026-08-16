@@ -1,12 +1,26 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import type { EventStatus, PublicEvent, UpdateEvent } from '@conference/contracts';
-import { conferenceApi, publicEventUrl } from '../lib/api';
+import AdminConfirmDialog from '../components/AdminConfirmDialog.vue';
+import SaveStatus from '../components/SaveStatus.vue';
+import PublishingView from './PublishingView.vue';
+import { conferenceApi, publicEventUrl, session } from '../lib/api';
 
 const event = ref<PublicEvent>();
 const pending = ref(false);
 const message = ref('');
 const errorMessage = ref('');
+const showImportantChangeConfirm = ref(false);
+const canManageEvent = computed(() => session.can('event.manage'));
+const baseline = ref<{
+  startsAt: string;
+  endsAt: string;
+  timezone: string;
+  venue: string;
+  city: string;
+  address: string;
+  status: EventStatus;
+}>();
 const form = reactive({
   name: '',
   shortName: '',
@@ -46,6 +60,39 @@ const availableStatuses = computed(() => {
     label: statusLabels[value],
   }));
 });
+const publicStatuses = new Set<EventStatus>([
+  'prepublished',
+  'registration_open',
+  'in_progress',
+  'ended',
+]);
+const importantChangeDetails = computed(() => {
+  if (!baseline.value) return [];
+  const details: Array<{ label: string; value: string }> = [];
+  if (form.status !== baseline.value.status) {
+    details.push({
+      label: '生命周期',
+      value: `${statusLabels[baseline.value.status]} → ${statusLabels[form.status]}`,
+    });
+  }
+  if (form.startsAt !== baseline.value.startsAt || form.endsAt !== baseline.value.endsAt) {
+    details.push({ label: '大会时间', value: `${form.startsAt} 至 ${form.endsAt}` });
+  }
+  if (form.timezone !== baseline.value.timezone) {
+    details.push({ label: '时区', value: `${baseline.value.timezone} → ${form.timezone}` });
+  }
+  if (
+    form.venue !== baseline.value.venue ||
+    form.city !== baseline.value.city ||
+    form.address !== baseline.value.address
+  ) {
+    details.push({ label: '大会地点', value: `${form.city} · ${form.venue} · ${form.address}` });
+  }
+  return details;
+});
+const confirmTone = computed(() =>
+  ['configuring', 'archived'].includes(form.status) ? ('danger' as const) : ('primary' as const),
+);
 
 function toLocalDateTime(value: string) {
   const date = new Date(value);
@@ -71,6 +118,15 @@ async function load() {
       timezone: loaded.timezone,
       status: loaded.status,
     });
+    baseline.value = {
+      startsAt: form.startsAt,
+      endsAt: form.endsAt,
+      timezone: form.timezone,
+      venue: form.venue,
+      city: form.city,
+      address: form.address,
+      status: form.status,
+    };
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '大会数据读取失败';
   }
@@ -78,7 +134,18 @@ async function load() {
 
 onMounted(load);
 
+function requestSave() {
+  const eventIsPublic = event.value ? publicStatuses.has(event.value.status) : false;
+  const isGoingPublic = publicStatuses.has(form.status);
+  if (importantChangeDetails.value.length && (eventIsPublic || isGoingPublic)) {
+    showImportantChangeConfirm.value = true;
+    return;
+  }
+  void save();
+}
+
 async function save() {
+  showImportantChangeConfirm.value = false;
   pending.value = true;
   message.value = '';
   errorMessage.value = '';
@@ -97,7 +164,18 @@ async function save() {
       status: form.status,
     };
     event.value = await conferenceApi.updateEvent(patch);
-    message.value = '大会草稿已保存，发布新版本后同步到前台。';
+    baseline.value = {
+      startsAt: form.startsAt,
+      endsAt: form.endsAt,
+      timezone: form.timezone,
+      venue: form.venue,
+      city: form.city,
+      address: form.address,
+      status: form.status,
+    };
+    message.value = publicStatuses.has(event.value.status)
+      ? '已保存，前台已生效'
+      : '已保存，大会上线时生效';
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '保存失败';
   } finally {
@@ -115,24 +193,23 @@ async function save() {
     </div>
     <div class="admin-head-actions">
       <a class="button secondary" :href="publicEventUrl()" target="_blank" rel="noopener noreferrer">预览前台 ↗</a>
-      <button class="button" type="button" :disabled="pending" @click="save">
+      <button v-if="canManageEvent" class="button" type="button" :disabled="pending" @click="requestSave">
         {{ pending ? '保存中…' : '保存修改' }}
       </button>
     </div>
   </header>
 
-  <p v-if="message" class="admin-success" role="status">{{ message }}</p>
-  <p v-if="errorMessage" class="admin-error" role="alert">{{ errorMessage }}</p>
+  <SaveStatus :message="message" :error="errorMessage" />
 
   <section class="admin-panel reveal is-visible">
     <header class="admin-panel-header">
       <div>
         <h2>大会基本资料</h2>
-        <p>保存到大会草稿，发布时生成一份稳定快照</p>
+        <p>保存成功后自动生成稳定快照，已上线大会会立即更新前台</p>
       </div>
       <span class="status-badge">{{ statusLabels[event?.status ?? form.status] }}</span>
     </header>
-    <form class="event-form settings-form-spaced" @submit.prevent="save">
+    <form class="event-form settings-form-spaced" :inert="!canManageEvent" @submit.prevent="requestSave">
       <div class="form-grid">
         <div class="form-field">
           <label for="event-name">大会名称</label><input id="event-name" v-model="form.name" required />
@@ -181,11 +258,35 @@ async function save() {
           <label for="event-address">详细地址</label><input id="event-address" v-model="form.address" required />
         </div>
       </div>
-      <div class="event-form-actions">
+      <div v-if="canManageEvent" class="event-form-actions">
         <button class="button" type="submit" :disabled="pending">
           {{ pending ? '保存中…' : '保存基本信息' }}
         </button>
       </div>
     </form>
   </section>
+
+  <section v-if="session.can('event.site.read')" id="public-page" class="settings-section-stack">
+    <header class="admin-panel-header">
+      <div>
+        <p class="eyebrow">PUBLIC PAGE</p>
+        <h2>公开页面展示</h2>
+        <p>页面模板、首页行动入口和常见问题统一在基本信息页维护。</p>
+      </div>
+    </header>
+    <PublishingView embedded />
+  </section>
+
+  <AdminConfirmDialog
+    :open="showImportantChangeConfirm"
+    :event-name="session.activeEvent.value?.name"
+    title="确认保存这项重要修改？"
+    description="保存成功后大会前台会立即采用以下配置，现有订单、报名和电子票继续保留原记录。"
+    :details="importantChangeDetails"
+    :tone="confirmTone"
+    :busy="pending"
+    :error="errorMessage"
+    @cancel="showImportantChangeConfirm = false"
+    @confirm="save"
+  />
 </template>

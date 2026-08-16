@@ -5,6 +5,7 @@ import { DatabaseService } from './database.service.js';
 import { CommerceOperationsService } from './commerce-operations.service.js';
 import { EngagementOperationsService } from './engagement-operations.service.js';
 import { EventOperationsService } from './event-operations.service.js';
+import { EventReleaseActivationService } from './event-release-activation.service.js';
 import { OrganizationAdminService } from './organization-admin.service.js';
 import { InvoiceOperationsService } from './invoice-operations.service.js';
 import { TemplateOperationsService } from './template-operations.service.js';
@@ -16,12 +17,15 @@ import { CustomerAccountService } from './customer-account.service.js';
 import { AliyunSmsService } from './aliyun-sms.service.js';
 import { HtmlTemplateOperationsService } from './html-template-operations.service.js';
 import { RedisService } from './redis.service.js';
+import { AdminRegistrationOperationsService } from './admin-registration-operations.service.js';
+import { AttendeeShowcaseService } from './attendee-showcase.service.js';
 
 @Global()
 @Module({
   providers: [
     DatabaseService,
     ConferenceRepository,
+    EventReleaseActivationService,
     EventOperationsService,
     CommerceOperationsService,
     EngagementOperationsService,
@@ -37,10 +41,13 @@ import { RedisService } from './redis.service.js';
     CustomerAccountService,
     AliyunSmsService,
     HtmlTemplateOperationsService,
+    AdminRegistrationOperationsService,
+    AttendeeShowcaseService,
   ],
   exports: [
     DatabaseService,
     ConferenceRepository,
+    EventReleaseActivationService,
     EventOperationsService,
     CommerceOperationsService,
     EngagementOperationsService,
@@ -56,6 +63,8 @@ import { RedisService } from './redis.service.js';
     CustomerAccountService,
     AliyunSmsService,
     HtmlTemplateOperationsService,
+    AdminRegistrationOperationsService,
+    AttendeeShowcaseService,
   ],
 })
 export class CoreModule {}
