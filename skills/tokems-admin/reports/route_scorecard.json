@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-25T21:48:00+08:00",
+  "source": "reports/trigger_eval_summary.json",
+  "summary": {
+    "total_cases": 22,
+    "correct_cases": 22,
+    "accuracy": 1.0,
+    "ambiguous_case_count": 0,
+    "misroute_count": 0,
+    "no_route_accuracy": 1.0
+  },
+  "route_stats": {
+    "tokems-admin": {
+      "expected_count": 11,
+      "predicted_count": 11,
+      "correct_count": 11,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "no_route": {
+      "expected_count": 11,
+      "predicted_count": 11,
+      "correct_count": 11,
+      "precision": 1.0,
+      "recall": 1.0
+    }
+  },
+  "ambiguous_cases": [],
+  "misroutes": [],
+  "families": {
+    "should_trigger": { "total": 11, "passed": 11 },
+    "should_not_trigger": { "total": 6, "passed": 6 },
+    "near_neighbor": { "total": 5, "passed": 5 }
+  },
+  "method": "The semantic evaluator, current Skill description, threshold, cases, and semantic configuration were run on 2026-08-25; no case fell inside the evaluator boundary band."
+}

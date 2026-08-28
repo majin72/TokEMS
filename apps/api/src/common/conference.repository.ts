@@ -4,8 +4,14 @@ import {
   API_ERROR_CODES,
   DEMO_EVENT,
   DEMO_IDS,
+  DEMO_SPEAKER_PROFILES,
   PUBLIC_EVENT_STATUSES,
+  dateInTimeZone,
+  encodeSpeakerRouteCode,
   isPublicEventStatus,
+  nextFeishuDigestRun,
+  SpeakerRouteCodeSchema,
+  speakerAvatarText,
   type AdminDashboard,
   type AdminDashboardQuery,
   type AdminOrderList,
@@ -21,11 +27,15 @@ import {
   type EventId,
   type Order,
   type PublicEvent,
+  type PublicEventMetrics,
+  type PublicEventSpeakerDetail,
+  type PublicEventViewResult,
   type Registration,
   type RegistrationBusinessStatus,
   type RegistrationField,
   type RegistrationCheckout,
   type ReviewRegistration,
+  type SpeakerSocialLink,
   type Ticket,
   type UpdateEvent,
   type WaitlistEntry,
@@ -40,7 +50,10 @@ import {
   checkinRecords,
   customerProfiles,
   customerUsers,
+  eventFeishuDigestSubscriptions,
   eventReleases,
+  eventPublicMetricDays,
+  eventPublicMetrics,
   eventSlugAliases,
   events,
   idempotencyKeys,
@@ -60,6 +73,7 @@ import {
   registrationPurchaseAttempts,
   registrationForms,
   sessions,
+  speakerPublicRoutes,
   speakers,
   ticketTypes,
   tickets,
@@ -161,6 +175,11 @@ interface ReleaseSpeakerSnapshot {
   accentFrom?: string;
   accentTo?: string;
   tags?: string[];
+  avatarAssetId?: string | null;
+  bio?: string | null;
+  topicAbstract?: string | null;
+  websiteUrl?: string | null;
+  socialLinks?: SpeakerSocialLink[];
 }
 
 interface ReleaseSessionSnapshot {
@@ -316,6 +335,10 @@ export class ConferenceRepository {
     eventType: string;
     payload: Record<string, unknown>;
   }> = [];
+  private readonly memoryPublicMetrics = new Map<
+    EventId,
+    { pageViews: number; trackingStartedAt: Date; updatedAt: Date }
+  >();
   private demoEvent = structuredClone(DEMO_EVENT);
 
   constructor(
@@ -553,9 +576,17 @@ export class ConferenceRepository {
       }
       return {
         ...this.demoEvent,
+        publicMetrics: await this.getPublicMetrics(
+          this.demoEvent.id,
+          this.demoEvent.organizationId,
+        ),
         tickets: this.demoEvent.tickets.map((ticket) => ({
           ...ticket,
           remaining: this.memory.ticketRemaining.get(ticket.id) ?? ticket.remaining,
+        })),
+        speakers: this.demoEvent.speakers.map((speaker, index) => ({
+          ...speaker,
+          publicCode: encodeSpeakerRouteCode(index + 1),
         })),
       };
     }
@@ -577,7 +608,7 @@ export class ConferenceRepository {
       );
     }
 
-    const [ticketRows, speakerRows, sessionRows, formRows] = await Promise.all([
+    const [ticketRows, speakerRows, speakerRouteRows, sessionRows, formRows] = await Promise.all([
       db
         .select()
         .from(ticketTypes)
@@ -588,6 +619,18 @@ export class ConferenceRepository {
         .from(speakers)
         .where(eq(speakers.eventId, event.id))
         .orderBy(asc(speakers.sortOrder)),
+      db
+        .select({
+          publicCode: speakerPublicRoutes.publicCode,
+          speakerId: speakerPublicRoutes.speakerId,
+        })
+        .from(speakerPublicRoutes)
+        .where(
+          and(
+            eq(speakerPublicRoutes.organizationId, event.organizationId),
+            eq(speakerPublicRoutes.eventId, event.id),
+          ),
+        ),
       db
         .select()
         .from(sessions)
@@ -728,6 +771,9 @@ export class ConferenceRepository {
           ),
         }));
     const snapshotSpeakers = releaseSnapshot?.speakers;
+    const publicCodeBySpeakerId = new Map(
+      speakerRouteRows.map((row) => [row.speakerId, row.publicCode]),
+    );
     const publicSpeakers = snapshotSpeakers?.length
       ? snapshotSpeakers
           .filter((row): row is ReleaseSpeakerSnapshot & { id: string; name: string } =>
@@ -735,16 +781,25 @@ export class ConferenceRepository {
           )
           .map((row) => ({
             id: row.id,
+            ...(publicCodeBySpeakerId.get(row.id)
+              ? { publicCode: publicCodeBySpeakerId.get(row.id) }
+              : {}),
             name: row.name,
             role: row.role ?? '',
             topic: row.topic ?? '',
-            initials: row.initials ?? row.name.slice(0, 2),
+            initials: speakerAvatarText(row.name, row.initials),
             accentFrom: row.accentFrom ?? '#2448a8',
             accentTo: row.accentTo ?? '#102759',
             tags: row.tags ?? [],
+            ...(row.avatarAssetId
+              ? { avatarUrl: `/assets/templates/${encodeURIComponent(row.avatarAssetId)}` }
+              : {}),
           }))
       : speakerRows.map((row) => ({
           id: row.id,
+          ...(publicCodeBySpeakerId.get(row.id)
+            ? { publicCode: publicCodeBySpeakerId.get(row.id) }
+            : {}),
           name: row.name,
           role: row.role,
           topic: row.topic,
@@ -752,6 +807,9 @@ export class ConferenceRepository {
           accentFrom: row.accentFrom,
           accentTo: row.accentTo,
           tags: row.tags,
+          ...(row.avatarAssetId
+            ? { avatarUrl: `/assets/templates/${encodeURIComponent(row.avatarAssetId)}` }
+            : {}),
         }));
     const snapshotSessions = releaseSnapshot?.sessions;
     const publicSessions = snapshotSessions?.length
@@ -838,6 +896,7 @@ export class ConferenceRepository {
     if (publicExperience?.home && shareAssetId) {
       publicExperience.home.seo.shareAssetUrl = `/assets/templates/${encodeURIComponent(shareAssetId)}`;
     }
+    const publicMetrics = await this.getPublicMetrics(event.id, event.organizationId);
 
     return {
       id: event.id,
@@ -856,6 +915,7 @@ export class ConferenceRepository {
       address: snapshotEvent?.address ?? event.address,
       registration: registrationSettings,
       stats: snapshotStats ?? settings.stats ?? DEMO_EVENT.stats,
+      publicMetrics,
       tickets: publicTickets,
       speakers: publicSpeakers,
       sessions: publicSessions,
@@ -863,6 +923,366 @@ export class ConferenceRepository {
       ...(publicForm ? { registrationForm: publicForm } : {}),
       ...(publicExperience ? { experience: publicExperience } : {}),
     };
+  }
+
+  async getPublicMetrics(eventId: EventId, organizationId: string): Promise<PublicEventMetrics> {
+    const db = this.database.db;
+    if (!db) {
+      if (eventId !== this.demoEvent.id || organizationId !== this.demoEvent.organizationId) {
+        return {
+          pageViews: 0,
+          trackingStartedAt: null,
+          confirmedAttendees: 0,
+          organizationCount: 0,
+          cityCount: 0,
+        };
+      }
+      const registrationsForEvent = [...this.memory.registrations.values()].filter(
+        (registration) =>
+          registration.eventId === eventId &&
+          ['confirmed', 'checked_in', 'completed'].includes(registration.status),
+      );
+      const normalizeDimension = (value: string) =>
+        value.trim().replaceAll(/\s+/gu, ' ').toLocaleLowerCase('zh-CN');
+      const distinctNonEmpty = (values: string[]) =>
+        new Set(values.map(normalizeDimension).filter(Boolean)).size;
+      const counter = this.memoryPublicMetrics.get(eventId);
+      return {
+        pageViews: counter?.pageViews ?? 0,
+        trackingStartedAt: counter?.trackingStartedAt.toISOString() ?? null,
+        confirmedAttendees: registrationsForEvent.length,
+        organizationCount: distinctNonEmpty(
+          registrationsForEvent.map((registration) => registration.attendee.company),
+        ),
+        cityCount: distinctNonEmpty(
+          registrationsForEvent.map((registration) => registration.attendee.city),
+        ),
+      };
+    }
+
+    const [counterRows, aggregateRows] = await Promise.all([
+      db
+        .select({
+          pageViews: eventPublicMetrics.pageViews,
+          trackingStartedAt: eventPublicMetrics.trackingStartedAt,
+        })
+        .from(eventPublicMetrics)
+        .where(
+          and(
+            eq(eventPublicMetrics.organizationId, organizationId),
+            eq(eventPublicMetrics.eventId, eventId),
+          ),
+        )
+        .limit(1),
+      db
+        .select({
+          confirmedAttendees: sql<number>`count(*)::int`,
+          organizationCount: sql<number>`count(distinct nullif(lower(regexp_replace(btrim(coalesce(${registrations.attendee}->>'company', '')), '[[:space:]]+', ' ', 'g')), ''))::int`,
+          cityCount: sql<number>`count(distinct nullif(lower(regexp_replace(btrim(coalesce(${registrations.attendee}->>'city', '')), '[[:space:]]+', ' ', 'g')), ''))::int`,
+        })
+        .from(registrations)
+        .where(
+          and(
+            eq(registrations.organizationId, organizationId),
+            eq(registrations.eventId, eventId),
+            inArray(registrations.status, ['confirmed', 'checked_in', 'completed']),
+            isNull(registrations.supersededAt),
+          ),
+        ),
+    ]);
+    const counter = counterRows[0];
+    const aggregates = aggregateRows[0];
+    return {
+      pageViews: Number(counter?.pageViews ?? 0),
+      trackingStartedAt: counter?.trackingStartedAt.toISOString() ?? null,
+      confirmedAttendees: Number(aggregates?.confirmedAttendees ?? 0),
+      organizationCount: Number(aggregates?.organizationCount ?? 0),
+      cityCount: Number(aggregates?.cityCount ?? 0),
+    };
+  }
+
+  async recordPublicEventView(
+    eventId: EventId,
+    organizationId: string,
+  ): Promise<PublicEventViewResult> {
+    const now = new Date();
+    const db = this.database.db;
+    if (!db) {
+      if (eventId !== this.demoEvent.id || organizationId !== this.demoEvent.organizationId) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '大会不存在或尚未发布',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      const previous = this.memoryPublicMetrics.get(eventId);
+      const next = {
+        pageViews: (previous?.pageViews ?? 0) + 1,
+        trackingStartedAt: previous?.trackingStartedAt ?? now,
+        updatedAt: now,
+      };
+      this.memoryPublicMetrics.set(eventId, next);
+      return {
+        pageViews: next.pageViews,
+        trackingStartedAt: next.trackingStartedAt.toISOString(),
+        updatedAt: next.updatedAt.toISOString(),
+      };
+    }
+
+    const [event] = await db
+      .select({ status: events.status, timezone: events.timezone })
+      .from(events)
+      .where(and(eq(events.id, eventId), eq(events.organizationId, organizationId)))
+      .limit(1);
+    if (!event || !isPublicEventStatus(event.status)) {
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '大会不存在或尚未发布',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    let metricTimeZone = event.timezone;
+    let localDate: string;
+    try {
+      localDate = dateInTimeZone(now, metricTimeZone);
+    } catch {
+      metricTimeZone = 'UTC';
+      localDate = dateInTimeZone(now, metricTimeZone);
+    }
+    const counter = await db.transaction(async (tx) => {
+      const [updatedCounter] = await tx
+        .insert(eventPublicMetrics)
+        .values({
+          organizationId,
+          eventId,
+          pageViews: 1,
+          trackingStartedAt: now,
+          dailyTrackingStartedAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [eventPublicMetrics.organizationId, eventPublicMetrics.eventId],
+          set: {
+            pageViews: sql`${eventPublicMetrics.pageViews} + 1`,
+            dailyTrackingStartedAt: sql`coalesce(${eventPublicMetrics.dailyTrackingStartedAt}, ${now})`,
+            updatedAt: now,
+          },
+        })
+        .returning({
+          pageViews: eventPublicMetrics.pageViews,
+          trackingStartedAt: eventPublicMetrics.trackingStartedAt,
+          updatedAt: eventPublicMetrics.updatedAt,
+        });
+      await tx
+        .insert(eventPublicMetricDays)
+        .values({
+          organizationId,
+          eventId,
+          localDate,
+          pageViews: 1,
+          timezoneSnapshot: metricTimeZone,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [
+            eventPublicMetricDays.organizationId,
+            eventPublicMetricDays.eventId,
+            eventPublicMetricDays.localDate,
+          ],
+          set: {
+            pageViews: sql`${eventPublicMetricDays.pageViews} + 1`,
+            updatedAt: now,
+          },
+        });
+      return updatedCounter;
+    });
+    if (!counter) {
+      throw new DomainError(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '大会访问量登记失败',
+        HttpStatus.CONFLICT,
+      );
+    }
+    return {
+      pageViews: Number(counter.pageViews),
+      trackingStartedAt: counter.trackingStartedAt.toISOString(),
+      updatedAt: counter.updatedAt.toISOString(),
+    };
+  }
+
+  async getPublicEventViewResult(
+    eventId: EventId,
+    organizationId: string,
+  ): Promise<PublicEventViewResult> {
+    const db = this.database.db;
+    if (!db) {
+      if (eventId !== this.demoEvent.id || organizationId !== this.demoEvent.organizationId) {
+        return { pageViews: 0, trackingStartedAt: null, updatedAt: null };
+      }
+      const counter = this.memoryPublicMetrics.get(eventId);
+      return {
+        pageViews: counter?.pageViews ?? 0,
+        trackingStartedAt: counter?.trackingStartedAt.toISOString() ?? null,
+        updatedAt: counter?.updatedAt.toISOString() ?? null,
+      };
+    }
+    const [counter] = await db
+      .select({
+        pageViews: eventPublicMetrics.pageViews,
+        trackingStartedAt: eventPublicMetrics.trackingStartedAt,
+        updatedAt: eventPublicMetrics.updatedAt,
+      })
+      .from(eventPublicMetrics)
+      .where(
+        and(
+          eq(eventPublicMetrics.organizationId, organizationId),
+          eq(eventPublicMetrics.eventId, eventId),
+        ),
+      )
+      .limit(1);
+    return {
+      pageViews: Number(counter?.pageViews ?? 0),
+      trackingStartedAt: counter?.trackingStartedAt.toISOString() ?? null,
+      updatedAt: counter?.updatedAt.toISOString() ?? null,
+    };
+  }
+
+  async getPublicSpeaker(
+    slug: string,
+    organizationSlug: string,
+    speakerId: string,
+  ): Promise<PublicEventSpeakerDetail> {
+    const event = await this.getPublicEvent(slug, organizationSlug);
+    const speaker = event.speakers.find((item) => item.id === speakerId);
+    if (!speaker?.publicCode) {
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '嘉宾不存在或已停止公开',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    let profile: ReleaseSpeakerSnapshot | undefined = DEMO_SPEAKER_PROFILES[speakerId];
+    let releasedEvent: ReleaseEventSnapshot | undefined;
+    const db = this.database.db;
+    if (db) {
+      const [eventRow] = await db
+        .select({ settings: events.settings })
+        .from(events)
+        .where(eq(events.id, event.id))
+        .limit(1);
+      const currentReleaseId = (eventRow?.settings as { currentReleaseId?: string } | undefined)
+        ?.currentReleaseId;
+      if (!currentReleaseId) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '大会不存在或发布版本已失效',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      const [release] = await db
+        .select({ snapshot: eventReleases.snapshot })
+        .from(eventReleases)
+        .where(and(eq(eventReleases.id, currentReleaseId), eq(eventReleases.eventId, event.id)))
+        .limit(1);
+      const snapshot = release?.snapshot as EventReleaseSnapshot | undefined;
+      releasedEvent = snapshot?.event;
+      profile = snapshot?.speakers?.find((item) => item.id === speakerId);
+      if (!profile) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '嘉宾不存在或已停止公开',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+    }
+
+    const releasedSpeaker = profile
+      ? {
+          ...speaker,
+          name: profile.name ?? speaker.name,
+          role: profile.role ?? speaker.role,
+          topic: profile.topic ?? speaker.topic,
+          initials: profile.initials ?? speaker.initials,
+          accentFrom: profile.accentFrom ?? speaker.accentFrom,
+          accentTo: profile.accentTo ?? speaker.accentTo,
+          tags: profile.tags ?? speaker.tags,
+          ...(profile.avatarAssetId
+            ? { avatarUrl: `/assets/templates/${encodeURIComponent(profile.avatarAssetId)}` }
+            : { avatarUrl: undefined }),
+        }
+      : speaker;
+    return {
+      ...releasedSpeaker,
+      publicCode: speaker.publicCode,
+      eventName: releasedEvent?.name ?? event.name,
+      eventSlug: event.slug,
+      eventStartsAt: releasedEvent?.startsAt ?? event.startsAt,
+      eventEndsAt: releasedEvent?.endsAt ?? event.endsAt,
+      eventTimezone: releasedEvent?.timezone ?? event.timezone,
+      eventCity: releasedEvent?.city ?? event.city,
+      ...(profile?.bio ? { bio: profile.bio } : {}),
+      ...(profile?.topicAbstract ? { topicAbstract: profile.topicAbstract } : {}),
+      ...(profile?.websiteUrl ? { websiteUrl: profile.websiteUrl } : {}),
+      socialLinks: profile?.socialLinks ?? [],
+    };
+  }
+
+  async getPublicSpeakerByCode(
+    organizationSlug: string,
+    publicCode: string,
+  ): Promise<PublicEventSpeakerDetail> {
+    const parsedCode = SpeakerRouteCodeSchema.safeParse(publicCode);
+    if (!parsedCode.success) {
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '嘉宾不存在或已停止公开',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    const db = this.database.db;
+    if (!db) {
+      const speaker = this.demoEvent.speakers.find(
+        (_item, index) => encodeSpeakerRouteCode(index + 1) === parsedCode.data,
+      );
+      if (!speaker) {
+        throw new DomainError(
+          API_ERROR_CODES.NOT_FOUND,
+          '嘉宾不存在或已停止公开',
+          HttpStatus.NOT_FOUND,
+        );
+      }
+      return this.getPublicSpeaker(this.demoEvent.slug, organizationSlug, speaker.id);
+    }
+
+    const [route] = await db
+      .select({ speakerId: speakerPublicRoutes.speakerId, eventSlug: events.slug })
+      .from(speakerPublicRoutes)
+      .innerJoin(
+        events,
+        and(
+          eq(events.id, speakerPublicRoutes.eventId),
+          eq(events.organizationId, speakerPublicRoutes.organizationId),
+        ),
+      )
+      .innerJoin(organizations, eq(organizations.id, speakerPublicRoutes.organizationId))
+      .where(
+        and(
+          eq(speakerPublicRoutes.publicCode, parsedCode.data),
+          eq(organizations.slug, organizationSlug),
+        ),
+      )
+      .limit(1);
+    if (!route) {
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '嘉宾不存在或已停止公开',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return this.getPublicSpeaker(route.eventSlug, organizationSlug, route.speakerId);
   }
 
   async getPublicEventScope(
@@ -5561,6 +5981,7 @@ export class ConferenceRepository {
           ),
         ) as Partial<typeof events.$inferInsert>;
         if (nextStatus !== current.status) updateFields.status = nextStatus;
+        const changedAt = new Date();
         const [row] = await tx
           .update(events)
           .set({
@@ -5568,10 +5989,53 @@ export class ConferenceRepository {
             ...(patch.startsAt ? { startsAt } : {}),
             ...(patch.endsAt ? { endsAt } : {}),
             ...(registrationChanged ? { settings: nextSettings } : {}),
-            updatedAt: new Date(),
+            updatedAt: changedAt,
           })
           .where(and(eq(events.id, eventId), eq(events.organizationId, organizationId)))
           .returning();
+        if (row && row.timezone !== current.timezone) {
+          await tx
+            .update(eventPublicMetrics)
+            .set({ dailyTrackingStartedAt: changedAt, updatedAt: changedAt })
+            .where(
+              and(
+                eq(eventPublicMetrics.organizationId, organizationId),
+                eq(eventPublicMetrics.eventId, eventId),
+              ),
+            );
+        }
+        if (row && (patch.timezone !== undefined || nextStatus === 'archived')) {
+          const [digest] = await tx
+            .select({
+              id: eventFeishuDigestSubscriptions.id,
+              enabled: eventFeishuDigestSubscriptions.enabled,
+              sendLocalTime: eventFeishuDigestSubscriptions.sendLocalTime,
+            })
+            .from(eventFeishuDigestSubscriptions)
+            .where(
+              and(
+                eq(eventFeishuDigestSubscriptions.organizationId, organizationId),
+                eq(eventFeishuDigestSubscriptions.eventId, eventId),
+              ),
+            )
+            .limit(1);
+          if (digest) {
+            const archived = nextStatus === 'archived';
+            await tx
+              .update(eventFeishuDigestSubscriptions)
+              .set({
+                timezoneSnapshot: row.timezone,
+                enabled: archived ? false : digest.enabled,
+                nextRunAt:
+                  archived || !digest.enabled
+                    ? null
+                    : nextFeishuDigestRun(changedAt, row.timezone, digest.sendLocalTime),
+                revision: sql`${eventFeishuDigestSubscriptions.revision} + 1`,
+                updatedAt: changedAt,
+              })
+              .where(eq(eventFeishuDigestSubscriptions.id, digest.id));
+          }
+        }
         await tx.insert(auditLogs).values({
           organizationId: current.organizationId,
           eventId,

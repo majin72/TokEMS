@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DEMO_IDS, type EventId } from '@conference/contracts';
 import {
+  auditLogs,
   conferenceTemplates,
   conferenceTemplateVersions,
   customerProfiles,
@@ -306,6 +307,7 @@ describePersistent('live event settings activation', () => {
       accentFrom: '#2448a8',
       accentTo: '#102759',
       tags: ['回归测试'],
+      socialLinks: [],
       sortOrder: 99,
     });
 
@@ -405,16 +407,25 @@ describePersistent('live event settings activation', () => {
       DEMO_IDS.adminUser,
       DEMO_IDS.organization,
     );
-    await operations.createSpeaker(DEMO_IDS.organization, eventId, DEMO_IDS.adminUser, {
-      name: '离线编辑嘉宾',
-      role: '大会测试嘉宾',
-      topic: '重新上线采用完整草稿',
-      initials: '离线',
-      accentFrom: '#2448a8',
-      accentTo: '#102759',
-      tags: ['回归测试'],
-      sortOrder: 100,
-    });
+    const createdSpeaker = await operations.createSpeaker(
+      DEMO_IDS.organization,
+      eventId,
+      DEMO_IDS.adminUser,
+      {
+        name: '离线编辑嘉宾',
+        role: '大会测试嘉宾',
+        topic: '重新上线采用完整草稿',
+        initials: '离线',
+        accentFrom: '#2448a8',
+        accentTo: '#102759',
+        tags: ['回归测试'],
+        bio: '长期参与大会内容与增长实践。',
+        topicAbstract: '介绍完整草稿重新上线后的公开资料行为。',
+        websiteUrl: 'https://example.com/speakers/offline-editor',
+        socialLinks: [{ label: '公开主页', url: 'https://example.com/offline-editor' }],
+        sortOrder: 100,
+      },
+    );
 
     await repository.updateEvent(
       eventId,
@@ -426,6 +437,173 @@ describePersistent('live event settings activation', () => {
     const publicEvent = await repository.getPublicEvent(slug, organizationSlug);
     expect(publicEvent.city).toBe('苏州');
     expect(publicEvent.speakers.some((item) => item.name === '离线编辑嘉宾')).toBe(true);
+    await expect(
+      repository.getPublicSpeaker(slug, organizationSlug, createdSpeaker.id),
+    ).resolves.toMatchObject({
+      name: '离线编辑嘉宾',
+      bio: '长期参与大会内容与增长实践。',
+      topicAbstract: '介绍完整草稿重新上线后的公开资料行为。',
+      eventSlug: slug,
+      socialLinks: [{ label: '公开主页' }],
+    });
+    await expect(
+      repository.getPublicSpeaker(slug, organizationSlug, randomUUID()),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('edits, orders, isolates, and removes public speaker profiles transactionally', async () => {
+    const managedSpeaker = await operations.createSpeaker(
+      DEMO_IDS.organization,
+      eventId,
+      DEMO_IDS.adminUser,
+      {
+        publicCode: 'qwer',
+        name: '嘉宾管理验收',
+        role: '大会内容负责人',
+        topic: '嘉宾资料管理与发布',
+        accentFrom: '#2448a8',
+        accentTo: '#102759',
+        tags: ['管理验收'],
+        socialLinks: [],
+        sortOrder: 101,
+      },
+    );
+    await operations.updateSpeaker(
+      DEMO_IDS.organization,
+      eventId,
+      managedSpeaker.id,
+      DEMO_IDS.adminUser,
+      { publicCode: 'asdf', bio: '保存后立即进入当前生效快照。' },
+    );
+    const updatedManagedSpeaker = await operations.getSpeaker(
+      DEMO_IDS.organization,
+      eventId,
+      managedSpeaker.id,
+    );
+    expect(managedSpeaker.publicCode).toBe('qwer');
+    expect(updatedManagedSpeaker.publicCode).toBe('asdf');
+    const [speakerAudit] = await database
+      .db!.select({ before: auditLogs.before, after: auditLogs.after })
+      .from(auditLogs)
+      .where(
+        and(eq(auditLogs.action, 'speaker.update'), eq(auditLogs.resourceId, managedSpeaker.id)),
+      )
+      .limit(1);
+    expect(speakerAudit?.before).toMatchObject({ publicCode: 'qwer' });
+    expect(speakerAudit?.after).toMatchObject({ publicCode: 'asdf' });
+
+    const collisionSpeaker = await operations.createSpeaker(
+      DEMO_IDS.organization,
+      eventId,
+      DEMO_IDS.adminUser,
+      {
+        publicCode: 'tsta',
+        name: '嘉宾短地址冲突验收',
+        role: '大会测试嘉宾',
+        topic: '公开地址冲突回滚',
+        accentFrom: '#2448a8',
+        accentTo: '#102759',
+        tags: ['管理验收'],
+        socialLinks: [],
+        sortOrder: 102,
+      },
+    );
+    expect(collisionSpeaker.publicCode).toBe('tsta');
+    await expect(
+      operations.updateSpeaker(
+        DEMO_IDS.organization,
+        eventId,
+        managedSpeaker.id,
+        DEMO_IDS.adminUser,
+        { publicCode: collisionSpeaker.publicCode, bio: '这段内容应随冲突一起回滚。' },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      operations.getSpeaker(DEMO_IDS.organization, eventId, managedSpeaker.id),
+    ).resolves.toMatchObject({
+      publicCode: 'asdf',
+      bio: '保存后立即进入当前生效快照。',
+    });
+    await expect(
+      repository.getPublicSpeaker(slug, organizationSlug, managedSpeaker.id),
+    ).resolves.toMatchObject({ bio: '保存后立即进入当前生效快照。' });
+    await expect(
+      repository.getPublicSpeakerByCode(organizationSlug, updatedManagedSpeaker.publicCode),
+    ).resolves.toMatchObject({
+      id: managedSpeaker.id,
+      publicCode: updatedManagedSpeaker.publicCode,
+      bio: '保存后立即进入当前生效快照。',
+    });
+    await expect(
+      repository.getPublicSpeakerByCode(
+        `other-${organizationSlug}`,
+        updatedManagedSpeaker.publicCode,
+      ),
+    ).rejects.toMatchObject({ status: 404 });
+
+    const currentSpeakers = await operations.listSpeakers(DEMO_IDS.organization, eventId);
+    const reversedIds = currentSpeakers.map((speaker) => speaker.id).reverse();
+    const releaseCount = (await operations.listReleases(DEMO_IDS.organization, eventId)).length;
+    await operations.reorderSpeakers(
+      DEMO_IDS.organization,
+      eventId,
+      DEMO_IDS.adminUser,
+      reversedIds,
+    );
+    expect(
+      (await operations.listSpeakers(DEMO_IDS.organization, eventId)).map((speaker) => speaker.id),
+    ).toEqual(reversedIds);
+    expect(await operations.listReleases(DEMO_IDS.organization, eventId)).toHaveLength(
+      releaseCount + 1,
+    );
+
+    await expect(
+      operations.reorderSpeakers(
+        DEMO_IDS.organization,
+        eventId,
+        DEMO_IDS.adminUser,
+        reversedIds.slice(1),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(await operations.listReleases(DEMO_IDS.organization, eventId)).toHaveLength(
+      releaseCount + 1,
+    );
+    await expect(
+      operations.getSpeaker(randomUUID(), eventId, managedSpeaker.id),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      operations.updateSpeaker(
+        DEMO_IDS.organization,
+        eventId,
+        managedSpeaker.id,
+        DEMO_IDS.adminUser,
+        { avatarAssetId: randomUUID() },
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+
+    const restorableRelease = (await operations.listReleases(DEMO_IDS.organization, eventId))[0]!;
+    await operations.deleteSpeaker(
+      DEMO_IDS.organization,
+      eventId,
+      managedSpeaker.id,
+      DEMO_IDS.adminUser,
+    );
+    await expect(
+      repository.getPublicSpeaker(slug, organizationSlug, managedSpeaker.id),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      repository.getPublicSpeakerByCode(organizationSlug, updatedManagedSpeaker.publicCode),
+    ).rejects.toMatchObject({ status: 404 });
+
+    await operations.rollbackRelease(
+      DEMO_IDS.organization,
+      eventId,
+      restorableRelease.id,
+      DEMO_IDS.adminUser,
+    );
+    await expect(
+      repository.getPublicSpeakerByCode(organizationSlug, updatedManagedSpeaker.publicCode),
+    ).resolves.toMatchObject({ id: managedSpeaker.id });
   });
 
   it('publishes configurable profile fields to the public registration and payment flow', async () => {
@@ -585,11 +763,7 @@ describePersistent('live event settings activation', () => {
     try {
       const concurrentCheckouts = await Promise.all(
         Array.from({ length: 10 }, (_, index) =>
-          repository.createCheckout(
-            input,
-            `registration-owner-create-${suffix}-${index}`,
-            owner,
-          ),
+          repository.createCheckout(input, `registration-owner-create-${suffix}-${index}`, owner),
         ),
       );
       expect(new Set(concurrentCheckouts.map((checkout) => checkout.registration.id))).toHaveLength(
@@ -659,11 +833,7 @@ describePersistent('live event settings activation', () => {
         .set({ supersededAt: new Date(), updatedAt: new Date() })
         .where(eq(registrations.id, registrationId));
       await expect(
-        repository.createCheckout(
-          input,
-          `registration-owner-paid-repeat-${suffix}`,
-          owner,
-        ),
+        repository.createCheckout(input, `registration-owner-paid-repeat-${suffix}`, owner),
       ).rejects.toMatchObject({ status: 409 });
       await expect(
         repository.getOrder(orderId!, repeatedPaid.orderAccessToken!),
@@ -805,8 +975,11 @@ describePersistent('live event settings activation', () => {
       expect(persistedRegistration?.customerUserId).toBe(attendeeId);
     } finally {
       if (orderId) await db.delete(orders).where(eq(orders.id, orderId));
-      if (registrationId) await db.delete(registrations).where(eq(registrations.id, registrationId));
-      await db.delete(customerUsers).where(sql`${customerUsers.id} in (${purchaserId}, ${attendeeId})`);
+      if (registrationId)
+        await db.delete(registrations).where(eq(registrations.id, registrationId));
+      await db
+        .delete(customerUsers)
+        .where(sql`${customerUsers.id} in (${purchaserId}, ${attendeeId})`);
     }
   });
 });

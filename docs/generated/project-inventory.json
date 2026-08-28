@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "webPages": 13,
-  "adminViews": 31,
-  "migrations": 51,
-  "latestMigration": "0050_flimsy_thunderbolt_ross.sql",
-  "databaseTables": 66,
-  "apiControllers": 25,
-  "apiOperations": 207,
-  "testFiles": 116
+  "webPages": 16,
+  "adminViews": 38,
+  "migrations": 58,
+  "latestMigration": "0057_petite_boom_boom.sql",
+  "databaseTables": 78,
+  "apiControllers": 32,
+  "apiOperations": 266,
+  "testFiles": 154
 }

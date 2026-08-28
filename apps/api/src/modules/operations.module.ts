@@ -22,23 +22,30 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import {
   AiGenerateSchema,
   API_ERROR_CODES,
+  CreateSpeakerSchema,
   CreateOrganizationAdministratorSchema,
   CreateOrganizationInvitationSchema,
   CreateEventSchema,
   EventShortSlugSchema,
+  FeishuDigestTestMessageSchema,
   OfflineCheckInSyncSchema,
   PublishEventSchema,
   QueueNotificationSchema,
+  ReorderSpeakersSchema,
   RefundRequestSchema,
   RegistrationFormPublishSchema,
   SetOrganizationHomepageEventSchema,
   TestAliyunSmsConfigurationSchema,
+  UpdateFeishuBotConfigurationSchema,
+  UpdateFeishuDigestSubscriptionSchema,
   UpdateAliyunSmsConfigurationSchema,
   UpdateMembershipStatusSchema,
   UpdateEventSlugSchema,
   UpdateOrganizationAdministratorSchema,
+  UpdateOrganizationAnalyticsSchema,
   UpdateOrganizationMemberSchema,
   UpdateOrganizationSettingsSchema,
+  UpdateSpeakerSchema,
   UpdateWeChatPayConfigurationSchema,
   type EventId,
 } from '@conference/contracts';
@@ -49,14 +56,17 @@ import {
   RequireGrant,
   type AuthenticatedUser,
 } from '../common/auth.guard.js';
+import { AgentSurface } from '../common/agent-operation-catalog.js';
 import { CommerceOperationsService } from '../common/commerce-operations.service.js';
 import { AliyunSmsService } from '../common/aliyun-sms.service.js';
 import { DomainError } from '../common/domain-error.js';
 import { EngagementOperationsService } from '../common/engagement-operations.service.js';
 import { EventIdPipe, OptionalEventIdPipe } from '../common/event-id.pipe.js';
 import { EventOperationsService } from '../common/event-operations.service.js';
+import { FeishuDigestService } from '../common/feishu-digest.service.js';
 import { IdempotencyService } from '../common/idempotency.service.js';
 import { OrganizationAdminService } from '../common/organization-admin.service.js';
+import { TemplateOperationsService } from '../common/template-operations.service.js';
 import { WeChatPayService } from '../common/wechat-pay.service.js';
 
 type AuthenticatedRequest = FastifyRequest & { user: AuthenticatedUser };
@@ -85,16 +95,26 @@ function idempotencyKey(value: string | undefined) {
   return value;
 }
 
-const SpeakerInputSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  role: z.string().trim().min(1).max(240),
-  topic: z.string().trim().min(1).max(240),
-  initials: z.string().trim().min(1).max(8),
-  accentFrom: z.string().regex(/^#[0-9a-f]{6}$/i),
-  accentTo: z.string().regex(/^#[0-9a-f]{6}$/i),
-  tags: z.array(z.string().max(60)).max(12).default([]),
-  sortOrder: z.number().int().min(0).default(0),
+const SpeakerImageSchema = z.object({
+  storageKey: z.string().trim().min(3).max(500),
+  mediaType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  size: z
+    .number()
+    .int()
+    .positive()
+    .max(10 * 1024 * 1024),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  contentDigest: z.string().trim().min(16).max(128),
+  altText: z.string().trim().max(500).default(''),
 });
+
+const PrepareSpeakerImageUploadSchema = SpeakerImageSchema.pick({
+  mediaType: true,
+  size: true,
+  contentDigest: true,
+  altText: true,
+}).extend({ fileName: z.string().trim().min(1).max(240) });
 
 const sessionInputFields = {
   day: z.number().int().min(1).max(30),
@@ -155,6 +175,9 @@ const TicketTypeInputSchema = z.object({
 @ApiTags('organization-and-events')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
+@AgentSurface({
+  defaultExclusionReason: 'Unlisted handlers remain human-only until added to the Agent catalog',
+})
 @Controller('admin')
 export class OrganizationEventsController {
   constructor(
@@ -167,6 +190,8 @@ export class OrganizationEventsController {
     private readonly weChatPay: WeChatPayService,
     @Inject(AliyunSmsService)
     private readonly aliyunSms: AliyunSmsService,
+    @Inject(FeishuDigestService)
+    private readonly feishuDigest: FeishuDigestService,
   ) {}
 
   @Get('organization/members')
@@ -301,6 +326,16 @@ export class OrganizationEventsController {
     );
   }
 
+  @Put('organization/analytics')
+  @RequireGrant('org.analytics.manage')
+  updateOrganizationAnalytics(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    return this.organizationAdmin.updateAnalytics(
+      request.user.organizationId,
+      request.user.sub,
+      parse(UpdateOrganizationAnalyticsSchema, body),
+    );
+  }
+
   @Put('organization/homepage-event')
   @RequireGrant('org.settings.manage')
   setOrganizationHomepageEvent(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
@@ -375,6 +410,139 @@ export class OrganizationEventsController {
           request.user.organizationId,
           request.user.sub,
           input,
+          requestKey,
+        ),
+      60 * 60_000,
+    );
+  }
+
+  @Get('integrations/feishu-bot')
+  @RequireGrant('org.settings.read')
+  feishuBotConfiguration(@Req() request: AuthenticatedRequest) {
+    return this.feishuDigest.getConfiguration(request.user.organizationId);
+  }
+
+  @Patch('integrations/feishu-bot')
+  @RequireGrant('org.settings.manage')
+  updateFeishuBotConfiguration(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    return this.feishuDigest.updateConfiguration(
+      request.user.organizationId,
+      request.user.sub,
+      parse(UpdateFeishuBotConfigurationSchema, body),
+    );
+  }
+
+  @Post('integrations/feishu-bot/verify')
+  @RequireGrant('org.settings.manage')
+  @Throttle({ default: { limit: 10, ttl: 60 * 60_000 } })
+  verifyFeishuBot(@Req() request: AuthenticatedRequest) {
+    return this.feishuDigest.verify(request.user.organizationId, request.user.sub);
+  }
+
+  @Get('integrations/feishu-bot/chats')
+  @RequireGrant('org.settings.manage')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  feishuBotChats(@Req() request: AuthenticatedRequest) {
+    return this.feishuDigest.listChats(request.user.organizationId);
+  }
+
+  @Post('integrations/feishu-bot/chats/refresh')
+  @RequireGrant('org.settings.manage')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  refreshFeishuBotChats(@Req() request: AuthenticatedRequest) {
+    return this.feishuDigest.refreshChats(request.user.organizationId, request.user.sub);
+  }
+
+  @Get('events/:eventId/feishu-digest')
+  @RequireGrant('org.settings.read')
+  feishuDigestSubscription(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.feishuDigest.getSubscription(request.user.organizationId, eventId);
+  }
+
+  @Patch('events/:eventId/feishu-digest')
+  @RequireAllGrants('org.settings.manage', 'event.dashboard.read')
+  updateFeishuDigestSubscription(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Body() body: unknown,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.feishuDigest.updateSubscription(
+      request.user.organizationId,
+      eventId,
+      request.user.sub,
+      parse(UpdateFeishuDigestSubscriptionSchema, body),
+    );
+  }
+
+  @Get('events/:eventId/feishu-digest/preview')
+  @RequireAllGrants('org.settings.read', 'event.dashboard.read')
+  feishuDigestPreview(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.feishuDigest.preview(request.user.organizationId, eventId);
+  }
+
+  @Post('events/:eventId/feishu-digest/send-test')
+  @RequireAllGrants('org.settings.manage', 'event.dashboard.read')
+  @Throttle({ default: { limit: 10, ttl: 60 * 60_000 } })
+  sendFeishuDigestTest(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const input = parse(FeishuDigestTestMessageSchema, body);
+    const requestKey = idempotencyKey(key);
+    return this.idempotency.execute(
+      `feishu-digest:test:${request.user.organizationId}:${eventId}:${request.user.sub}`,
+      requestKey,
+      input,
+      () =>
+        this.feishuDigest.sendTest(
+          request.user.organizationId,
+          eventId,
+          request.user.sub,
+          input,
+          requestKey,
+        ),
+      60 * 60_000,
+    );
+  }
+
+  @Get('events/:eventId/feishu-digest/deliveries')
+  @RequireGrant('org.settings.read')
+  feishuDigestDeliveries(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.feishuDigest.listDeliveries(request.user.organizationId, eventId);
+  }
+
+  @Post('events/:eventId/feishu-digest/deliveries/:deliveryId/resend')
+  @RequireAllGrants('org.settings.manage', 'event.dashboard.read')
+  @Throttle({ default: { limit: 10, ttl: 60 * 60_000 } })
+  resendFeishuDigestDelivery(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Param('deliveryId') deliveryId: string,
+    @Headers('idempotency-key') key: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const requestKey = idempotencyKey(key);
+    const input = { deliveryId };
+    return this.idempotency.execute(
+      `feishu-digest:resend:${request.user.organizationId}:${eventId}:${request.user.sub}`,
+      requestKey,
+      input,
+      () =>
+        this.feishuDigest.resendDelivery(
+          request.user.organizationId,
+          eventId,
+          deliveryId,
+          request.user.sub,
           requestKey,
         ),
       60 * 60_000,
@@ -489,10 +657,16 @@ export class OrganizationEventsController {
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
 @RequireGrant('event.content.manage')
+@AgentSurface({
+  defaultExclusionReason: 'Unlisted handlers remain human-only until added to the Agent catalog',
+})
 @Controller('admin/events/:eventId')
 class ContentFormsController {
   constructor(
     @Inject(EventOperationsService) private readonly operations: EventOperationsService,
+    @Inject(TemplateOperationsService)
+    private readonly templates: TemplateOperationsService,
+    @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
   ) {}
 
   @Get('content')
@@ -585,7 +759,36 @@ class ContentFormsController {
       request.user.organizationId,
       eventId,
       request.user.sub,
-      parse(SpeakerInputSchema, body),
+      parse(CreateSpeakerSchema, body),
+    );
+  }
+
+  @Get('speakers')
+  speakers(@Param('eventId', EventIdPipe) eventId: EventId, @Req() request: AuthenticatedRequest) {
+    return this.operations.listSpeakers(request.user.organizationId, eventId);
+  }
+
+  @Get('speakers/:speakerId')
+  speaker(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Param('speakerId') speakerId: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.operations.getSpeaker(request.user.organizationId, eventId, speakerId);
+  }
+
+  @Put('speakers/order')
+  reorderSpeakers(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Body() body: unknown,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const input = parse(ReorderSpeakersSchema, body);
+    return this.operations.reorderSpeakers(
+      request.user.organizationId,
+      eventId,
+      request.user.sub,
+      input.speakerIds,
     );
   }
 
@@ -596,16 +799,59 @@ class ContentFormsController {
     @Body() body: unknown,
     @Req() request: AuthenticatedRequest,
   ) {
-    const input = parse(SpeakerInputSchema.partial(), body);
-    const patch = Object.fromEntries(
-      Object.entries(input).filter(([, value]) => value !== undefined),
-    );
+    const patch = parse(UpdateSpeakerSchema, body);
     return this.operations.updateSpeaker(
       request.user.organizationId,
       eventId,
       speakerId,
       request.user.sub,
       patch,
+    );
+  }
+
+  @Post('speaker-images/uploads')
+  prepareSpeakerImageUpload(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const input = parse(PrepareSpeakerImageUploadSchema, body);
+    const commandKey = idempotencyKey(key);
+    return this.idempotency.execute(
+      `speaker:image:upload:${request.user.organizationId}:${eventId}`,
+      commandKey,
+      input,
+      async () => {
+        await this.operations.listSpeakers(request.user.organizationId, eventId);
+        return this.templates.prepareAssetUpload(
+          request.user.organizationId,
+          request.user.sub,
+          input,
+          commandKey,
+        );
+      },
+      { ttlMs: 9 * 60_000, allowLeaseTakeover: true },
+    );
+  }
+
+  @Post('speaker-images')
+  createSpeakerImage(
+    @Param('eventId', EventIdPipe) eventId: EventId,
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const input = parse(SpeakerImageSchema, body);
+    const commandKey = idempotencyKey(key);
+    return this.idempotency.execute(
+      `speaker:image:create:${request.user.organizationId}:${eventId}`,
+      commandKey,
+      input,
+      async () => {
+        await this.operations.listSpeakers(request.user.organizationId, eventId);
+        return this.templates.createAsset(request.user.organizationId, request.user.sub, input);
+      },
     );
   }
 
@@ -700,6 +946,9 @@ class ContentFormsController {
 @ApiTags('commerce-operations')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
+@AgentSurface({
+  defaultExclusionReason: 'Unlisted handlers remain human-only until added to the Agent catalog',
+})
 @Controller('admin')
 class CommerceController {
   constructor(
@@ -748,6 +997,9 @@ class CommerceController {
 @ApiTags('engagement-and-checkin')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
+@AgentSurface({
+  defaultExclusionReason: 'Unlisted handlers remain human-only until added to the Agent catalog',
+})
 @Controller('admin')
 class EngagementController {
   constructor(

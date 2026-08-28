@@ -1,0 +1,83 @@
+{
+  "ok": true,
+  "schema_version": "2.0",
+  "skill_dir": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin",
+  "registry_dir": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin/registry",
+  "package": {
+    "schema_version": "2.0",
+    "name": "tokems-admin",
+    "version": "0.2.0",
+    "description": "Operate an authorized remote TokEMS administration surface for events, public content, speakers, templates, attendee questions, registrations, commerce, invoices, check-in, approved Feishu reads, exports, and audit. Use for connection, inspection, editing, publishing, operation, export, revocation, or audit. Excludes source development, deployment, SSH, database access, attendee self-service, and Feishu sending.",
+    "targets": [
+      "openai",
+      "generic"
+    ],
+    "maturity": "governed",
+    "owner": "TokEMS Maintainers",
+    "review_cadence": "monthly",
+    "trust_level": "local",
+    "license": "AGPL-3.0-only",
+    "checksums": {
+      "package_sha256": "b29c5a45d4aabb4fdfdf81e4d9f83905c817861ec2d9f0be79b75440b1b08b32",
+      "archive_sha256": "eff907147a327273cbc1ad725522d68fc204d5719aa4aa8d25e7f8878b88cb5d"
+    },
+    "compatibility": {
+      "openai": "pass",
+      "generic": "pass"
+    },
+    "source": {
+      "skill_dir": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin",
+      "skill_ir": "reports/skill-ir.json",
+      "ir_schema_version": "2.0.0",
+      "canonical_metadata": "agents/interface.yaml"
+    },
+    "artifacts": {
+      "overview_html": "reports/skill-overview.html",
+      "review_studio_html": "reports/review-studio.html",
+      "trust_report": "reports/security_trust_report.md",
+      "conformance_matrix": "reports/conformance_matrix.md",
+      "compiled_targets": "reports/compiled_targets.md",
+      "package_verification": "reports/package_verification.md",
+      "install_simulation": "reports/install_simulation.md",
+      "adoption_drift": "reports/adoption_drift_report.md",
+      "review_waivers": "reports/review_waivers.md",
+      "review_annotations": "reports/review_annotations.md",
+      "package_metadata": "registry/packages/tokems-admin.json"
+    },
+    "distribution": {
+      "archive_verified": true,
+      "archive_sha256": "eff907147a327273cbc1ad725522d68fc204d5719aa4aa8d25e7f8878b88cb5d",
+      "package_verification": "reports/package_verification.json",
+      "install_simulated": true,
+      "install_simulation": "reports/install_simulation.json"
+    },
+    "generated_at": "2026-08-26"
+  },
+  "index": {
+    "schema_version": "2.0",
+    "generated_at": "2026-08-26",
+    "package_count": 1,
+    "packages": [
+      {
+        "name": "tokems-admin",
+        "version": "0.2.0",
+        "maturity": "governed",
+        "owner": "TokEMS Maintainers",
+        "targets": [
+          "openai",
+          "generic"
+        ],
+        "package_metadata": "registry/packages/tokems-admin.json",
+        "package_sha256": "b29c5a45d4aabb4fdfdf81e4d9f83905c817861ec2d9f0be79b75440b1b08b32"
+      }
+    ]
+  },
+  "failures": [],
+  "warnings": [],
+  "artifacts": {
+    "index": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin/registry/index.json",
+    "package": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin/registry/packages/tokems-admin.json",
+    "json": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin/reports/registry_audit.json",
+    "markdown": "/Users/laoyao/AI Coding/01-Projects/Active/TokEMS/skills/tokems-admin/reports/registry_audit.md"
+  }
+}

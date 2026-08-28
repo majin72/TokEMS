@@ -17,13 +17,38 @@ export interface ResolvedStructuredExperience {
   initialization: ConferenceTemplateDefinition['initialization'];
 }
 
+function compatibleHome(
+  home: StructuredPresentation['home'],
+  fallback: StructuredPresentation['home'],
+) {
+  if (home.blocks.some((block) => block.nodeKey === 'home.cooperation')) return home;
+  const cooperation = fallback.blocks.find((block) => block.nodeKey === 'home.cooperation');
+  if (!cooperation) return home;
+  const blocks = [...home.blocks];
+  const ticketsIndex = blocks.findIndex((block) => block.nodeKey === 'home.tickets');
+  blocks.splice(ticketsIndex < 0 ? blocks.length : ticketsIndex, 0, cooperation);
+  return { ...home, blocks };
+}
+
+function legacyStaticHome(home: StructuredPresentation['home']) {
+  return {
+    ...home,
+    blocks: home.blocks.map((block) =>
+      block.nodeKey === 'home.stats' ? { ...block, variant: 'inline' } : block,
+    ),
+  };
+}
+
 export function resolveEventExperience(event: PublicEvent): ResolvedStructuredExperience {
   const fallback = DEFAULT_CONFERENCE_TEMPLATE_DEFINITION;
   if (fallback.presentation.kind !== 'structured') {
     throw new Error('默认大会模板必须使用结构化首页');
   }
   return {
-    home: event.experience?.home ?? fallback.presentation.home,
+    home: compatibleHome(
+      event.experience?.home ?? legacyStaticHome(fallback.presentation.home),
+      fallback.presentation.home,
+    ),
     faq: event.experience?.faq ?? {
       ...fallback.faq,
       items: event.faqs.map((item, index) => ({
@@ -36,7 +61,9 @@ export function resolveEventExperience(event: PublicEvent): ResolvedStructuredEx
     },
     registrationFlow: event.experience?.registrationFlow ?? {
       ...fallback.registrationFlow,
-      steps: fallback.registrationFlow.steps.filter((step) => step.type !== 'member-profile'),
+      steps: fallback.registrationFlow.steps.filter(
+        (step) => step.type !== 'member-profile' && step.type !== 'attendee-needs',
+      ),
     },
     initialization: fallback.initialization,
   };

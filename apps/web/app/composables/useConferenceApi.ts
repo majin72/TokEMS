@@ -1,12 +1,18 @@
 import {
+  DEFAULT_ANALYTICS_SETTINGS,
   DEMO_EVENT,
+  type CreateCooperationRequest,
   type CreateRegistration,
   type CustomerOrderAccess,
   type Order,
   type PublicSiteConfiguration,
   type PublicEvent,
+  type PublicAttendeeNeedList,
+  type PublicEventViewResult,
   type PublicEventMemberDetail,
   type PublicEventMemberList,
+  type PublicEventSpeakerDetail,
+  type PublicCooperationRequestResult,
   type RegistrationCheckout,
   type SubmitInvoiceDetails,
   type Ticket,
@@ -91,6 +97,19 @@ export function useConferenceApi() {
     }
   }
 
+  function recordPublicEventView(slug: string, pageViewId: string): Promise<PublicEventViewResult> {
+    return $fetch<PublicEventViewResult>(
+      `/events/${encodeURIComponent(slug)}/public-metrics/view`,
+      {
+        method: 'POST',
+        baseURL,
+        timeout: 4_000,
+        headers: { 'X-Organization-Slug': organizationSlug },
+        body: { pageViewId },
+      },
+    );
+  }
+
   async function getEventMembers(slug: string, page = 1, industry?: string) {
     const result = await $fetch<PublicEventMemberList>(
       `/events/${encodeURIComponent(slug)}/members`,
@@ -110,9 +129,46 @@ export function useConferenceApi() {
     };
   }
 
+  function getEventAttendeeNeeds(slug: string, page = 1, snapshotAt?: string) {
+    return $fetch<PublicAttendeeNeedList>(`/events/${encodeURIComponent(slug)}/attendee-needs`, {
+      baseURL,
+      timeout: 4_000,
+      headers: { 'X-Organization-Slug': organizationSlug },
+      query: { page, ...(snapshotAt ? { snapshotAt } : {}) },
+    });
+  }
+
   async function getEventMember(slug: string, publicSlug: string) {
     const result = await $fetch<PublicEventMemberDetail>(
       `/events/${encodeURIComponent(slug)}/members/${encodeURIComponent(publicSlug)}`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+      },
+    );
+    return {
+      ...result,
+      ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
+    };
+  }
+
+  async function getEventSpeaker(slug: string, speakerId: string) {
+    const result = await $fetch<PublicEventSpeakerDetail>(
+      `/events/${encodeURIComponent(slug)}/speakers/${encodeURIComponent(speakerId)}`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+      },
+    );
+    return {
+      ...result,
+      ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
+    };
+  }
+
+  async function getSpeakerByCode(publicCode: string) {
+    const result = await $fetch<PublicEventSpeakerDetail>(
+      `/speakers/${encodeURIComponent(publicCode)}`,
       {
         baseURL,
         headers: { 'X-Organization-Slug': organizationSlug },
@@ -143,13 +199,7 @@ export function useConferenceApi() {
           icpNumber: '',
           supportEmail: '',
         },
-        analytics: {
-          enabled: false,
-          provider: 'baidu',
-          trackingId: '',
-          scriptUrl: '',
-          siteId: '',
-        },
+        analytics: { ...DEFAULT_ANALYTICS_SETTINGS },
         customerAccounts: {
           termsUrl: '',
           termsVersion: '',
@@ -177,6 +227,21 @@ export function useConferenceApi() {
       if (import.meta.dev && isNetworkFailure(error)) return createLocalCheckout(input);
       throw error;
     }
+  }
+
+  async function createCooperationRequest(
+    input: CreateCooperationRequest,
+    idempotencyKey: string,
+  ): Promise<PublicCooperationRequestResult> {
+    return $fetch<PublicCooperationRequestResult>('/cooperation-requests', {
+      method: 'POST',
+      baseURL,
+      headers: {
+        'Idempotency-Key': idempotencyKey,
+        'X-Organization-Slug': organizationSlug,
+      },
+      body: input,
+    });
   }
 
   async function joinWaitlist(input: WaitlistJoin): Promise<WaitlistEntry> {
@@ -621,10 +686,15 @@ export function useConferenceApi() {
     eventState,
     getEvent,
     getHomepageEvent,
+    recordPublicEventView,
     getEventMembers,
+    getEventAttendeeNeeds,
     getEventMember,
+    getEventSpeaker,
+    getSpeakerByCode,
     getSiteConfiguration,
     createRegistration,
+    createCooperationRequest,
     joinWaitlist,
     confirmPayment,
     localPaymentSimulationCapability,

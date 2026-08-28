@@ -1,6 +1,8 @@
 import {
+  bigint,
   boolean,
   check,
+  date,
   foreignKey,
   index,
   integer,
@@ -15,13 +17,23 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { inArray, isNotNull, sql } from 'drizzle-orm';
+import { inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { ATTENDEE_NEED_TOPIC_OPTIONS, DEFAULT_ANALYTICS_SETTINGS } from '@conference/contracts';
 import type {
+  AgentApprovalPolicy,
+  AgentDataClass,
+  AgentIdempotencyStrategy,
+  AgentOperationStatus,
+  AgentRisk,
+  AgentScope,
   ConferenceTemplateDefinition,
+  CooperationType,
   EventSettings,
+  FeishuDigestSnapshot,
   HtmlTemplateBindingManifest,
   OrganizationRole,
   OrganizationSettings,
+  SpeakerSocialLink,
   TemplateSurface,
 } from '@conference/contracts';
 
@@ -58,6 +70,10 @@ const timestamps = {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 };
+
+const attendeeNeedTopicCodesSql = sql.raw(
+  `'${JSON.stringify(ATTENDEE_NEED_TOPIC_OPTIONS.map((topic) => topic.code))}'::jsonb`,
+);
 
 export const eventStatus = pgEnum('event_status', [
   'draft',
@@ -172,13 +188,7 @@ export const organizations = pgTable(
           icpNumber: '',
           supportEmail: '',
         },
-        analytics: {
-          enabled: false,
-          provider: 'baidu',
-          trackingId: '',
-          scriptUrl: '',
-          siteId: '',
-        },
+        analytics: DEFAULT_ANALYTICS_SETTINGS,
       }),
     ...timestamps,
   },
@@ -449,6 +459,7 @@ export const memberships = pgTable(
   },
   (table) => [
     uniqueIndex('memberships_org_user_unique').on(table.organizationId, table.userId),
+    uniqueIndex('memberships_id_org_user_unique').on(table.id, table.organizationId, table.userId),
     index('memberships_user_idx').on(table.userId),
   ],
 );
@@ -465,6 +476,7 @@ export const organizationIntegrations = pgTable(
     config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
     encryptedCredentials: text('encrypted_credentials'),
     keyVersion: integer('key_version').notNull().default(1),
+    revision: integer('revision').notNull().default(0),
     lastVerifiedAt: timestamp('last_verified_at', { withTimezone: true }),
     lastError: text('last_error'),
     updatedBy: uuid('updated_by').references(() => users.id),
@@ -587,6 +599,149 @@ export const events = pgTable(
     uniqueIndex('events_org_id_unique').on(table.organizationId, table.id),
     uniqueIndex('events_id_org_unique').on(table.id, table.organizationId),
     index('events_org_status_idx').on(table.organizationId, table.status),
+  ],
+);
+
+export const eventPublicMetrics = pgTable(
+  'event_public_metrics',
+  {
+    organizationId: uuid('organization_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    pageViews: bigint('page_views', { mode: 'number' }).notNull().default(0),
+    trackingStartedAt: timestamp('tracking_started_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    dailyTrackingStartedAt: timestamp('daily_tracking_started_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.organizationId, table.eventId] }),
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'event_public_metrics_event_scope_fk',
+    }).onDelete('cascade'),
+    check('event_public_metrics_page_views_nonnegative', sql`${table.pageViews} >= 0`),
+  ],
+);
+
+export const eventPublicMetricDays = pgTable(
+  'event_public_metric_days',
+  {
+    organizationId: uuid('organization_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    localDate: date('local_date').notNull(),
+    pageViews: bigint('page_views', { mode: 'number' }).notNull().default(0),
+    timezoneSnapshot: varchar('timezone_snapshot', { length: 80 }).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    primaryKey({ columns: [table.organizationId, table.eventId, table.localDate] }),
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'event_public_metric_days_event_scope_fk',
+    }).onDelete('cascade'),
+    check('event_public_metric_days_page_views_nonnegative', sql`${table.pageViews} >= 0`),
+  ],
+);
+
+export const eventFeishuDigestSubscriptions = pgTable(
+  'event_feishu_digest_subscriptions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    digestType: varchar('digest_type', { length: 40 }).notNull().default('daily_operations'),
+    enabled: boolean('enabled').notNull().default(false),
+    chatId: varchar('chat_id', { length: 160 }),
+    chatNameSnapshot: varchar('chat_name_snapshot', { length: 200 }),
+    sendLocalTime: varchar('send_local_time', { length: 5 }).notNull().default('09:00'),
+    timezoneSnapshot: varchar('timezone_snapshot', { length: 80 }).notNull(),
+    nextRunAt: timestamp('next_run_at', { withTimezone: true }),
+    lastSuccessfulAt: timestamp('last_successful_at', { withTimezone: true }),
+    testVerifiedAt: timestamp('test_verified_at', { withTimezone: true }),
+    testVerifiedChatId: varchar('test_verified_chat_id', { length: 160 }),
+    revision: integer('revision').notNull().default(0),
+    ...timestamps,
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'event_feishu_digest_subscriptions_event_scope_fk',
+    }).onDelete('cascade'),
+    uniqueIndex('event_feishu_digest_subscriptions_scope_unique').on(
+      table.organizationId,
+      table.eventId,
+      table.digestType,
+    ),
+    index('event_feishu_digest_subscriptions_due_idx').on(table.enabled, table.nextRunAt),
+    check(
+      'event_feishu_digest_subscriptions_type_check',
+      sql`${table.digestType} in ('daily_operations')`,
+    ),
+    check(
+      'event_feishu_digest_subscriptions_time_check',
+      sql`${table.sendLocalTime} ~ '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$'`,
+    ),
+  ],
+);
+
+export const feishuDigestDeliveries = pgTable(
+  'feishu_digest_deliveries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    subscriptionId: uuid('subscription_id').references(() => eventFeishuDigestSubscriptions.id, {
+      onDelete: 'set null',
+    }),
+    sourceDeliveryId: uuid('source_delivery_id').references(
+      (): AnyPgColumn => feishuDigestDeliveries.id,
+      { onDelete: 'set null' },
+    ),
+    organizationId: uuid('organization_id').notNull(),
+    eventId: integer('event_id').notNull(),
+    kind: varchar('kind', { length: 24 }).notNull(),
+    reportDate: date('report_date').notNull(),
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    windowEnd: timestamp('window_end', { withTimezone: true }).notNull(),
+    generatedAt: timestamp('generated_at', { withTimezone: true }),
+    aggregateSnapshot: jsonb('aggregate_snapshot').$type<FeishuDigestSnapshot>(),
+    cardDigest: varchar('card_digest', { length: 64 }),
+    chatIdSnapshot: varchar('chat_id_snapshot', { length: 160 }).notNull(),
+    chatNameSnapshot: varchar('chat_name_snapshot', { length: 200 }).notNull(),
+    status: varchar('status', { length: 24 }).notNull().default('queued'),
+    providerMessageId: varchar('provider_message_id', { length: 160 }),
+    attempts: integer('attempts').notNull().default(0),
+    lastErrorCode: varchar('last_error_code', { length: 80 }),
+    lastError: text('last_error'),
+    dedupKey: varchar('dedup_key', { length: 240 }).notNull(),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true }),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'feishu_digest_deliveries_event_scope_fk',
+    }).onDelete('cascade'),
+    uniqueIndex('feishu_digest_deliveries_dedup_unique').on(table.dedupKey),
+    index('feishu_digest_deliveries_event_time_idx').on(
+      table.organizationId,
+      table.eventId,
+      table.createdAt,
+    ),
+    index('feishu_digest_deliveries_status_time_idx').on(table.status, table.updatedAt),
+    check(
+      'feishu_digest_deliveries_kind_check',
+      sql`${table.kind} in ('scheduled', 'manual_test', 'manual_resend')`,
+    ),
+    check(
+      'feishu_digest_deliveries_status_check',
+      sql`${table.status} in ('queued', 'generating', 'sending', 'retrying', 'sent', 'unknown', 'failed', 'skipped', 'cancelled')`,
+    ),
+    check('feishu_digest_deliveries_attempts_nonnegative', sql`${table.attempts} >= 0`),
   ],
 );
 
@@ -1138,10 +1293,9 @@ export const orders = pgTable(
     registrationId: uuid('registration_id')
       .notNull()
       .references(() => registrations.id),
-    purchaserCustomerUserId: uuid('purchaser_customer_user_id').references(
-      () => customerUsers.id,
-      { onDelete: 'set null' },
-    ),
+    purchaserCustomerUserId: uuid('purchaser_customer_user_id').references(() => customerUsers.id, {
+      onDelete: 'set null',
+    }),
     purchaserSnapshot: jsonb('purchaser_snapshot').$type<{
       customerUserId: string | null;
       mobile: string;
@@ -1210,10 +1364,7 @@ export const attendeeClaimTokens = pgTable(
   },
   (table) => [
     uniqueIndex('attendee_claim_tokens_hash_unique').on(table.tokenHash),
-    index('attendee_claim_tokens_registration_time_idx').on(
-      table.registrationId,
-      table.createdAt,
-    ),
+    index('attendee_claim_tokens_registration_time_idx').on(table.registrationId, table.createdAt),
     index('attendee_claim_tokens_active_expiry_idx')
       .on(table.expiresAt)
       .where(sql`${table.consumedAt} is null and ${table.revokedAt} is null`),
@@ -1422,6 +1573,110 @@ export const attendeeShowcaseProfiles = pgTable(
       table.registrationId,
     ),
     index('attendee_showcases_customer_idx').on(table.customerUserId, table.updatedAt),
+  ],
+);
+
+export const attendeeNeedSubmissions = pgTable(
+  'attendee_need_submissions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    eventId: integer('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'cascade' }),
+    registrationId: uuid('registration_id')
+      .notNull()
+      .references(() => registrations.id, { onDelete: 'cascade' }),
+    customerUserId: uuid('customer_user_id')
+      .notNull()
+      .references(() => customerUsers.id, { onDelete: 'cascade' }),
+    isPublic: boolean('is_public').notNull().default(false),
+    isAnonymous: boolean('is_anonymous').notNull().default(true),
+    attributionName: varchar('attribution_name', { length: 120 }),
+    consentVersion: varchar('consent_version', { length: 40 }),
+    consentAt: timestamp('consent_at', { withTimezone: true }),
+    version: integer('version').notNull().default(1),
+    ...timestamps,
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.registrationId, table.organizationId, table.eventId],
+      foreignColumns: [registrations.id, registrations.organizationId, registrations.eventId],
+      name: 'attendee_need_submissions_registration_scope_fk',
+    }),
+    foreignKey({
+      columns: [table.customerUserId, table.organizationId],
+      foreignColumns: [customerUsers.id, customerUsers.organizationId],
+      name: 'attendee_need_submissions_customer_org_fk',
+    }),
+    uniqueIndex('attendee_need_submissions_registration_unique').on(table.registrationId),
+    check('attendee_need_submissions_version_positive', sql`${table.version} > 0`),
+    check(
+      'attendee_need_submissions_named_public_attribution',
+      sql`${table.isPublic} = false or ${table.isAnonymous} = true or coalesce(length(trim(${table.attributionName})), 0) > 0`,
+    ),
+    check(
+      'attendee_need_submissions_public_consent',
+      sql`${table.isPublic} = false or (${table.consentVersion} is not null and ${table.consentAt} is not null)`,
+    ),
+    index('attendee_need_submissions_event_public_idx').on(
+      table.eventId,
+      table.isPublic,
+      table.updatedAt,
+    ),
+    index('attendee_need_submissions_customer_idx').on(table.customerUserId, table.updatedAt),
+  ],
+);
+
+export const attendeeNeedQuestions = pgTable(
+  'attendee_need_questions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    submissionId: uuid('submission_id')
+      .notNull()
+      .references(() => attendeeNeedSubmissions.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    content: varchar('content', { length: 200 }).notNull(),
+    tagCodes: jsonb('tag_codes').$type<string[]>().notNull(),
+    firstPublishedAt: timestamp('first_published_at', { withTimezone: true }),
+    adminEditedAt: timestamp('admin_edited_at', { withTimezone: true }),
+    adminEditReason: varchar('admin_edit_reason', { length: 500 }),
+    adminHiddenAt: timestamp('admin_hidden_at', { withTimezone: true }),
+    adminHiddenReason: varchar('admin_hidden_reason', { length: 500 }),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    deletedByType: varchar('deleted_by_type', { length: 20 }).$type<'customer' | 'admin'>(),
+    deletedReason: varchar('deleted_reason', { length: 500 }),
+    ...timestamps,
+  },
+  (table) => [
+    check('attendee_need_questions_position_range', sql`${table.position} between 1 and 3`),
+    check(
+      'attendee_need_questions_content_length',
+      sql`char_length(trim(${table.content})) between 5 and 200`,
+    ),
+    check(
+      'attendee_need_questions_tag_count',
+      sql`jsonb_typeof(${table.tagCodes}) = 'array' and jsonb_array_length(${table.tagCodes}) between 1 and 3`,
+    ),
+    check(
+      'attendee_need_questions_tag_values',
+      sql`${table.tagCodes} <@ ${attendeeNeedTopicCodesSql}
+        and (jsonb_array_length(${table.tagCodes}) < 2 or ${table.tagCodes}->0 <> ${table.tagCodes}->1)
+        and (jsonb_array_length(${table.tagCodes}) < 3 or (${table.tagCodes}->0 <> ${table.tagCodes}->2 and ${table.tagCodes}->1 <> ${table.tagCodes}->2))`,
+    ),
+    uniqueIndex('attendee_need_questions_active_position_unique')
+      .on(table.submissionId, table.position)
+      .where(isNull(table.deletedAt)),
+    index('attendee_need_questions_public_idx').on(
+      table.firstPublishedAt,
+      table.id,
+      table.adminHiddenAt,
+      table.deletedAt,
+    ),
+    index('attendee_need_questions_tags_idx').using('gin', table.tagCodes),
+    index('attendee_need_questions_submission_idx').on(table.submissionId, table.position),
   ],
 );
 
@@ -1807,10 +2062,100 @@ export const speakers = pgTable(
     accentFrom: varchar('accent_from', { length: 16 }).notNull(),
     accentTo: varchar('accent_to', { length: 16 }).notNull(),
     tags: jsonb('tags').$type<string[]>().notNull().default([]),
+    avatarAssetId: uuid('avatar_asset_id').references(() => templateAssets.id),
+    bio: text('bio'),
+    topicAbstract: text('topic_abstract'),
+    websiteUrl: varchar('website_url', { length: 500 }),
+    socialLinks: jsonb('social_links').$type<SpeakerSocialLink[]>().notNull().default([]),
     sortOrder: integer('sort_order').notNull().default(0),
     ...timestamps,
   },
   (table) => [index('speakers_event_order_idx').on(table.eventId, table.sortOrder)],
+);
+
+export const speakerPublicRoutes = pgTable(
+  'speaker_public_routes',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    eventId: integer('event_id').notNull(),
+    speakerId: uuid('speaker_id').notNull(),
+    publicCode: varchar('public_code', { length: 4 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'speaker_public_routes_event_scope_fk',
+    }).onDelete('cascade'),
+    uniqueIndex('speaker_public_routes_speaker_unique').on(
+      table.organizationId,
+      table.eventId,
+      table.speakerId,
+    ),
+    uniqueIndex('speaker_public_routes_code_unique').on(table.organizationId, table.publicCode),
+    check('speaker_public_routes_code_format', sql`${table.publicCode} ~ '^[a-z]{4}$'`),
+    index('speaker_public_routes_event_idx').on(table.organizationId, table.eventId),
+  ],
+);
+
+export const cooperationRequests = pgTable(
+  'cooperation_requests',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    eventId: integer('event_id').notNull(),
+    requestNo: varchar('request_no', { length: 32 }).notNull(),
+    cooperationTypes: jsonb('cooperation_types').$type<CooperationType[]>().notNull(),
+    companyName: varchar('company_name', { length: 160 }).notNull(),
+    contactName: varchar('contact_name', { length: 80 }).notNull(),
+    contactTitle: varchar('contact_title', { length: 80 }).notNull().default(''),
+    mobileE164: varchar('mobile_e164', { length: 24 }).notNull().default(''),
+    emailNormalized: varchar('email_normalized', { length: 255 }).notNull().default(''),
+    wechatId: varchar('wechat_id', { length: 80 }).notNull().default(''),
+    message: text('message').notNull(),
+    status: varchar('status', { length: 24 }).notNull().default('new'),
+    internalNote: text('internal_note').notNull().default(''),
+    firstContactedAt: timestamp('first_contacted_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'cooperation_requests_event_scope_fk',
+    }).onDelete('cascade'),
+    uniqueIndex('cooperation_requests_request_no_unique').on(table.requestNo),
+    index('cooperation_requests_event_status_time_idx').on(
+      table.organizationId,
+      table.eventId,
+      table.status,
+      table.createdAt,
+    ),
+    index('cooperation_requests_event_time_idx').on(
+      table.organizationId,
+      table.eventId,
+      table.createdAt,
+    ),
+    check(
+      'cooperation_requests_status_check',
+      sql`${table.status} in ('new', 'contacted', 'converted', 'closed')`,
+    ),
+    check(
+      'cooperation_requests_types_count_check',
+      sql`jsonb_array_length(${table.cooperationTypes}) between 1 and 3`,
+    ),
+    check(
+      'cooperation_requests_contact_check',
+      sql`${table.mobileE164} <> '' or ${table.emailNormalized} <> '' or ${table.wechatId} <> ''`,
+    ),
+  ],
 );
 
 export const sessions = pgTable(
@@ -2107,5 +2452,247 @@ export const idempotencyKeys = pgTable(
   (table) => [
     uniqueIndex('idempotency_scope_key_unique').on(table.scope, table.key),
     index('idempotency_keys_expiry_idx').on(table.expiresAt),
+  ],
+);
+
+export const agentConnections = pgTable(
+  'agent_connections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    delegatedUserId: uuid('delegated_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    membershipId: uuid('membership_id')
+      .notNull()
+      .references(() => memberships.id, { onDelete: 'restrict' }),
+    authorizedBy: uuid('authorized_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    name: varchar('name', { length: 120 }).notNull(),
+    clientId: varchar('client_id', { length: 120 }).notNull(),
+    dpopThumbprint: varchar('dpop_thumbprint', { length: 160 }).notNull(),
+    scopes: jsonb('scopes').$type<AgentScope[]>().notNull().default([]),
+    approvalPolicy: varchar('approval_policy', { length: 40 })
+      .$type<AgentApprovalPolicy>()
+      .notNull()
+      .default('controlled-and-critical'),
+    status: varchar('status', { length: 24 })
+      .$type<'active' | 'revoked' | 'expired'>()
+      .notNull()
+      .default('active'),
+    delegatedCredentialVersion: varchar('delegated_credential_version', { length: 160 }).notNull(),
+    delegatedMembershipVersion: varchar('delegated_membership_version', { length: 80 }).notNull(),
+    catalogVersion: varchar('catalog_version', { length: 32 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: uuid('revoked_by').references(() => users.id, { onDelete: 'restrict' }),
+    revocationReason: text('revocation_reason'),
+    ...timestamps,
+  },
+  (table) => [
+    check(
+      'agent_connections_approval_policy_check',
+      sql`${table.approvalPolicy} in ('controlled-and-critical', 'critical-only')`,
+    ),
+    check(
+      'agent_connections_status_check',
+      sql`${table.status} in ('active', 'revoked', 'expired')`,
+    ),
+    index('agent_connections_org_status_idx').on(
+      table.organizationId,
+      table.status,
+      table.expiresAt,
+    ),
+    index('agent_connections_membership_idx').on(table.membershipId, table.status),
+    index('agent_connections_last_used_idx').on(table.lastUsedAt),
+    uniqueIndex('agent_connections_id_org_user_unique').on(
+      table.id,
+      table.organizationId,
+      table.delegatedUserId,
+    ),
+    foreignKey({
+      columns: [table.membershipId, table.organizationId, table.delegatedUserId],
+      foreignColumns: [memberships.id, memberships.organizationId, memberships.userId],
+      name: 'agent_connections_membership_scope_fk',
+    }).onDelete('restrict'),
+  ],
+);
+
+export const agentDeviceAuthorizations = pgTable(
+  'agent_device_authorizations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    deviceCodeHash: varchar('device_code_hash', { length: 64 }).notNull(),
+    userCodeHmac: varchar('user_code_hmac', { length: 64 }).notNull(),
+    clientId: varchar('client_id', { length: 120 }).notNull(),
+    clientName: varchar('client_name', { length: 120 }).notNull(),
+    skillVersion: varchar('skill_version', { length: 40 }).notNull(),
+    resource: varchar('resource', { length: 500 }).notNull(),
+    requestedScopes: jsonb('requested_scopes').$type<AgentScope[]>().notNull().default([]),
+    approvedScopes: jsonb('approved_scopes').$type<AgentScope[]>(),
+    approvalPolicy: varchar('approval_policy', { length: 40 }).$type<AgentApprovalPolicy>(),
+    dpopThumbprint: varchar('dpop_thumbprint', { length: 160 }).notNull(),
+    status: varchar('status', { length: 24 })
+      .$type<'pending' | 'approved' | 'denied' | 'consumed' | 'expired'>()
+      .notNull()
+      .default('pending'),
+    pollingIntervalSeconds: integer('polling_interval_seconds').notNull().default(5),
+    lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+    organizationId: uuid('organization_id').references(() => organizations.id, {
+      onDelete: 'restrict',
+    }),
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'restrict' }),
+    membershipId: uuid('membership_id').references(() => memberships.id, { onDelete: 'restrict' }),
+    stepUpJti: varchar('step_up_jti', { length: 160 }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    deniedAt: timestamp('denied_at', { withTimezone: true }),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex('agent_device_authorizations_device_code_unique').on(table.deviceCodeHash),
+    uniqueIndex('agent_device_authorizations_user_code_unique').on(table.userCodeHmac),
+    check(
+      'agent_device_authorizations_status_check',
+      sql`${table.status} in ('pending', 'approved', 'denied', 'consumed', 'expired')`,
+    ),
+    check(
+      'agent_device_authorizations_interval_check',
+      sql`${table.pollingIntervalSeconds} between 5 and 60`,
+    ),
+    index('agent_device_authorizations_status_expiry_idx').on(table.status, table.expiresAt),
+    foreignKey({
+      columns: [table.membershipId, table.organizationId, table.approvedBy],
+      foreignColumns: [memberships.id, memberships.organizationId, memberships.userId],
+      name: 'agent_device_authorizations_membership_scope_fk',
+    }).onDelete('restrict'),
+  ],
+);
+
+export const agentRefreshTokens = pgTable(
+  'agent_refresh_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => agentConnections.id, { onDelete: 'restrict' }),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    familyId: uuid('family_id').notNull(),
+    sequence: integer('sequence').notNull().default(0),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    replacedById: uuid('replaced_by_id').references((): AnyPgColumn => agentRefreshTokens.id, {
+      onDelete: 'restrict',
+    }),
+    replacementTokenCiphertext: text('replacement_token_ciphertext'),
+    replayExpiresAt: timestamp('replay_expires_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revocationReason: text('revocation_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('agent_refresh_tokens_hash_unique').on(table.tokenHash),
+    uniqueIndex('agent_refresh_tokens_family_sequence_unique').on(table.familyId, table.sequence),
+    index('agent_refresh_tokens_connection_idx').on(table.connectionId, table.expiresAt),
+    index('agent_refresh_tokens_family_idx').on(table.familyId, table.revokedAt),
+  ],
+);
+
+export const agentOperations = pgTable(
+  'agent_operations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'restrict' }),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => agentConnections.id, { onDelete: 'restrict' }),
+    delegatedUserId: uuid('delegated_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    actionId: varchar('action_id', { length: 160 }).notNull(),
+    routeName: varchar('route_name', { length: 120 }).notNull(),
+    targetSummary: jsonb('target_summary').$type<Record<string, unknown>>().notNull().default({}),
+    dataClass: varchar('data_class', { length: 24 }).$type<AgentDataClass>().notNull(),
+    risk: varchar('risk', { length: 24 }).$type<AgentRisk>().notNull(),
+    reason: text('reason').notNull(),
+    requestHash: varchar('request_hash', { length: 64 }).notNull(),
+    beforeFingerprint: varchar('before_fingerprint', { length: 64 }).notNull(),
+    redactedDiff: jsonb('redacted_diff').$type<Record<string, unknown>>().notNull().default({}),
+    impactSummary: jsonb('impact_summary').$type<Record<string, unknown>>().notNull().default({}),
+    idempotencyKey: varchar('idempotency_key', { length: 160 }),
+    executionStrategy: varchar('execution_strategy', {
+      length: 40,
+    }).$type<AgentIdempotencyStrategy>(),
+    status: varchar('status', { length: 32 })
+      .$type<AgentOperationStatus>()
+      .notNull()
+      .default('prepared'),
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'restrict' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    approvalExpiresAt: timestamp('approval_expires_at', { withTimezone: true }),
+    executionStartedAt: timestamp('execution_started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    responseStatus: integer('response_status'),
+    redactedResult: jsonb('redacted_result').$type<Record<string, unknown>>(),
+    oneTimeSecretCiphertext: text('one_time_secret_ciphertext'),
+    oneTimeSecretExpiresAt: timestamp('one_time_secret_expires_at', { withTimezone: true }),
+    oneTimeSecretClaimedAt: timestamp('one_time_secret_claimed_at', { withTimezone: true }),
+    verificationStatus: varchar('verification_status', { length: 24 })
+      .$type<'pending' | 'verified' | 'unverified' | 'failed'>()
+      .notNull()
+      .default('pending'),
+    domainAuditIds: jsonb('domain_audit_ids').$type<string[]>().notNull().default([]),
+    traceId: varchar('trace_id', { length: 120 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    check(
+      'agent_operations_data_class_check',
+      sql`${table.dataClass} in ('public', 'internal', 'pii', 'secret')`,
+    ),
+    check(
+      'agent_operations_risk_check',
+      sql`${table.risk} in ('read', 'sensitive-read', 'routine-write', 'controlled', 'critical')`,
+    ),
+    check(
+      'agent_operations_status_check',
+      sql`${table.status} in ('prepared', 'approval_required', 'approved', 'executing', 'queued', 'succeeded', 'failed', 'unknown', 'denied', 'cancelled', 'expired')`,
+    ),
+    check(
+      'agent_operations_verification_status_check',
+      sql`${table.verificationStatus} in ('pending', 'verified', 'unverified', 'failed')`,
+    ),
+    uniqueIndex('agent_operations_connection_idempotency_unique').on(
+      table.connectionId,
+      table.idempotencyKey,
+    ),
+    index('agent_operations_connection_status_idx').on(
+      table.connectionId,
+      table.status,
+      table.createdAt,
+    ),
+    index('agent_operations_org_action_time_idx').on(
+      table.organizationId,
+      table.actionId,
+      table.createdAt,
+    ),
+    index('agent_operations_expiry_idx').on(table.expiresAt),
+    foreignKey({
+      columns: [table.connectionId, table.organizationId, table.delegatedUserId],
+      foreignColumns: [
+        agentConnections.id,
+        agentConnections.organizationId,
+        agentConnections.delegatedUserId,
+      ],
+      name: 'agent_operations_connection_scope_fk',
+    }).onDelete('restrict'),
   ],
 );

@@ -4,9 +4,12 @@ import { isLoopbackHostname } from '@conference/security';
 import {
   ATTENDEE_SHOWCASE_CONSENT_VERSION,
   DEFAULT_CONFERENCE_TEMPLATE_DEFINITION,
+  DEFAULT_ANALYTICS_SETTINGS,
   DEMO_EVENT,
   DEMO_EVENT_EXPERIENCE,
   DEMO_IDS,
+  DEMO_SPEAKER_PROFILES,
+  encodeSpeakerRouteCode,
 } from '@conference/contracts';
 import { createDatabase } from './index.js';
 import {
@@ -35,6 +38,7 @@ import {
   registrationForms,
   registrations,
   sessions,
+  speakerPublicRoutes,
   speakers,
   templatePackages,
   ticketQuotas,
@@ -78,13 +82,7 @@ const canonicalOrganizationSettings = {
     icpNumber: '',
     supportEmail: '',
   },
-  analytics: {
-    enabled: false,
-    provider: 'baidu',
-    trackingId: '',
-    scriptUrl: '',
-    siteId: '',
-  },
+  analytics: DEFAULT_ANALYTICS_SETTINGS,
 } as const;
 
 const DEMO_CUSTOMERS = [
@@ -525,9 +523,9 @@ try {
         rendererPackageId: EDITORIAL_RENDERER_ID,
         schemaVersion: 2,
         definition: templateDefinition,
-        contentDigest: 'seed-geo-2026-attendee-showcase-v3',
+        contentDigest: 'seed-geo-2026-attendee-questions-v4',
         previewAssetKey: 'template-previews/tokems-editorial-standard-v1.webp',
-        changeSummary: '新增报名会员、参会名片、个人海报与第五步信息完善流程。',
+        changeSummary: '开放会员参会问题提交，并在会员报名权益上方展示公开问题。',
         createdBy: adminUserId,
         publishedAt: new Date('2026-07-16T08:30:00+08:00'),
       })
@@ -536,8 +534,8 @@ try {
         set: {
           schemaVersion: 2,
           definition: templateDefinition,
-          contentDigest: 'seed-geo-2026-attendee-showcase-v3',
-          changeSummary: '新增报名会员、参会名片、个人海报与第五步信息完善流程。',
+          contentDigest: 'seed-geo-2026-attendee-questions-v4',
+          changeSummary: '开放会员参会问题提交，并在会员报名权益上方展示公开问题。',
         },
       });
 
@@ -558,7 +556,7 @@ try {
         schemaVersion: 2,
         definition: templateDefinition,
         revision: 1,
-        contentDigest: 'seed-geo-2026-attendee-showcase-v3',
+        contentDigest: 'seed-geo-2026-attendee-questions-v4',
         updatedBy: adminUserId,
       })
       .onConflictDoUpdate({
@@ -567,7 +565,7 @@ try {
           schemaVersion: 2,
           definition: templateDefinition,
           rendererPackageId: EDITORIAL_RENDERER_ID,
-          contentDigest: 'seed-geo-2026-attendee-showcase-v3',
+          contentDigest: 'seed-geo-2026-attendee-questions-v4',
           updatedBy: adminUserId,
           updatedAt: new Date(),
         },
@@ -1031,16 +1029,18 @@ try {
       })
       .onConflictDoNothing();
 
+    const demoSpeakerRows = DEMO_EVENT.speakers.map((speaker, sortOrder) => ({
+      ...speaker,
+      ...DEMO_SPEAKER_PROFILES[speaker.id],
+      socialLinks: DEMO_SPEAKER_PROFILES[speaker.id]?.socialLinks ?? [],
+      organizationId: DEMO_IDS.organization,
+      eventId: DEMO_IDS.event,
+      sortOrder,
+    }));
+
     await tx
       .insert(speakers)
-      .values(
-        DEMO_EVENT.speakers.map((speaker, sortOrder) => ({
-          ...speaker,
-          organizationId: DEMO_IDS.organization,
-          eventId: DEMO_IDS.event,
-          sortOrder,
-        })),
-      )
+      .values(demoSpeakerRows)
       .onConflictDoUpdate({
         target: speakers.id,
         set: {
@@ -1051,10 +1051,26 @@ try {
           accentFrom: sql`excluded.accent_from`,
           accentTo: sql`excluded.accent_to`,
           tags: sql`excluded.tags`,
+          bio: sql`excluded.bio`,
+          topicAbstract: sql`excluded.topic_abstract`,
+          websiteUrl: sql`excluded.website_url`,
+          socialLinks: sql`excluded.social_links`,
           sortOrder: sql`excluded.sort_order`,
           updatedAt: new Date(),
         },
       });
+
+    await tx
+      .insert(speakerPublicRoutes)
+      .values(
+        DEMO_EVENT.speakers.map((speaker, index) => ({
+          organizationId: DEMO_IDS.organization,
+          eventId: DEMO_IDS.event,
+          speakerId: speaker.id,
+          publicCode: encodeSpeakerRouteCode(index + 1),
+        })),
+      )
+      .onConflictDoNothing();
 
     await tx
       .insert(sessions)
@@ -1118,7 +1134,14 @@ try {
         description: DEMO_EVENT.description,
       },
       tickets: DEMO_EVENT.tickets,
-      speakers: DEMO_EVENT.speakers,
+      speakers: demoSpeakerRows.map(
+        ({
+          organizationId: _organizationId,
+          eventId: _eventId,
+          sortOrder: _sortOrder,
+          ...speaker
+        }) => speaker,
+      ),
       sessions: DEMO_EVENT.sessions,
       faqs: DEMO_EVENT.faqs,
       registrationForm: {

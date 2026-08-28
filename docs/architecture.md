@@ -44,15 +44,19 @@ flowchart TB
 | 上下文         | 责任                                       | 关键实体                                                                                          |
 | -------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | Organization   | 组织、用户、成员、角色、授权与首页默认大会 | organizations, users, memberships, organization_homepage_events                                   |
-| Event Planning | 大会、蓝图、内容草稿与生命周期             | events, event_blueprints, speakers, sessions                                                      |
+| Event Planning | 大会、蓝图、内容草稿与生命周期             | events, event_blueprints, speakers, speaker_public_routes, sessions                               |
 | Experience     | 共享模板、草稿、版本、资产、大会绑定与覆盖 | conference_templates, conference_template_versions, template_assets, event_template_bindings      |
 | Release        | 渲染器、不可变快照、变更记录与回滚指针     | template_packages, event_releases                                                                 |
 | Registration   | 版本化表单、条款同意和参会人               | registration_forms, registrations                                                                 |
+| Attendee Needs | 参会问题、主题标签、公开授权和运营治理     | attendee_need_submissions, attendee_need_questions                                                |
+| Public Metrics | 大会访问累计、按日访问与公开参会聚合       | event_public_metrics, event_public_metric_days, registrations                                     |
+| Cooperation    | 大会合作意向、联系方式与运营跟进           | cooperation_requests                                                                              |
 | Commerce       | 票种、库存保留、订单、支付、退款和状态日志 | ticket_types, inventory_reservations, orders, payments, refunds                                   |
 | Invoice        | 发票申请、文件、状态、访问凭证与导出任务   | invoice_requests, invoice_documents, invoice_state_logs, order_access_tokens, invoice_export_jobs |
 | Waitlist       | 售罄排队、顺序邀约、占位和一次性领取       | waitlist_entries                                                                                  |
 | Fulfillment    | 电子票、签到列表、设备和核销记录           | tickets, checkin_lists, checkin_devices, checkin_records                                          |
 | Engagement     | AI 草稿、审批、通知模板和投递              | ai_runs, notification_templates, notification_deliveries                                          |
+| Integrations   | 第三方凭据、飞书群日报订阅与投递账本       | organization_integrations, event_feishu_digest_subscriptions, feishu_digest_deliveries            |
 | Platform       | 幂等、事件投递和审计                       | idempotency_keys, outbox_events, audit_logs                                                       |
 
 ## 发布快照
@@ -91,6 +95,14 @@ capacity - sold - active reservations - active waitlist offers
 
 售罄后可进入候补队列。库存因保留过期或全额退款释放时，Worker 按位置邀请第一位等待者，并创建两小时占位。原始邀请令牌只进入通知正文，数据库保存 SHA-256 哈希和末四位。成功报名会把邀请标记为已领取，重放请求会被拒绝。
 
+## 参会需求与公开边界
+
+参会需求按报名归属，每个报名最多保存一份提交和三个有效问题。提交记录保存独立的公开、匿名和署名授权，问题记录保存正文、主题标签、首次公开时间与治理状态。用户端和后台共用提交版本做乐观并发控制，旧页面无法覆盖更新后的内容。
+
+公共查询在数据库层同时核对大会、账号、报名、订单、成功支付、电子票、公开授权、后台隐藏和软删除状态。全额退款、报名取消、票券失效、账号封禁或参会人更换会让问题立即退出公共结果。资格恢复后，仍有公开授权且未被治理的问题可以再次展示。匿名响应省略报名、用户和署名字段，问题正文不会进入统计事件、日志或 SEO 元信息。
+
+后台读取受组织和大会范围约束。运营人员可以修改正文和标签，也可以隐藏、恢复、软删除或收紧为匿名；每次操作都会增加提交版本并写入审计日志。嘉宾版 CSV 默认匿名，内部版保留最少的报名归属字段，两种导出都处理 CSV 公式注入。
+
 ## 现场核销
 
 在线核销通过 `ticket_id + checkin_list_id` 唯一约束防止重复成功。离线设备首次登记时获得一次性明文令牌，数据库仅保存令牌哈希。每个同步批次绑定组织、大会、设备、批次键和正文哈希；同键同参返回缓存结果，同键异参返回冲突。100 台设备并发验收覆盖报名、支付、发票、同步和重试全过程。
@@ -120,7 +132,7 @@ capacity - sold - active reservations - active waitlist offers
 - 500 错误不会把堆栈、SQL 或内部异常文本返回客户端。
 - AI 输出先进入草稿，只有人工审批后的内容才能排队发送。
 
-单实例限流使用 NestJS 内存存储。公开报名限制为每 IP 每分钟 60 次。多实例生产环境需要在 API 网关或共享 Redis 限流存储中执行同等策略；大型公开活动建议额外启用验证码或联系方式验证。
+单实例限流使用 NestJS 内存存储。公开报名限制为每 IP 每分钟 60 次，首页访问登记限制为每 IP 每分钟 30 次。页面级随机 UUID 只在 Redis 中保留 10 分钟用于幂等，访问总量通过 PostgreSQL 原子自增；持久层不保存访客 Cookie、原始 IP 或 User-Agent。多实例生产环境需要在 API 网关或共享 Redis 限流存储中执行同等策略；大型公开活动建议额外启用验证码或联系方式验证。
 
 ## 视觉系统
 
@@ -133,3 +145,13 @@ capacity - sold - active reservations - active waitlist offers
 - MinIO/S3 保存模板图片、电子发票文件和异步导出文件；上传注册前校验对象大小、媒体类型和 SHA-256。
 - `AI_API_URL`、`AI_API_KEY` 和 `AI_MODEL` 接入兼容的内容生成服务。
 - OpenTelemetry、Prometheus 和集中日志可在 API/Worker 入口接入。
+
+### Agent 管理平面
+
+`tokems-admin` Skill 通过 Gateway 发现实例，由 Device Authorization 建立单组织连接。连接记录固定管理员成员关系、授权版本、scope、DPoP 公钥指纹和审批策略；管理员凭据不会进入 Agent 进程。访问令牌短期有效，refresh token 单次轮换，重放会撤销整个 token family 与连接。DPoP `jti` 通过 Redis 原子占位防重放，Redis 不可用时拒绝 Agent 请求。
+
+Agent 管理 handler 以动作目录为发布边界。所有后台 handler 都需要标记为已发布动作或明确排除，覆盖测试阻止未分类路由进入构建。当前目录包含 78 个动作并逐一映射 78 个管理 handler。写操作经过 prepare、confirm/approve、execute、verify/reconcile 生命周期，服务端保存脱敏差异、正文摘要、前态指纹、目标指纹、审批、验证和代理审计关联，完整正文与固定 secret header 留在连接器的本地加密待执行文件中。
+
+普通 PII 列表由 API 在响应阶段统一掩码，敏感详情要求用途、PII scope 和读取审计。公开内容操作完成后，连接器对管理 API 状态、同一 TokEMS origin 上的公开大会或首页 API、以及已发布 HTML home-document 执行查询式验证；证据以 SHA-256、HTTP 状态和 ETag 形式写回 operation，页面正文不进入审计或聊天输出。
+
+连接和写入由三个独立开关逐级开放：`TOKEMS_AGENT_ACCESS_ENABLED`、`TOKEMS_AGENT_WRITES_ENABLED`、`TOKEMS_AGENT_CRITICAL_ACTIONS_ENABLED`。应用回滚保留连接、operation 与审计表。
