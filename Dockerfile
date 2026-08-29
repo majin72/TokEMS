@@ -117,6 +117,7 @@ CMD ["nginx", "-g", "daemon off;"]
 FROM nginx:1.31-alpine AS gateway
 
 COPY docker/gateway.nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker/gateway-object-storage.include /etc/nginx/tokems-object-storage.include
 COPY --from=workspace /workspace/.build-info/gateway/version.json /usr/share/nginx/html/version.json
 
 EXPOSE 8080

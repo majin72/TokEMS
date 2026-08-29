@@ -318,6 +318,37 @@ await waitFor('公开站来源无法读取运营后台', async () => {
 });
 
 await waitFor('MinIO 健康', () => request(`${endpoints.minio}/minio/health/live`));
+await waitFor('Gateway 将对象存储路径转到 MinIO', async () => {
+  const response = await fetch(`${gateway}/conference-assets/`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  const body = await response.text();
+  assert(
+    response.status === 403 || response.status === 400,
+    `Object storage path returned ${response.status}`,
+  );
+  assert(
+    body.includes('<Error>') && /AccessDenied|InvalidRequest/u.test(body),
+    'Gateway /conference-assets/ did not reach MinIO',
+  );
+});
+await waitFor('对象存储预检允许后台跨域上传', async () => {
+  const response = await fetch(`${gateway}/conference-assets/probe.png`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: adminGateway,
+      'Access-Control-Request-Method': 'PUT',
+      'Access-Control-Request-Headers': 'content-type,if-none-match',
+    },
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert(response.status === 204, `Object storage preflight returned ${response.status}`);
+  assert(
+    response.headers.get('access-control-allow-origin') === '*' ||
+      response.headers.get('access-control-allow-origin') === adminGateway,
+    'Object storage preflight is missing CORS',
+  );
+});
 await waitFor('Mailpit 健康', () => request(`${endpoints.mailpit}/livez`));
 
 if (!isProduction) {

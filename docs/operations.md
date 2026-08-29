@@ -254,7 +254,7 @@ node apps/web/.output/server/index.mjs
 
 本地 Docker 镜像使用相同生产构建入口。`pnpm deploy --prod` 为 API 与 Worker 生成独立运行目录，Nuxt 使用 Nitro 产物，Admin 使用 Nginx 静态运行时。正式环境必须设置 HTTPS `PUBLIC_ORIGIN` 和 `ADMIN_ORIGIN`，例如 `https://conference.example.com` 与 `https://admin.conference.example.com`。两个域名的 DNS 指向同一服务器，宿主机反向代理或云负载均衡器保留原始 Host 并将流量转发到 Gateway，仅向公网开放 80/443。Compose 中的本地通知接收器用于接收邮件和通用通知；正式环境需要使用这些渠道时，应把 `NOTIFICATION_WEBHOOK_URL` 指向真实通知平台。
 
-正式环境还需要把 `S3_PUBLIC_ENDPOINT` 设置为浏览器可访问的 HTTPS 对象存储地址，并按对象存储服务设置 `S3_REGION`。保留本机 `localhost` 默认值会让用户浏览器无法上传模板图片或下载发票文件。
+正式环境可以把 `S3_PUBLIC_ENDPOINT` 设为大会 HTTPS 源（例如 `https://hui.ailingdaoli.com`）。Gateway 会把 `/{S3_BUCKET}/` 转到 MinIO，并保留浏览器 Host，以便预签名 PUT/GET 通过校验。若对象存储走独立域名或 CDN，则把该变量改成那个 HTTPS 地址。保留本机 `localhost:19000` 默认值会让线上用户浏览器无法上传模板图片或下载发票文件。
 
 模板图片通过 10 分钟预签名地址上传。未完成登记的暂存对象会在上传窗口结束后执行首次删除，并保留预留记录 24 小时后再次删除和确认，再释放组织容量。正式环境建议同时为 `templates/` 下的 `staged/` 暂存对象配置对象存储生命周期，作为长期兜底清理策略。
 
