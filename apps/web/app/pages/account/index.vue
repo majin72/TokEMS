@@ -1,26 +1,51 @@
 <script setup lang="ts">
 import type {
   AttendeeNeedsProfile,
+  CustomerAttendeeServiceHub,
   CustomerInvoiceCenterCounts,
   CustomerInvoiceCenterItem,
   CustomerPurchasedOrder,
   CustomerRegistrationSummary,
+  CustomerServiceHubItem,
   EventPurchaseContext,
 } from '@conference/contracts';
-import { watch } from 'vue';
+import { publicEventHomePath } from '@conference/contracts';
+import { nextTick, watch } from 'vue';
 import { useCustomerSession } from '~/composables/useCustomerSession';
-import { createRegistrationIntent } from '~/utils/purchase-journey';
+import {
+  canRestartSelfOrder,
+  canResumePendingOrder,
+  createRegistrationIntent,
+  shouldRefreshPurchasedOrder,
+} from '~/utils/purchase-journey';
 import { resolveAttendeeNeedsAccountState } from '~/utils/attendee-needs';
+import {
+  selectFeaturedAccountContext,
+  shouldRevealOrganizerContact,
+  visibleServiceHubItems,
+} from '~/utils/account-service-hub';
+import { copyPlainText } from '~/utils/copy-text';
+import AccountServiceHubIcon from '~/components/AccountServiceHubIcon.vue';
 
 const customer = useCustomerSession();
 const api = useConferenceApi();
 const router = useRouter();
+const route = useRoute();
 const registrations = ref<CustomerRegistrationSummary[]>([]);
 const purchasedOrders = ref<CustomerPurchasedOrder[]>([]);
 const purchaseContexts = ref<Record<number, EventPurchaseContext>>({});
+const purchaseContextErrors = ref<Record<number, boolean>>({});
 const attendeeNeedsProfiles = ref<Record<string, AttendeeNeedsProfile>>({});
 const attendeeNeedsProfileErrors = ref<Record<string, boolean>>({});
 const attendeeNeedsProfilePending = ref<Record<string, boolean>>({});
+const serviceHubs = ref<Record<string, CustomerAttendeeServiceHub>>({});
+const serviceHubPending = ref(false);
+const serviceHubError = ref(false);
+const organizerPanelOpen = ref(false);
+const organizerConfirmationPending = ref(false);
+const organizerCopyStatus = ref('');
+const latestServiceHubRequestByRegistration = new Map<string, number>();
+let serviceHubRequestSequence = 0;
 const invoiceHighlights = ref<CustomerInvoiceCenterItem[]>([]);
 const invoiceCounts = ref<CustomerInvoiceCenterCounts>({
   all: 0,
@@ -38,6 +63,7 @@ const nextOrdersCursor = ref<string | null>(null);
 const editingOrderId = ref('');
 const attendeeSaving = ref(false);
 const resumingOrderId = ref('');
+const refreshingPurchaseContexts = ref(false);
 const attendeeEdit = reactive({ name: '', mobile: '' });
 const errorMessage = ref('');
 const successMessage = ref('');
@@ -76,15 +102,36 @@ const pendingActionCount = computed(
     ).length +
     invoiceCounts.value.actionRequired,
 );
-const featuredRegistration = computed(
-  () =>
-    registrations.value.find((item) =>
-      ['pending_review', 'pending_payment'].includes(item.registrationStatus),
-    ) ??
-    registrations.value.find((item) => item.ticketStatus === 'valid') ??
-    registrations.value[0] ??
-    null,
+const featuredAccountContext = computed(() =>
+  selectFeaturedAccountContext(
+    registrations.value,
+    purchasedOrders.value,
+    typeof route.query.event === 'string' ? route.query.event : null,
+    {
+      requestedRegistrationId:
+        typeof route.query.registration === 'string' ? route.query.registration : null,
+    },
+  ),
 );
+const featuredRegistration = computed(() => featuredAccountContext.value.registration);
+const featuredOrder = computed(() => featuredAccountContext.value.order);
+const featuredServiceHub = computed(() =>
+  featuredRegistration.value ? serviceHubs.value[featuredRegistration.value.id] : undefined,
+);
+const publicHomepageHref = computed(() => {
+  const slug = featuredRegistration.value?.eventSlug ?? featuredOrder.value?.eventSlug;
+  return slug ? publicEventHomePath(slug) : '/';
+});
+const eventSwitcherOptions = computed(() => {
+  return [
+    ...new Map(
+      [...registrations.value, ...purchasedOrders.value].map((item) => [
+        item.eventSlug,
+        { slug: item.eventSlug, name: item.eventName },
+      ]),
+    ).values(),
+  ];
+});
 const registrationCountLabel = computed(
   () => `${registrations.value.length}${nextCursor.value ? '+' : ''}`,
 );
@@ -112,6 +159,32 @@ const statusLabels: Record<string, string> = {
   adjustment_required: '待调整',
   voided: '已作废',
 };
+const statusLabel = (value: string) => statusLabels[value] ?? value;
+const serviceStateLabels: Record<CustomerServiceHubItem['state'], string> = {
+  complete: '已完成',
+  available: '可使用',
+  pending: '待完善',
+  attention: '需处理',
+  unavailable: '未开放',
+};
+const accountSections = [
+  { id: 'overview', index: '01', label: '大会服务台' },
+  { id: 'events', index: '02', label: '我的参会名额' },
+  { id: 'purchases', index: '03', label: '我购买的订单' },
+  { id: 'showcases', index: '04', label: '参会资料' },
+  { id: 'invoices', index: '05', label: '发票中心' },
+  { id: 'profile', index: '06', label: '常用资料' },
+  { id: 'security', index: '07', label: '账户安全' },
+] as const;
+const mobileNavigationOpen = ref(false);
+const mobileNavigationRoot = ref<HTMLElement | null>(null);
+const mobileNavigationTrigger = ref<HTMLButtonElement | null>(null);
+const activeAccountSection = ref<(typeof accountSections)[number]['id']>('overview');
+const activeAccountSectionLabel = computed(
+  () =>
+    accountSections.find((section) => section.id === activeAccountSection.value)?.label ??
+    '大会服务台',
+);
 
 const money = (amount: number, currency: string) =>
   new Intl.NumberFormat('zh-CN', {
@@ -144,20 +217,255 @@ const formatDateTime = (value: string | null) =>
       }).format(new Date(value))
     : '暂无记录';
 
-const primaryRegistrationAction = (item: CustomerRegistrationSummary) => {
+const primaryRegistrationAction = (
+  item: CustomerRegistrationSummary,
+  latestPaymentStatus: CustomerAttendeeServiceHub['latestPaymentStatus'] = null,
+) => {
   if (item.ticketCode && item.ticketStatus === 'valid') {
     return {
       label: '打开电子票',
       to: `/ticket/${encodeURIComponent(item.ticketCode)}?event=${encodeURIComponent(item.eventSlug)}`,
     };
   }
-  if (['pending_review', 'pending_payment'].includes(item.registrationStatus)) {
-    return { label: '处理报名', to: `/account/registrations/${item.id}` };
+  if (item.registrationStatus === 'pending_payment') {
+    if (['preparing', 'processing', 'query_pending'].includes(latestPaymentStatus ?? '')) {
+      return { label: '查看支付进度', to: `/account/registrations/${item.id}` };
+    }
+    if (latestPaymentStatus === 'failed' || latestPaymentStatus === 'closed') {
+      return { label: '重新支付', to: `/account/registrations/${item.id}` };
+    }
+    return { label: '继续支付', to: `/account/registrations/${item.id}` };
+  }
+  if (item.registrationStatus === 'pending_review') {
+    return { label: '查看审核进度', to: `/account/registrations/${item.id}` };
   }
   return { label: '查看报名', to: `/account/registrations/${item.id}` };
 };
 
-const statusLabel = (value: string) => statusLabels[value] ?? value;
+const serviceHubNames: Record<CustomerServiceHubItem['code'], string> = {
+  ticket: '门票信息',
+  poster: '个人海报',
+  showcase: '大会首页名片',
+  needs: '参会需求',
+  organizer_contact: '添加大会组织者',
+  invoice: '发票服务',
+};
+const fallbackServiceHubItems = computed<CustomerServiceHubItem[]>(() => {
+  const item = featuredRegistration.value;
+  if (!item) return [];
+  return [
+    {
+      code: 'ticket',
+      state:
+        item.ticketStatus === 'valid' || item.ticketStatus === 'used'
+          ? 'complete'
+          : item.registrationStatus === 'pending_payment'
+            ? 'attention'
+            : 'available',
+      label: item.ticketStatus
+        ? statusLabel(item.ticketStatus)
+        : statusLabel(item.registrationStatus),
+      description: '进入报名详情查看票券与处理进度',
+    },
+    {
+      code: 'poster',
+      state:
+        item.ticketStatus === 'valid' || item.ticketStatus === 'used' ? 'available' : 'unavailable',
+      label:
+        item.ticketStatus === 'valid' || item.ticketStatus === 'used'
+          ? '可以生成海报'
+          : '取得电子票后开放',
+      description: '海报资料与参会名片共用',
+    },
+    {
+      code: 'showcase',
+      state: 'available',
+      label: '进入参会名片',
+      description: '可维护首页展示资料与公开范围',
+    },
+    {
+      code: 'needs',
+      state: attendeeNeedsState(item.id).canEdit ? 'available' : 'unavailable',
+      label: attendeeNeedsStatus(item.id),
+      description: '提交希望大会回应的问题',
+    },
+    {
+      code: 'organizer_contact',
+      state: 'unavailable',
+      label: '状态读取失败',
+      description: '请重试后查看组织者联系方式',
+    },
+    {
+      code: 'invoice',
+      state: item.canManageOrder ? 'available' : 'unavailable',
+      label: item.canManageOrder ? '进入发票服务' : '由购票人管理',
+      description: '发票资料仅向订单购买人开放',
+    },
+  ];
+});
+const serviceHubItems = computed(() =>
+  visibleServiceHubItems(
+    featuredServiceHub.value?.items ?? fallbackServiceHubItems.value,
+    Boolean(featuredRegistration.value?.canManageOrder),
+  ),
+);
+const featuredTicketServiceItem = computed(() =>
+  serviceHubItems.value.find((item) => item.code === 'ticket'),
+);
+const organizerServiceItem = computed(() =>
+  serviceHubItems.value.find((item) => item.code === 'organizer_contact'),
+);
+const organizerContactAvailable = computed(
+  () =>
+    Boolean(featuredServiceHub.value?.organizerContact.enabled) &&
+    Boolean(featuredServiceHub.value?.organizerContact.eligible),
+);
+const serviceActionCount = computed(
+  () =>
+    featuredServiceHub.value?.actionRequiredCount ??
+    serviceHubItems.value.filter(
+      (item) =>
+        !['poster', 'invoice'].includes(item.code) && ['pending', 'attention'].includes(item.state),
+    ).length,
+);
+
+function serviceHubActionLabel(item: CustomerServiceHubItem) {
+  if (item.code === 'ticket')
+    return primaryRegistrationAction(
+      featuredRegistration.value!,
+      featuredServiceHub.value?.latestPaymentStatus,
+    ).label;
+  if (item.code === 'poster') return '生成个人海报';
+  if (item.code === 'showcase') return '编辑首页信息';
+  if (item.code === 'needs')
+    return item.state === 'unavailable' ? '查看开放状态' : '提交或编辑需求';
+  if (item.code === 'organizer_contact')
+    return item.state === 'unavailable' ? '暂不可查看' : '查看入群方式';
+  return featuredRegistration.value?.canManageOrder ? '进入发票服务' : '由购票人管理';
+}
+
+function serviceHubActionDisabled(item: CustomerServiceHubItem) {
+  return (
+    (item.code === 'organizer_contact' && item.state === 'unavailable') ||
+    (item.code === 'invoice' && !featuredRegistration.value?.canManageOrder)
+  );
+}
+
+async function openServiceHubItem(item: CustomerServiceHubItem) {
+  const registration = featuredRegistration.value;
+  if (!registration || serviceHubActionDisabled(item)) return;
+  if (item.code === 'organizer_contact') {
+    await revealOrganizerPanel();
+    return;
+  }
+  const routes: Record<Exclude<CustomerServiceHubItem['code'], 'organizer_contact'>, string> = {
+    ticket: primaryRegistrationAction(registration, featuredServiceHub.value?.latestPaymentStatus)
+      .to,
+    poster: `/account/registrations/${registration.id}/showcase?event=${encodeURIComponent(registration.eventSlug)}#showcase-poster`,
+    showcase: `/account/registrations/${registration.id}/showcase?event=${encodeURIComponent(registration.eventSlug)}#showcase-profile-editor`,
+    needs: `/account/registrations/${registration.id}/needs?event=${encodeURIComponent(registration.eventSlug)}`,
+    invoice: `/account/invoices/${registration.orderId}`,
+  };
+  await router.push(routes[item.code]);
+}
+
+async function revealOrganizerPanel() {
+  organizerPanelOpen.value = true;
+  await nextTick();
+  const panel = document.querySelector<HTMLElement>('#organizer-contact-panel');
+  panel?.scrollIntoView({ block: 'center' });
+  panel?.focus({ preventScroll: true });
+}
+
+function selectEvent(event: Event) {
+  const eventSlug = (event.target as HTMLSelectElement).value;
+  organizerPanelOpen.value = false;
+  const query = { ...route.query };
+  delete query.registration;
+  delete query.service;
+  void router.replace({ query: { ...query, event: eventSlug }, hash: '' });
+}
+
+function selectAccountSection(sectionId: (typeof accountSections)[number]['id']) {
+  activeAccountSection.value = sectionId;
+  mobileNavigationOpen.value = false;
+}
+
+async function selectMobileAccountSection(sectionId: (typeof accountSections)[number]['id']) {
+  selectAccountSection(sectionId);
+  mobileNavigationTrigger.value?.focus({ preventScroll: true });
+  await router.push({ query: route.query, hash: `#${sectionId}` });
+  await nextTick();
+  mobileNavigationTrigger.value?.focus({ preventScroll: true });
+}
+
+async function closeMobileNavigationFromKeyboard() {
+  mobileNavigationOpen.value = false;
+  await nextTick();
+  mobileNavigationTrigger.value?.focus({ preventScroll: true });
+}
+
+function closeMobileNavigationFromOutside(event: PointerEvent) {
+  const target = event.target;
+  if (
+    mobileNavigationOpen.value &&
+    target instanceof Node &&
+    !mobileNavigationRoot.value?.contains(target)
+  ) {
+    mobileNavigationOpen.value = false;
+  }
+}
+
+async function loadServiceHub(registrationId: string) {
+  const requestSequence = ++serviceHubRequestSequence;
+  latestServiceHubRequestByRegistration.set(registrationId, requestSequence);
+  serviceHubPending.value = true;
+  serviceHubError.value = false;
+  try {
+    const result = await customer.attendeeServiceHub(registrationId);
+    if (latestServiceHubRequestByRegistration.get(registrationId) !== requestSequence) return;
+    serviceHubs.value = { ...serviceHubs.value, [registrationId]: result };
+    if (
+      shouldRevealOrganizerContact(route.query.service, route.query.registration, registrationId)
+    ) {
+      await revealOrganizerPanel();
+    }
+  } catch {
+    if (requestSequence === serviceHubRequestSequence) serviceHubError.value = true;
+  } finally {
+    if (requestSequence === serviceHubRequestSequence) serviceHubPending.value = false;
+  }
+}
+
+async function setOrganizerConfirmed(confirmed: boolean) {
+  const registration = featuredRegistration.value;
+  if (!registration) return;
+  organizerConfirmationPending.value = true;
+  errorMessage.value = '';
+  try {
+    await customer.setOrganizerContactConfirmed(registration.id, confirmed);
+    await loadServiceHub(registration.id);
+    successMessage.value = confirmed ? '已确认添加，等待大会组织者邀请入群' : '已恢复为待添加状态';
+  } catch (error) {
+    const value = error as { data?: { message?: string } };
+    errorMessage.value = value.data?.message ?? '组织者添加状态更新失败';
+  } finally {
+    organizerConfirmationPending.value = false;
+  }
+}
+
+let organizerCopyStatusTimer: ReturnType<typeof setTimeout> | undefined;
+async function copyOrganizerWechatId() {
+  const wechatId = featuredServiceHub.value?.organizerContact.wechatId;
+  if (!wechatId) return;
+  const copied = await copyPlainText(wechatId);
+  organizerCopyStatus.value = copied ? '微信号已复制' : '复制失败，请长按微信号复制';
+  if (organizerCopyStatusTimer) clearTimeout(organizerCopyStatusTimer);
+  organizerCopyStatusTimer = setTimeout(() => {
+    organizerCopyStatus.value = '';
+  }, 3000);
+}
+
 function startAttendeeEdit(order: CustomerPurchasedOrder) {
   editingOrderId.value = order.id;
   attendeeEdit.name = order.attendeeName;
@@ -194,11 +502,110 @@ async function resumeOrder(order: CustomerPurchasedOrder) {
       api.resolvePaymentCheckoutUrl(order.id, order.eventSlug, access.orderAccessToken),
     );
   } catch (error) {
+    await refreshOrderPurchaseState(order);
     const value = error as { data?: { message?: string } };
     errorMessage.value = value.data?.message ?? '支付入口恢复失败，请稍后重试。';
   } finally {
     resumingOrderId.value = '';
   }
+}
+
+function mergePurchasedOrder(order: CustomerPurchasedOrder | undefined) {
+  if (!order) return;
+  purchasedOrders.value = purchasedOrders.value.map((item) =>
+    item.id === order.id ? order : item,
+  );
+}
+
+async function refreshOrderPurchaseState(order: CustomerPurchasedOrder) {
+  refreshingPurchaseContexts.value = true;
+  try {
+    const [orderResult, contextResult] = await Promise.all([
+      customer.purchasedOrders(undefined, 1, order.id).catch(() => null),
+      customer.purchaseContext(order.eventId).catch(() => null),
+    ]);
+    mergePurchasedOrder(orderResult?.items[0]);
+    purchaseContextErrors.value = {
+      ...purchaseContextErrors.value,
+      [order.eventId]: !contextResult,
+    };
+    if (contextResult) {
+      purchaseContexts.value = {
+        ...purchaseContexts.value,
+        [contextResult.eventId]: contextResult,
+      };
+    }
+  } finally {
+    refreshingPurchaseContexts.value = false;
+  }
+}
+
+async function refreshPurchaseContexts(eventIds: number[]) {
+  if (!eventIds.length || refreshingPurchaseContexts.value) return;
+  refreshingPurchaseContexts.value = true;
+  try {
+    const loadedContexts = await Promise.all(
+      eventIds.map(async (eventId) => {
+        try {
+          return { eventId, context: await customer.purchaseContext(eventId) };
+        } catch {
+          return { eventId, context: null };
+        }
+      }),
+    );
+    purchaseContextErrors.value = {
+      ...purchaseContextErrors.value,
+      ...Object.fromEntries(loadedContexts.map(({ eventId, context }) => [eventId, !context])),
+    };
+    purchaseContexts.value = {
+      ...purchaseContexts.value,
+      ...Object.fromEntries(
+        loadedContexts
+          .map(({ context }) => context)
+          .filter((context): context is EventPurchaseContext => Boolean(context))
+          .map((context) => [context.eventId, context]),
+      ),
+    };
+  } finally {
+    refreshingPurchaseContexts.value = false;
+  }
+}
+
+async function retryPurchaseContext(order: CustomerPurchasedOrder) {
+  errorMessage.value = '';
+  await refreshOrderPurchaseState(order);
+  if (purchaseContextErrors.value[order.eventId]) {
+    errorMessage.value = '报名状态刷新失败，请稍后重试。';
+  }
+}
+
+async function refreshMutablePurchasedOrders() {
+  const targets = purchasedOrders.value.filter((order) =>
+    shouldRefreshPurchasedOrder(order, purchaseContexts.value[order.eventId]),
+  );
+  const results = await Promise.all(
+    targets.map((order) =>
+      customer
+        .purchasedOrders(undefined, 1, order.id)
+        .then((result) => result.items[0])
+        .catch(() => undefined),
+    ),
+  );
+  const refreshedById = new Map(
+    results
+      .filter((order): order is CustomerPurchasedOrder => Boolean(order))
+      .map((order) => [order.id, order]),
+  );
+  if (refreshedById.size) {
+    purchasedOrders.value = purchasedOrders.value.map(
+      (order) => refreshedById.get(order.id) ?? order,
+    );
+  }
+}
+
+async function refreshVisiblePurchaseState() {
+  await refreshPurchaseContexts([...new Set(purchasedOrders.value.map((item) => item.eventId))]);
+  await refreshMutablePurchasedOrders();
 }
 
 function additionalPurchase(order: CustomerPurchasedOrder) {
@@ -208,6 +615,17 @@ function additionalPurchase(order: CustomerPurchasedOrder) {
       event: order.eventSlug,
       intent: createRegistrationIntent(),
       purchaseFor: 'other',
+    },
+  });
+}
+
+function restartClosedSelfOrder(order: CustomerPurchasedOrder) {
+  return router.push({
+    path: '/register',
+    query: {
+      event: order.eventSlug,
+      intent: createRegistrationIntent(),
+      purchaseFor: 'self',
     },
   });
 }
@@ -237,7 +655,13 @@ async function loadRegistrations(append = false) {
     const result = await customer.registrations(
       append ? (nextCursor.value ?? undefined) : undefined,
     );
-    registrations.value = append ? [...registrations.value, ...result.items] : result.items;
+    registrations.value = append
+      ? [
+          ...new Map(
+            [...registrations.value, ...result.items].map((item) => [item.id, item]),
+          ).values(),
+        ]
+      : result.items;
     nextCursor.value = result.nextCursor;
     const missing = registrations.value.filter(
       (item) => attendeeNeedsProfiles.value[item.id] === undefined,
@@ -245,6 +669,21 @@ async function loadRegistrations(append = false) {
     void Promise.all(missing.map((item) => loadAttendeeNeedsProfile(item.id)));
   } finally {
     loadingMore.value = false;
+  }
+}
+
+async function loadRequestedRegistration() {
+  const registrationId =
+    typeof route.query.registration === 'string' ? route.query.registration : '';
+  if (!registrationId || registrations.value.some((item) => item.id === registrationId)) return;
+  try {
+    const detail = await customer.registration(registrationId);
+    const { attendee, ...summary } = detail;
+    void attendee;
+    registrations.value = [summary, ...registrations.value];
+    void loadAttendeeNeedsProfile(summary.id);
+  } catch {
+    // A stale or inaccessible deep link falls back to the normal account priority.
   }
 }
 
@@ -300,24 +739,7 @@ async function loadPurchasedOrders(append = false) {
   );
   purchasedOrders.value = append ? [...purchasedOrders.value, ...result.items] : result.items;
   nextOrdersCursor.value = result.nextCursor;
-  const missingEventIds = [
-    ...new Set(
-      result.items
-        .map((item) => item.eventId)
-        .filter((eventId) => !purchaseContexts.value[eventId]),
-    ),
-  ];
-  const loadedContexts = await Promise.all(
-    missingEventIds.map((eventId) => customer.purchaseContext(eventId).catch(() => null)),
-  );
-  purchaseContexts.value = {
-    ...purchaseContexts.value,
-    ...Object.fromEntries(
-      loadedContexts
-        .filter((context): context is EventPurchaseContext => Boolean(context))
-        .map((context) => [context.eventId, context]),
-    ),
-  };
+  await refreshPurchaseContexts([...new Set(result.items.map((item) => item.eventId))]);
 }
 
 async function loadInvoiceSummary() {
@@ -334,6 +756,7 @@ async function initialize() {
     if (customer.session.value) {
       syncProfile();
       await Promise.all([loadRegistrations(), loadPurchasedOrders(), loadInvoiceSummary()]);
+      await loadRequestedRegistration();
     }
   } catch {
     errorMessage.value = '个人中心暂时无法加载，请稍后重试';
@@ -374,6 +797,7 @@ async function logout() {
   registrations.value = [];
   purchasedOrders.value = [];
   purchaseContexts.value = {};
+  purchaseContextErrors.value = {};
   invoiceHighlights.value = [];
   invoiceCounts.value = {
     all: 0,
@@ -385,13 +809,78 @@ async function logout() {
   };
   nextCursor.value = null;
   nextOrdersCursor.value = null;
+  serviceHubs.value = {};
+  organizerPanelOpen.value = false;
+  mobileNavigationOpen.value = false;
+  activeAccountSection.value = 'overview';
 }
 
-onMounted(initialize);
+let purchaseContextRefreshTimer: ReturnType<typeof setInterval> | undefined;
+let accountSectionObserver: IntersectionObserver | undefined;
+
+async function observeAccountSections() {
+  accountSectionObserver?.disconnect();
+  if (!customer.session.value || loading.value) return;
+  await nextTick();
+  const sectionElements = accountSections
+    .map((section) => document.getElementById(section.id))
+    .filter((element): element is HTMLElement => Boolean(element));
+  accountSectionObserver = new IntersectionObserver(
+    (entries) => {
+      const visibleEntry = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+      if (visibleEntry) {
+        activeAccountSection.value = visibleEntry.target
+          .id as (typeof accountSections)[number]['id'];
+      }
+    },
+    { rootMargin: '-18% 0px -68% 0px', threshold: [0, 0.1, 0.4] },
+  );
+  sectionElements.forEach((section) => accountSectionObserver?.observe(section));
+}
+
+onMounted(() => {
+  void initialize();
+  document.addEventListener('pointerdown', closeMobileNavigationFromOutside);
+  purchaseContextRefreshTimer = setInterval(() => {
+    if (customer.session.value) void refreshVisiblePurchaseState();
+  }, 30_000);
+});
+onBeforeUnmount(() => {
+  if (purchaseContextRefreshTimer) clearInterval(purchaseContextRefreshTimer);
+  if (organizerCopyStatusTimer) clearTimeout(organizerCopyStatusTimer);
+  accountSectionObserver?.disconnect();
+  document.removeEventListener('pointerdown', closeMobileNavigationFromOutside);
+});
+watch(
+  () => [loading.value, customer.session.value?.customer.id] as const,
+  () => void observeAccountSections(),
+);
 watch(
   () => customer.session.value?.customer.id,
   (id, previous) => {
     if (id && id !== previous && !loading.value) void initialize();
+  },
+);
+watch(
+  () => featuredRegistration.value?.id,
+  (registrationId, previousId) => {
+    if (!registrationId) return;
+    const selected = featuredRegistration.value!;
+    if (registrationId !== previousId) organizerPanelOpen.value = false;
+    if (route.query.event !== selected.eventSlug) {
+      void router.replace({ query: { ...route.query, event: selected.eventSlug } });
+    }
+    void loadServiceHub(registrationId);
+  },
+);
+watch(
+  () => (!featuredRegistration.value ? featuredOrder.value?.eventSlug : undefined),
+  (eventSlug) => {
+    if (eventSlug && route.query.event !== eventSlug) {
+      void router.replace({ query: { ...route.query, event: eventSlug } });
+    }
   },
 );
 useHead({ title: '个人中心' });
@@ -432,10 +921,10 @@ useHead({ title: '个人中心' });
             <h1>个人中心</h1>
             <p>{{ displayName }}，这里汇总了你的参会凭证与账户资料。</p>
           </div>
-          <NuxtLink class="account-back-link" to="/">
+          <a class="account-back-link" :href="publicHomepageHref">
             大会官网
             <span aria-hidden="true">↗</span>
-          </NuxtLink>
+          </a>
         </header>
 
         <p v-if="errorMessage" class="account-message is-error" role="alert">
@@ -457,14 +946,15 @@ useHead({ title: '个人中心' });
             <p class="account-rail__mobile">
               {{ customer.session.value.customer.maskedMobile }}
             </p>
-            <nav class="account-nav" aria-label="个人中心模块">
-              <a href="#overview"><span>01</span> 总览</a>
-              <a href="#events"><span>02</span> 我的参会名额</a>
-              <a href="#purchases"><span>03</span> 我购买的订单</a>
-              <a href="#showcases"><span>04</span> 参会资料</a>
-              <a href="#invoices"><span>05</span> 发票中心</a>
-              <a href="#profile"><span>06</span> 常用资料</a>
-              <a href="#security"><span>07</span> 账户安全</a>
+            <nav class="account-nav account-nav--desktop" aria-label="个人中心模块">
+              <a
+                v-for="section in accountSections"
+                :key="section.id"
+                :href="`#${section.id}`"
+                @click="selectAccountSection(section.id)"
+              >
+                <span>{{ section.index }}</span> {{ section.label }}
+              </a>
             </nav>
             <div class="account-rail__completion">
               <div>
@@ -487,6 +977,47 @@ useHead({ title: '个人中心' });
               <strong>{{ formatDateTime(customer.session.value.customer.lastLoginAt) }}</strong>
               <button type="button" @click="logout">退出登录</button>
             </div>
+            <div
+              ref="mobileNavigationRoot"
+              class="account-mobile-navigation"
+              @keydown.esc.prevent.stop="closeMobileNavigationFromKeyboard"
+            >
+              <button
+                ref="mobileNavigationTrigger"
+                class="account-mobile-navigation__trigger"
+                type="button"
+                aria-controls="account-mobile-navigation-panel"
+                :aria-expanded="mobileNavigationOpen"
+                @click="mobileNavigationOpen = !mobileNavigationOpen"
+              >
+                <span>页面导航</span>
+                <strong>{{ activeAccountSectionLabel }}</strong>
+                <i aria-hidden="true">{{ mobileNavigationOpen ? '−' : '＋' }}</i>
+              </button>
+              <div
+                v-show="mobileNavigationOpen"
+                id="account-mobile-navigation-panel"
+                class="account-mobile-navigation__panel"
+              >
+                <nav class="account-mobile-navigation__links" aria-label="个人中心移动端模块">
+                  <a
+                    v-for="section in accountSections"
+                    :key="section.id"
+                    :href="`#${section.id}`"
+                    :aria-current="activeAccountSection === section.id ? 'location' : undefined"
+                    @click.prevent="selectMobileAccountSection(section.id)"
+                  >
+                    <span>{{ section.index }}</span>
+                    {{ section.label }}
+                  </a>
+                </nav>
+                <div class="account-mobile-navigation__meta">
+                  <span>{{ customer.session.value.customer.maskedMobile }}</span>
+                  <strong>资料完整度 {{ profileCompletion }}%</strong>
+                  <button type="button" @click="logout">退出登录</button>
+                </div>
+              </div>
+            </div>
           </aside>
 
           <div class="account-content">
@@ -495,27 +1026,63 @@ useHead({ title: '个人中心' });
               class="account-section account-overview"
               aria-labelledby="overview-title"
             >
-              <div class="account-section__heading is-compact">
+              <div class="account-section__heading is-compact service-hub-heading">
                 <div>
-                  <span class="account-section__index">01 / OVERVIEW</span>
-                  <h2 id="overview-title">下一步</h2>
+                  <span class="account-section__index">01 / EVENT SERVICE HUB</span>
+                  <h2 id="overview-title">我的大会服务台</h2>
                 </div>
-                <p>
-                  {{
-                    pendingActionCount
-                      ? `有 ${pendingActionCount} 项报名需要处理`
-                      : '当前账户状态正常'
-                  }}
-                </p>
+                <div class="service-hub-heading__tools">
+                  <label v-if="eventSwitcherOptions.length > 1">
+                    <span>切换大会</span>
+                    <select
+                      :value="featuredRegistration?.eventSlug ?? featuredOrder?.eventSlug"
+                      @change="selectEvent"
+                    >
+                      <option
+                        v-for="eventOption in eventSwitcherOptions"
+                        :key="eventOption.slug"
+                        :value="eventOption.slug"
+                      >
+                        {{ eventOption.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <p
+                    :class="{ 'is-attention': featuredRegistration && serviceActionCount > 0 }"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <i aria-hidden="true"></i>
+                    {{
+                      featuredRegistration
+                        ? serviceActionCount
+                          ? `还有 ${serviceActionCount} 项可以完善`
+                          : '大会服务已准备就绪'
+                        : featuredOrder
+                          ? '当前为订单服务台'
+                          : '当前账户状态正常'
+                    }}
+                  </p>
+                </div>
               </div>
 
-              <article v-if="featuredRegistration" class="account-pass">
+              <article
+                v-if="featuredRegistration"
+                class="account-pass"
+                :data-state="featuredTicketServiceItem?.state"
+              >
                 <div class="account-pass__main">
                   <div class="account-pass__topline">
                     <span>TOKEMS CONFERENCE · ATTENDEE PASS</span>
-                    <span class="account-pass__status">{{
-                      statusLabel(featuredRegistration.registrationStatus)
-                    }}</span>
+                    <span
+                      class="account-pass__status"
+                      :data-state="featuredTicketServiceItem?.state"
+                    >
+                      {{
+                        featuredTicketServiceItem?.label ??
+                          statusLabel(featuredRegistration.registrationStatus)
+                      }}
+                    </span>
                   </div>
                   <h3>{{ featuredRegistration.eventName }}</h3>
                   <p>
@@ -526,9 +1093,19 @@ useHead({ title: '个人中心' });
                   <div class="account-pass__actions">
                     <NuxtLink
                       class="account-pass__primary"
-                      :to="primaryRegistrationAction(featuredRegistration).to"
+                      :to="
+                        primaryRegistrationAction(
+                          featuredRegistration,
+                          featuredServiceHub?.latestPaymentStatus,
+                        ).to
+                      "
                     >
-                      {{ primaryRegistrationAction(featuredRegistration).label }}
+                      {{
+                        primaryRegistrationAction(
+                          featuredRegistration,
+                          featuredServiceHub?.latestPaymentStatus,
+                        ).label
+                      }}
                       <span aria-hidden="true">→</span>
                     </NuxtLink>
                     <NuxtLink :to="`/account/registrations/${featuredRegistration.id}`">
@@ -543,7 +1120,209 @@ useHead({ title: '个人中心' });
                 </div>
               </article>
 
-              <article v-else class="account-pass is-empty">
+              <div v-if="featuredRegistration" class="service-hub-body">
+                <div v-if="serviceHubError" class="service-hub-read-error" role="status">
+                  <span>部分状态读取失败，常用入口仍可使用。</span>
+                  <button type="button" @click="loadServiceHub(featuredRegistration.id)">
+                    重新读取
+                  </button>
+                </div>
+                <div
+                  class="service-hub-grid"
+                  :aria-busy="serviceHubPending"
+                  :data-count="serviceHubItems.length"
+                >
+                  <button
+                    v-for="item in serviceHubItems"
+                    :key="item.code"
+                    class="service-hub-card"
+                    :data-state="item.state"
+                    :data-priority="['pending', 'attention'].includes(item.state)"
+                    type="button"
+                    :disabled="serviceHubActionDisabled(item)"
+                    @click="openServiceHubItem(item)"
+                  >
+                    <span class="service-hub-card__icon" aria-hidden="true">
+                      <AccountServiceHubIcon :code="item.code" />
+                    </span>
+                    <span class="service-hub-card__copy">
+                      <span class="service-hub-card__name">{{ serviceHubNames[item.code] }}</span>
+                      <strong>{{ item.label }}</strong>
+                      <small>{{ item.description }}</small>
+                    </span>
+                    <span class="service-hub-card__action">
+                      {{ serviceHubActionLabel(item) }}
+                      <span v-if="!serviceHubActionDisabled(item)" aria-hidden="true">→</span>
+                    </span>
+                    <span class="service-hub-card__state">{{
+                      serviceStateLabels[item.state]
+                    }}</span>
+                  </button>
+                </div>
+
+                <section
+                  v-if="organizerPanelOpen && featuredServiceHub?.organizerContact"
+                  id="organizer-contact-panel"
+                  class="organizer-contact-panel"
+                  tabindex="-1"
+                  aria-labelledby="organizer-contact-title"
+                >
+                  <header>
+                    <div>
+                      <span>ORGANIZER CONTACT</span>
+                      <h3 id="organizer-contact-title">添加大会组织者</h3>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="关闭组织者信息"
+                      @click="organizerPanelOpen = false"
+                    >
+                      关闭
+                    </button>
+                  </header>
+                  <div v-if="organizerContactAvailable" class="organizer-contact-panel__body">
+                    <img
+                      v-if="featuredServiceHub.organizerContact.qrAvailable"
+                      :src="customer.organizerContactQrUrl(featuredRegistration.id)"
+                      :alt="`${featuredServiceHub.organizerContact.organizerName}微信二维码`"
+                    />
+                    <div class="organizer-contact-panel__content">
+                      <div class="organizer-contact-panel__identity">
+                        <strong>{{ featuredServiceHub.organizerContact.organizerName }}</strong>
+                        <span>{{ featuredServiceHub.organizerContact.organizerRole }}</span>
+                        <p>{{ featuredServiceHub.organizerContact.instructions }}</p>
+                      </div>
+                      <div class="organizer-contact-panel__wechat">
+                        <span>微信号</span>
+                        <code>{{ featuredServiceHub.organizerContact.wechatId }}</code>
+                        <button type="button" @click="copyOrganizerWechatId">
+                          {{ organizerCopyStatus === '微信号已复制' ? '已复制' : '复制微信号' }}
+                        </button>
+                      </div>
+                      <p
+                        class="organizer-contact-panel__copy-status"
+                        role="status"
+                        aria-live="polite"
+                      >
+                        {{ organizerCopyStatus }}
+                      </p>
+                      <ol class="organizer-contact-panel__steps" aria-label="会员入群步骤">
+                        <li>
+                          <span>01</span>
+                          <div>
+                            <strong>添加大会组织者</strong>
+                            <p>
+                              扫码添加{{
+                                featuredServiceHub.organizerContact.organizerName
+                              }}，好友申请按上方说明备注。
+                            </p>
+                          </div>
+                        </li>
+                        <li>
+                          <span>02</span>
+                          <div>
+                            <strong>发送报名信息截图</strong>
+                            <p>进入报名详情，截图含姓名和报名编号的信息并发送。</p>
+                          </div>
+                        </li>
+                        <li>
+                          <span>03</span>
+                          <div>
+                            <strong>等待会员群邀请</strong>
+                            <p>组织者核验参会资格后，会邀请你进入大会会员群。</p>
+                          </div>
+                        </li>
+                      </ol>
+                      <button
+                        class="organizer-contact-panel__confirm"
+                        type="button"
+                        :disabled="organizerConfirmationPending"
+                        @click="
+                          setOrganizerConfirmed(!featuredServiceHub.organizerContact.confirmedAt)
+                        "
+                      >
+                        {{
+                          organizerConfirmationPending
+                            ? '正在更新…'
+                            : featuredServiceHub.organizerContact.confirmedAt
+                              ? '恢复为待添加'
+                              : '我已添加并发送报名截图'
+                        }}
+                      </button>
+                    </div>
+                  </div>
+                  <div v-else class="organizer-contact-panel__unavailable" role="status">
+                    <span aria-hidden="true">i</span>
+                    <div>
+                      <strong>{{ organizerServiceItem?.label ?? '暂不可查看' }}</strong>
+                      <p>
+                        {{
+                          organizerServiceItem?.description ??
+                            '大会团队开放服务并确认参会资格后，可在这里查看组织者信息。'
+                        }}
+                      </p>
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              <article v-else-if="featuredOrder" class="account-pass order-service-pass">
+                <div class="account-pass__main">
+                  <div class="account-pass__topline">
+                    <span>TOKEMS CONFERENCE · ORDER SERVICE</span>
+                    <span class="account-pass__status">{{
+                      statusLabel(featuredOrder.status)
+                    }}</span>
+                  </div>
+                  <h3>{{ featuredOrder.eventName }}</h3>
+                  <p>
+                    {{ featuredOrder.ticketTypeName }} · 参会人 {{ featuredOrder.attendeeName }}
+                  </p>
+                  <div class="account-pass__actions">
+                    <button
+                      v-if="['pending_payment', 'processing'].includes(featuredOrder.status)"
+                      class="account-pass__primary"
+                      type="button"
+                      :disabled="resumingOrderId === featuredOrder.id"
+                      @click="resumeOrder(featuredOrder)"
+                    >
+                      {{ resumingOrderId === featuredOrder.id ? '正在恢复支付…' : '继续支付' }}
+                      <span aria-hidden="true">→</span>
+                    </button>
+                    <a href="#purchases">查看订单详情</a>
+                  </div>
+                </div>
+                <div class="account-pass__stub">
+                  <span>ORDER</span>
+                  <strong>{{ purchasedOrders.length }}</strong>
+                  <small>{{ featuredOrder.orderNo }}</small>
+                </div>
+              </article>
+
+              <div v-if="!featuredRegistration && featuredOrder" class="order-service-grid">
+                <a href="#purchases">
+                  <span>01</span><strong>订单与支付</strong><small>{{ statusLabel(featuredOrder.status) }}</small>
+                </a>
+                <NuxtLink
+                  v-if="
+                    featuredOrder.invoiceId ||
+                      ['paid', 'partially_refunded'].includes(featuredOrder.status)
+                  "
+                  :to="`/account/invoices/${featuredOrder.id}`"
+                >
+                  <span>02</span><strong>发票服务</strong><small>{{ featuredOrder.invoiceId ? '查看开票记录' : '当前可以申请' }}</small>
+                </NuxtLink>
+                <a v-else href="#invoices" aria-disabled="true">
+                  <span>02</span><strong>发票服务</strong><small>支付完成后开放</small>
+                </a>
+                <a href="#purchases">
+                  <span>03</span><strong>参会人信息</strong><small>{{
+                    featuredOrder.attendeeClaimed ? '参会人已认领' : '等待参会人认领'
+                  }}</small>
+                </a>
+              </div>
+
+              <article v-if="!featuredRegistration && !featuredOrder" class="account-pass is-empty">
                 <div class="account-pass__main">
                   <div class="account-pass__topline">
                     <span>TOKEMS CONFERENCE · NEXT EVENT</span>
@@ -552,10 +1331,10 @@ useHead({ title: '个人中心' });
                   <h3>下一场大会，从这里开始</h3>
                   <p>完成报名后，进度、电子票与现场签到凭证会自动汇总到个人中心。</p>
                   <div class="account-pass__actions">
-                    <NuxtLink class="account-pass__primary" to="/">
+                    <a class="account-pass__primary" :href="publicHomepageHref">
                       浏览近期大会
                       <span aria-hidden="true">→</span>
-                    </NuxtLink>
+                    </a>
                   </div>
                 </div>
                 <div class="account-pass__stub">
@@ -579,9 +1358,14 @@ useHead({ title: '个人中心' });
                 <div>
                   <dt>待办事项</dt>
                   <dd :class="{ 'is-attention': pendingActionCount > 0 }">
-                    {{ pendingActionCount }}{{ nextCursor ? '+' : '' }}
+                    {{ featuredRegistration ? serviceActionCount : pendingActionCount
+                    }}{{ nextCursor ? '+' : '' }}
                   </dd>
-                  <small>{{ pendingActionCount ? '请及时处理' : '当前无待办' }}</small>
+                  <small>{{
+                    (featuredRegistration ? serviceActionCount : pendingActionCount)
+                      ? '请及时处理'
+                      : '当前无待办'
+                  }}</small>
                 </div>
               </dl>
             </section>
@@ -690,7 +1474,7 @@ useHead({ title: '个人中心' });
                     <p class="account-empty__eyebrow">YOUR EVENT ARCHIVE</p>
                     <h3>还没有报名记录</h3>
                     <p>本人报名或认领他人购买的名额后，会在这里显示参会凭证。</p>
-                    <NuxtLink to="/">查看正在报名的大会 <span aria-hidden="true">→</span></NuxtLink>
+                    <a :href="publicHomepageHref">查看正在报名的大会 <span aria-hidden="true">→</span></a>
                   </div>
                 </div>
               </div>
@@ -735,7 +1519,15 @@ useHead({ title: '个人中心' });
                     </div>
                     <div>
                       <dt>认领状态</dt>
-                      <dd>{{ orderItem.attendeeClaimed ? '参会人已认领' : '等待参会人认领' }}</dd>
+                      <dd>
+                        {{
+                          orderItem.status === 'closed' && orderItem.attendeeClaimed
+                            ? '账号已绑定'
+                            : orderItem.attendeeClaimed
+                              ? '参会人已认领'
+                              : '等待参会人认领'
+                        }}
+                      </dd>
                     </div>
                     <div>
                       <dt>支付状态</dt>
@@ -784,7 +1576,7 @@ useHead({ title: '个人中心' });
 
                   <div v-else class="registration-row__actions">
                     <button
-                      v-if="['pending_payment', 'processing'].includes(orderItem.status)"
+                      v-if="canResumePendingOrder(orderItem, purchaseContexts[orderItem.eventId])"
                       class="registration-primary-action"
                       type="button"
                       :disabled="resumingOrderId === orderItem.id"
@@ -792,6 +1584,32 @@ useHead({ title: '个人中心' });
                     >
                       {{ resumingOrderId === orderItem.id ? '正在恢复支付…' : '继续支付' }}
                       <span aria-hidden="true">→</span>
+                    </button>
+                    <button
+                      v-if="canRestartSelfOrder(orderItem, purchaseContexts[orderItem.eventId])"
+                      class="registration-primary-action"
+                      type="button"
+                      @click="restartClosedSelfOrder(orderItem)"
+                    >
+                      重新报名
+                      <span aria-hidden="true">→</span>
+                    </button>
+                    <button
+                      v-if="
+                        (orderItem.status === 'pending_payment' &&
+                          !canResumePendingOrder(orderItem, purchaseContexts[orderItem.eventId]) &&
+                          !canRestartSelfOrder(orderItem, purchaseContexts[orderItem.eventId])) ||
+                          (orderItem.status === 'closed' &&
+                            (!purchaseContexts[orderItem.eventId] ||
+                              purchaseContextErrors[orderItem.eventId] ||
+                              purchaseContexts[orderItem.eventId]?.resumePaymentOrderId ===
+                              orderItem.id))
+                      "
+                      type="button"
+                      :disabled="refreshingPurchaseContexts"
+                      @click="retryPurchaseContext(orderItem)"
+                    >
+                      {{ refreshingPurchaseContexts ? '正在刷新…' : '刷新报名状态' }}
                     </button>
                     <NuxtLink
                       v-if="
@@ -901,7 +1719,7 @@ useHead({ title: '个人中心' });
             <section id="invoices" class="account-section" aria-labelledby="invoices-title">
               <div class="account-section__heading">
                 <div>
-                  <span class="account-section__index">04 / INVOICES</span>
+                  <span class="account-section__index">05 / INVOICES</span>
                   <h2 id="invoices-title">发票中心</h2>
                 </div>
                 <p>申请、审核、下载和历史记录统一汇总。</p>
@@ -961,7 +1779,7 @@ useHead({ title: '个人中心' });
             <section id="profile" class="account-section" aria-labelledby="profile-title">
               <div class="account-section__heading">
                 <div>
-                  <span class="account-section__index">05 / COMMON PROFILE</span>
+                  <span class="account-section__index">06 / COMMON PROFILE</span>
                   <h2 id="profile-title">常用资料</h2>
                 </div>
                 <p>这些资料可用于下一次报名预填。</p>
@@ -1044,7 +1862,7 @@ useHead({ title: '个人中心' });
             <section id="security" class="account-section" aria-labelledby="security-title">
               <div class="account-section__heading">
                 <div>
-                  <span class="account-section__index">06 / SECURITY</span>
+                  <span class="account-section__index">07 / SECURITY</span>
                   <h2 id="security-title">账户与安全</h2>
                 </div>
                 <p>手机号验证保护你的参会凭证与订单信息。</p>
@@ -1483,6 +2301,10 @@ useHead({ title: '个人中心' });
   font-weight: 650;
 }
 
+.account-mobile-navigation {
+  display: none;
+}
+
 .account-content {
   display: grid;
   min-width: 0;
@@ -1534,13 +2356,70 @@ useHead({ title: '个人中心' });
   text-align: right;
 }
 
+.service-hub-heading__tools {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.service-hub-heading__tools > p {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 0 9px;
+  border: 1px solid #dce3ee;
+  border-radius: 999px;
+  background: #fff;
+  color: #596273;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.service-hub-heading__tools > p i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #16805b;
+}
+
+.service-hub-heading__tools > p.is-attention {
+  border-color: #fed7aa;
+  background: #fffaf5;
+  color: #9a3412;
+}
+
+.service-hub-heading__tools > p.is-attention i {
+  background: #ea580c;
+}
+
+.service-hub-heading__tools label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #8b9099;
+  font-size: 10px;
+}
+
+.service-hub-heading__tools select {
+  max-width: 260px;
+  min-height: 36px;
+  padding: 0 30px 0 11px;
+  border: 1px solid var(--account-line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--account-ink);
+  font-size: 11px;
+}
+
 .account-pass {
   position: relative;
   display: grid;
   width: 100%;
   max-width: 100%;
   grid-template-columns: minmax(0, 1fr) 178px;
-  min-height: 274px;
+  min-height: 252px;
   overflow: hidden;
   border: 1px solid #cedbf1;
   border-top: 3px solid var(--conference-primary);
@@ -1576,6 +2455,18 @@ useHead({ title: '个人中心' });
   background: #f1f6ff;
   color: var(--conference-primary);
   letter-spacing: 0;
+}
+
+.account-pass__status[data-state='complete'] {
+  border-color: #b7dfd0;
+  background: #edf8f3;
+  color: #167653;
+}
+
+.account-pass__status[data-state='attention'] {
+  border-color: #fecdd3;
+  background: #fff1f2;
+  color: #be123c;
 }
 
 .account-pass h3 {
@@ -1614,12 +2505,31 @@ useHead({ title: '个人中心' });
   text-decoration: none;
 }
 
+.account-pass__actions button {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 18px;
+  color: var(--conference-primary);
+  font-size: 12px;
+  font-weight: 680;
+}
+
 .account-pass__actions .account-pass__primary {
   padding: 0 16px;
-  border: 1px solid #c9d9f4;
+  border: 1px solid var(--conference-primary);
   border-radius: 7px;
-  background: #f1f6ff;
-  color: #174bb9;
+  background: var(--conference-primary);
+  color: #fff;
+}
+
+.account-pass[data-state='attention'] .account-pass__actions .account-pass__primary {
+  border-color: #be123c;
+  background: #be123c;
+}
+
+.account-pass__actions .account-pass__primary:active {
+  transform: scale(0.97);
 }
 
 .account-pass__stub {
@@ -1664,6 +2574,440 @@ useHead({ title: '个人中心' });
   font-family: var(--conference-font-mono);
   font-size: 44px;
   line-height: 0.95;
+}
+
+.service-hub-body {
+  margin-top: 16px;
+}
+
+.service-hub-read-error {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border: 1px solid #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 11px;
+}
+
+.service-hub-read-error button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  color: #9a3412;
+  font-weight: 750;
+}
+
+.service-hub-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-top: 1px solid var(--account-line);
+  border-left: 1px solid var(--account-line);
+}
+
+.service-hub-grid > .service-hub-card {
+  grid-column: span 2;
+}
+
+.service-hub-grid[data-count='5'] > .service-hub-card:nth-last-child(-n + 2) {
+  grid-column: span 3;
+}
+
+.service-hub-grid[aria-busy='true'] {
+  opacity: 0.72;
+}
+
+.service-hub-card {
+  --service-color: #2563eb;
+  --service-soft: #eff6ff;
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 168px;
+  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+  gap: 0 13px;
+  padding: 19px 18px 16px;
+  overflow: hidden;
+  border-right: 1px solid var(--account-line);
+  border-bottom: 1px solid var(--account-line);
+  background: #fff;
+  color: var(--account-ink);
+  text-align: left;
+  touch-action: manipulation;
+  transition:
+    background-color 140ms ease,
+    transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.service-hub-card[data-priority='true'] {
+  box-shadow: inset 0 2px 0 var(--service-color);
+  background: color-mix(in srgb, var(--service-soft) 24%, white);
+}
+
+.service-hub-card[data-state='complete'] {
+  --service-color: #167653;
+  --service-soft: #eaf7f1;
+}
+
+.service-hub-card[data-state='pending'] {
+  --service-color: #b45309;
+  --service-soft: #fff3e7;
+}
+
+.service-hub-card[data-state='attention'] {
+  --service-color: #be123c;
+  --service-soft: #fff1f2;
+}
+
+.service-hub-card[data-state='unavailable'] {
+  --service-color: #7b8089;
+  --service-soft: #f1f2f4;
+}
+
+.service-hub-card:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.service-hub-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.76;
+}
+
+.service-hub-card:focus-visible {
+  z-index: 1;
+  outline: 3px solid rgb(37 99 235 / 24%);
+  outline-offset: -3px;
+}
+
+.service-hub-card__icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--service-color) 30%, white);
+  border-radius: 8px;
+  background: var(--service-soft);
+  color: var(--service-color);
+}
+
+.service-hub-card__icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.service-hub-card__copy {
+  display: block;
+  min-width: 0;
+  padding-right: 35px;
+}
+
+.service-hub-card__name,
+.service-hub-card__copy strong,
+.service-hub-card__copy small {
+  display: block;
+}
+
+.service-hub-card__name {
+  color: #8c919a;
+  font: 700 9.5px/1.3 var(--conference-font-mono);
+  letter-spacing: 0.04em;
+}
+
+.service-hub-card__copy strong {
+  margin-top: 6px;
+  color: var(--service-color);
+  font-size: 14px;
+  font-weight: 760;
+  line-height: 1.35;
+}
+
+.service-hub-card__copy small {
+  margin-top: 7px;
+  color: #666d78;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.service-hub-card__action {
+  align-self: end;
+  grid-column: 1 / -1;
+  margin-top: 14px;
+  color: var(--service-color);
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.service-hub-card__state {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 8px 0 0;
+  background: transparent;
+  color: var(--service-color);
+  font-size: 8.5px;
+  font-weight: 760;
+}
+
+.service-hub-card__state::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+}
+
+.organizer-contact-panel {
+  margin-top: 16px;
+  padding: 24px;
+  border: 1px solid #cbd8ef;
+  border-top: 3px solid var(--conference-primary);
+  background: #f8faff;
+  outline: none;
+}
+
+.organizer-contact-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.organizer-contact-panel > header span {
+  color: var(--conference-primary);
+  font: 700 9px/1.2 var(--conference-font-mono);
+  letter-spacing: 0.08em;
+}
+
+.organizer-contact-panel h3 {
+  margin: 7px 0 0;
+  color: var(--account-ink);
+  font-size: 18px;
+}
+
+.organizer-contact-panel > header button {
+  min-height: 36px;
+  color: var(--account-muted);
+  font-size: 10px;
+}
+
+.organizer-contact-panel__body {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  gap: 30px;
+  margin-top: 22px;
+}
+
+.organizer-contact-panel__body > img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #d7dfec;
+  background: #fff;
+}
+
+.organizer-contact-panel__content {
+  min-width: 0;
+}
+
+.organizer-contact-panel__identity strong,
+.organizer-contact-panel__identity > span {
+  display: block;
+}
+
+.organizer-contact-panel__identity strong {
+  font-size: 17px;
+}
+
+.organizer-contact-panel__identity > span {
+  margin-top: 5px;
+  color: var(--account-muted);
+  font-size: 11px;
+}
+
+.organizer-contact-panel__identity p {
+  margin: 16px 0;
+  color: #555b66;
+  font-size: 11px;
+  line-height: 1.75;
+}
+
+.organizer-contact-panel__wechat {
+  display: grid;
+  min-height: 46px;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid #dce4f1;
+  border-bottom: 1px solid #dce4f1;
+}
+
+.organizer-contact-panel__wechat > span {
+  color: #9297a0;
+  font-size: 11px;
+}
+
+.organizer-contact-panel__wechat code {
+  color: var(--account-ink);
+  font-family: var(--conference-font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  user-select: all;
+}
+
+.organizer-contact-panel__wechat button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #c5d2e6;
+  border-radius: 5px;
+  color: var(--conference-primary);
+  font-size: 10px;
+  font-weight: 720;
+  transition:
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+
+.organizer-contact-panel__wechat button:hover {
+  background: #edf3ff;
+}
+
+.organizer-contact-panel__wechat button:active {
+  transform: scale(0.96);
+}
+
+.organizer-contact-panel__copy-status {
+  min-height: 18px;
+  margin: 5px 0 0;
+  color: #3571d2;
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.organizer-contact-panel__steps {
+  display: grid;
+  margin: 12px 0 0;
+  padding: 0;
+  border-top: 1px solid #dce4f1;
+  list-style: none;
+}
+
+.organizer-contact-panel__steps li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid #dce4f1;
+}
+
+.organizer-contact-panel__steps li > span {
+  padding-top: 3px;
+  color: var(--conference-primary);
+  font: 700 9px/1 var(--conference-font-mono);
+}
+
+.organizer-contact-panel__steps strong {
+  color: var(--account-ink);
+  font-size: 11px;
+}
+
+.organizer-contact-panel__steps p {
+  margin: 3px 0 0;
+  color: #6f747d;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.organizer-contact-panel__unavailable {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 22px;
+  padding: 18px;
+  border: 1px solid #d7dfec;
+  background: #fff;
+}
+
+.organizer-contact-panel__unavailable > span {
+  display: grid;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid #b9c8e4;
+  border-radius: 50%;
+  color: var(--conference-primary);
+  font: 700 13px/1 var(--conference-font-mono);
+}
+
+.organizer-contact-panel__unavailable strong {
+  display: block;
+  color: var(--account-ink);
+  font-size: 14px;
+}
+
+.organizer-contact-panel__unavailable p {
+  margin: 7px 0 0;
+  color: var(--account-muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.organizer-contact-panel__confirm {
+  min-height: 42px;
+  margin-top: 20px;
+  padding: 0 15px;
+  border-radius: 6px;
+  background: var(--conference-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.organizer-contact-panel__confirm:active {
+  transform: scale(0.97);
+}
+
+.order-service-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 16px;
+  border-top: 1px solid var(--account-line);
+  border-left: 1px solid var(--account-line);
+}
+
+.order-service-grid a {
+  display: grid;
+  min-height: 116px;
+  align-content: center;
+  gap: 6px;
+  padding: 18px;
+  border-right: 1px solid var(--account-line);
+  border-bottom: 1px solid var(--account-line);
+  background: #fff;
+  color: var(--account-ink);
+  text-decoration: none;
+}
+
+.order-service-grid span {
+  color: var(--conference-primary);
+  font: 700 9px/1 var(--conference-font-mono);
+}
+
+.order-service-grid strong {
+  font-size: 13px;
+}
+
+.order-service-grid small {
+  color: var(--account-muted);
+  font-size: 9.5px;
 }
 
 .account-summary {
@@ -2413,6 +3757,12 @@ useHead({ title: '个人中心' });
   .registration-more:hover {
     background: #f2f5fb;
   }
+  .service-hub-card:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--service-soft) 34%, white);
+  }
+  .order-service-grid a:hover {
+    background: #f8faff;
+  }
   .account-security__action button:hover {
     background: #f5f5f6;
   }
@@ -2423,59 +3773,193 @@ useHead({ title: '个人中心' });
     grid-template-columns: 1fr;
   }
   .account-rail {
-    position: static;
+    position: sticky;
+    z-index: 20;
+    top: max(8px, env(safe-area-inset-top));
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
     align-items: center;
+    overflow: visible;
+    box-shadow: 0 8px 24px rgb(15 23 42 / 7%);
   }
   .account-rail__identity {
-    padding-bottom: 22px;
+    padding: 14px 16px 12px;
   }
   .account-rail__mobile {
     display: none;
   }
-  .account-nav {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    border-bottom: 0;
+  .account-nav--desktop {
+    display: none;
   }
   .account-rail__completion {
-    min-width: 220px;
+    display: none;
   }
   .account-rail__footer {
     display: none;
+  }
+  .account-mobile-navigation {
+    position: relative;
+    display: block;
+    border-top: 1px solid var(--account-line-soft);
+  }
+  .account-mobile-navigation__trigger {
+    display: grid;
+    width: 100%;
+    min-height: 48px;
+    grid-template-columns: auto minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 12px;
+    padding: 0 16px;
+    color: var(--account-ink);
+    text-align: left;
+    transition: transform 110ms ease;
+  }
+  .account-mobile-navigation__trigger > span {
+    color: var(--conference-primary);
+    font: 720 9px/1 var(--conference-font-mono);
+    letter-spacing: 0.08em;
+  }
+  .account-mobile-navigation__trigger strong {
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 720;
+  }
+  .account-mobile-navigation__trigger i {
+    display: grid;
+    width: 24px;
+    height: 24px;
+    place-items: center;
+    color: var(--account-muted);
+    font-size: 15px;
+    font-style: normal;
+  }
+  .account-mobile-navigation__panel {
+    position: absolute;
+    z-index: 2;
+    top: calc(100% + 6px);
+    right: -1px;
+    left: -1px;
+    overflow: hidden;
+    border: 1px solid var(--account-line);
+    border-radius: 9px;
+    background: #fff;
+    box-shadow: 0 18px 38px rgb(15 23 42 / 15%);
+  }
+  .account-mobile-navigation__links {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 8px;
+  }
+  .account-mobile-navigation__links a {
+    display: grid;
+    min-width: 0;
+    min-height: 48px;
+    grid-template-columns: 24px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    padding: 0 9px;
+    border-radius: 6px;
+    color: #44474f;
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.35;
+    text-decoration: none;
+    transition:
+      background-color 110ms ease,
+      color 110ms ease,
+      transform 110ms ease;
+  }
+  .account-mobile-navigation__links a[aria-current='location'] {
+    background: #eff5ff;
+    color: var(--conference-primary);
+  }
+  .account-mobile-navigation__links a span {
+    color: #9da3ae;
+    font: 650 9px/1 var(--conference-font-mono);
+  }
+  .account-mobile-navigation__meta {
+    display: flex;
+    min-height: 48px;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--account-line-soft);
+    background: #fafbfc;
+    color: var(--account-muted);
+    font-size: 10px;
+  }
+  .account-mobile-navigation__meta span {
+    font-family: var(--conference-font-mono);
+  }
+  .account-mobile-navigation__meta strong {
+    margin-left: auto;
+    color: #575b64;
+    font-weight: 680;
+  }
+  .account-mobile-navigation__meta button {
+    min-height: 44px;
+    padding-inline: 8px;
+    color: #9f2736;
+    font-size: 10px;
+    font-weight: 700;
+    transition: transform 110ms ease;
+  }
+  .account-mobile-navigation__trigger:active,
+  .account-mobile-navigation__links a:active,
+  .account-mobile-navigation__meta button:active {
+    transform: scale(0.98);
+  }
+  .service-hub-heading__tools select,
+  .account-form input,
+  .purchase-attendee-edit input {
+    font-size: 16px;
+  }
+  .purchase-attendee-edit input,
+  .registration-row__actions a,
+  .registration-row__actions button,
+  .purchase-attendee-edit button,
+  .account-security__action button {
+    min-height: 44px;
+  }
+  .account-section {
+    scroll-margin-top: 142px;
   }
 }
 
 @media (max-width: 760px) {
   .account-shell {
     width: min(100% - 28px, 1180px);
-    padding: 38px 0 72px;
+    padding: 26px 0 calc(72px + env(safe-area-inset-bottom));
   }
   .account-heading {
     align-items: flex-start;
-    margin-bottom: 32px;
+    margin-bottom: 20px;
   }
   .account-heading h1 {
     font-size: 32px;
   }
   .account-heading > div > p:last-child {
     max-width: 30ch;
+    margin-top: 12px;
     font-size: 12px;
   }
-  .account-back-link {
-    font-size: 0;
+  .account-rail__identity {
+    display: none;
   }
-  .account-back-link span {
-    display: grid;
-    width: 40px;
-    height: 40px;
-    place-items: center;
+  .account-mobile-navigation {
+    border-top: 0;
+  }
+  .account-back-link {
+    min-height: 44px;
+    gap: 6px;
+    padding: 0 12px;
     border: 1px solid var(--account-line);
     border-radius: 7px;
     background: #fff;
-    font-size: 15px;
+    font-size: 11px;
+  }
+  .account-back-link span {
+    font-size: 13px;
   }
   .account-login {
     grid-template-columns: 1fr;
@@ -2486,24 +3970,10 @@ useHead({ title: '个人中心' });
     min-height: 280px;
   }
   .account-workspace {
-    gap: 28px;
-  }
-  .account-rail {
-    grid-template-columns: 1fr;
-  }
-  .account-rail__completion {
-    display: none;
-  }
-  .account-nav {
-    overflow-x: auto;
-  }
-  .account-nav a {
-    min-width: 108px;
-    justify-content: center;
-    padding-inline: 8px;
+    gap: 20px;
   }
   .account-content {
-    gap: 56px;
+    gap: 48px;
   }
   .account-section__heading {
     align-items: flex-start;
@@ -2515,6 +3985,16 @@ useHead({ title: '个人中心' });
   .account-pass {
     grid-template-columns: minmax(0, 1fr);
   }
+  .service-hub-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .service-hub-grid > .service-hub-card,
+  .service-hub-grid[data-count='5'] > .service-hub-card:nth-last-child(-n + 2) {
+    grid-column: span 1;
+  }
+  .service-hub-grid[data-count='5'] > .service-hub-card:last-child {
+    grid-column: span 2;
+  }
   .account-pass__main {
     width: 100%;
   }
@@ -2523,12 +4003,12 @@ useHead({ title: '个人中心' });
     overflow-wrap: anywhere;
   }
   .account-pass__stub {
-    min-height: 100px;
+    min-height: 68px;
     grid-template-columns: auto auto 1fr;
     align-content: center;
     justify-items: start;
     gap: 12px;
-    padding: 0 28px;
+    padding: 0 22px;
     border-top: 1px dashed #b7c7e1;
     border-left: 0;
     text-align: left;
@@ -2547,7 +4027,7 @@ useHead({ title: '个人中心' });
   }
   .account-pass__stub strong {
     margin: 0;
-    font-size: 30px;
+    font-size: 26px;
   }
   .account-pass__stub small {
     justify-self: end;
@@ -2572,6 +4052,9 @@ useHead({ title: '个人中心' });
     align-items: flex-start;
     flex-direction: column;
   }
+  .order-service-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 600px) {
@@ -2583,15 +4066,41 @@ useHead({ title: '个人中心' });
     margin-top: 10px;
     text-align: left;
   }
+  .service-hub-heading__tools {
+    justify-items: start;
+    margin-top: 12px;
+  }
+  .service-hub-heading__tools label {
+    width: 100%;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .service-hub-heading__tools select {
+    min-height: 44px;
+    width: 100%;
+    max-width: none;
+  }
   .account-pass__main {
-    padding: 25px 22px;
+    padding: 22px 20px;
   }
   .account-pass__topline {
     align-items: flex-start;
   }
   .account-pass h3 {
-    margin-top: 28px;
+    margin-top: 22px;
     font-size: 24px;
+  }
+  .account-pass__actions {
+    width: 100%;
+    gap: 10px 16px;
+    padding-top: 20px;
+  }
+  .account-pass__actions a,
+  .account-pass__actions button {
+    min-height: 44px;
+  }
+  .account-pass__actions .account-pass__primary {
+    justify-content: space-between;
   }
   .account-summary > div {
     padding-block: 17px;
@@ -2666,6 +4175,27 @@ useHead({ title: '个人中心' });
     width: 100%;
     justify-content: flex-start;
   }
+  .organizer-contact-panel {
+    padding: 20px;
+  }
+  .organizer-contact-panel__body {
+    grid-template-columns: 1fr;
+  }
+  .organizer-contact-panel__body > img {
+    width: min(100%, 300px);
+    height: auto;
+  }
+  .organizer-contact-panel > header button,
+  .organizer-contact-panel__wechat button,
+  .organizer-contact-panel__confirm {
+    min-height: 44px;
+  }
+  .organizer-contact-panel__confirm {
+    width: 100%;
+  }
+  .organizer-contact-panel__wechat code {
+    overflow-wrap: anywhere;
+  }
 }
 
 @media (max-width: 400px) {
@@ -2674,15 +4204,6 @@ useHead({ title: '个人中心' });
   }
   .account-heading h1 {
     font-size: 30px;
-  }
-  .account-nav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    overflow: visible;
-  }
-  .account-nav a {
-    min-width: 0;
-    justify-content: flex-start;
-    padding-inline: 12px;
   }
   .account-pass__topline > span:first-child {
     max-width: 180px;
@@ -2699,6 +4220,33 @@ useHead({ title: '个人中心' });
   }
   .account-summary small {
     font-size: 8.5px;
+  }
+  .service-hub-card {
+    min-height: 174px;
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 0 9px;
+    padding: 18px 13px 14px;
+  }
+  .service-hub-card__icon {
+    width: 30px;
+    height: 30px;
+  }
+  .service-hub-card__icon svg {
+    width: 16px;
+    height: 16px;
+  }
+  .service-hub-card__copy {
+    padding-right: 24px;
+  }
+  .service-hub-card__copy strong {
+    font-size: 12.5px;
+  }
+  .service-hub-card__copy small {
+    font-size: 10px;
+  }
+  .service-hub-card__state {
+    padding-top: 6px;
+    padding-right: 6px;
   }
   .registration-row {
     grid-template-columns: 1fr;
@@ -2724,6 +4272,17 @@ useHead({ title: '个人中心' });
   .account-security__action {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 340px) {
+  .service-hub-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .service-hub-grid > .service-hub-card,
+  .service-hub-grid[data-count='5'] > .service-hub-card:nth-last-child(-n + 2),
+  .service-hub-grid[data-count='5'] > .service-hub-card:last-child {
+    grid-column: span 1;
   }
 }
 

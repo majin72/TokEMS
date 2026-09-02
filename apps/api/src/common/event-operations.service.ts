@@ -27,6 +27,7 @@ import {
   speakerAvatarText,
 } from '@conference/contracts';
 import {
+  activeInventoryReservationAt,
   auditLogs,
   checkinLists,
   conferenceTemplates,
@@ -213,7 +214,13 @@ export class EventOperationsService {
     const [asset] = await tx
       .select({ id: templateAssets.id, mediaType: templateAssets.mediaType })
       .from(templateAssets)
-      .where(and(eq(templateAssets.id, assetId), eq(templateAssets.organizationId, organizationId)))
+      .where(
+        and(
+          eq(templateAssets.id, assetId),
+          eq(templateAssets.organizationId, organizationId),
+          eq(templateAssets.purpose, 'template'),
+        ),
+      )
       .limit(1);
     if (!asset || !['image/jpeg', 'image/png', 'image/webp'].includes(asset.mediaType)) {
       throw new DomainError(
@@ -1585,7 +1592,7 @@ export class EventOperationsService {
                 eq(inventoryReservations.ticketTypeId, ticketTypeId),
                 isNull(inventoryReservations.convertedAt),
                 isNull(inventoryReservations.releasedAt),
-                gt(inventoryReservations.expiresAt, new Date()),
+                activeInventoryReservationAt(new Date()),
               ),
             );
           const [waitlistHeld] = await tx
