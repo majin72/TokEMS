@@ -53,6 +53,7 @@ import {
   customerUsers,
   eventReleases,
   events,
+  eventPartners,
   invoiceRequests,
   orders,
   orderItems,
@@ -60,6 +61,10 @@ import {
   outboxEvents,
   payments,
   paymentNotificationInbox,
+  partnerCommissionInquiries,
+  partnerLedgerEntries,
+  partnerPayoutRecipients,
+  partnerPayoutRequests,
   refundRequests,
   publicUserIds,
   registrations,
@@ -1131,6 +1136,30 @@ export class CustomerAccountService {
           after: { customerUserId: session.customerUserId, orderId: input.orderId },
           traceId: crypto.randomUUID(),
         });
+        const [claimedItem] = await tx
+          .select({ id: orderItems.id })
+          .from(orderItems)
+          .where(
+            and(
+              eq(orderItems.orderId, proof.order.id),
+              eq(orderItems.registrationId, proof.registration.id),
+            ),
+          )
+          .limit(1);
+        if (claimedItem) {
+          await tx.insert(outboxEvents).values({
+            organizationId: session.organizationId,
+            eventId: proof.registration.eventId,
+            eventType: 'PartnerAttendeeClaimed',
+            correlationId: `partner-attendee-claimed:${proof.registration.id}:${session.customerUserId}`,
+            payload: {
+              orderId: proof.order.id,
+              orderItemId: claimedItem.id,
+              registrationId: proof.registration.id,
+              customerUserId: session.customerUserId,
+            },
+          });
+        }
       }
       await tx
         .update(orderAccessTokens)
@@ -2128,6 +2157,73 @@ export class CustomerAccountService {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`customer-user:${organizationId}:${candidate.mobileE164}`}, 0))`,
         );
+        const partnerRows = await tx
+          .select({ id: eventPartners.id, status: eventPartners.qualificationStatus })
+          .from(eventPartners)
+          .where(
+            and(
+              eq(eventPartners.organizationId, organizationId),
+              eq(eventPartners.customerUserId, customerUserId),
+            ),
+          )
+          .for('update');
+        if (partnerRows.length) {
+          const partnerIds = partnerRows.map((row) => row.id);
+          const [ledger] = await tx
+            .select({ id: partnerLedgerEntries.id })
+            .from(partnerLedgerEntries)
+            .where(inArray(partnerLedgerEntries.partnerId, partnerIds))
+            .limit(1);
+          const [payout] = await tx
+            .select({ id: partnerPayoutRequests.id })
+            .from(partnerPayoutRequests)
+            .where(
+              and(
+                inArray(partnerPayoutRequests.partnerId, partnerIds),
+                inArray(partnerPayoutRequests.status, [
+                  'submitted',
+                  'under_review',
+                  'approved',
+                  'batched',
+                  'executing',
+                  'unknown',
+                ]),
+              ),
+            )
+            .limit(1);
+          const [recipient] = await tx
+            .select({ id: partnerPayoutRecipients.id })
+            .from(partnerPayoutRecipients)
+            .where(
+              and(
+                inArray(partnerPayoutRecipients.partnerId, partnerIds),
+                inArray(partnerPayoutRecipients.status, ['pending', 'verified']),
+              ),
+            )
+            .limit(1);
+          const [inquiry] = await tx
+            .select({ id: partnerCommissionInquiries.id })
+            .from(partnerCommissionInquiries)
+            .where(
+              and(
+                inArray(partnerCommissionInquiries.partnerId, partnerIds),
+                inArray(partnerCommissionInquiries.status, ['open', 'under_review']),
+              ),
+            )
+            .limit(1);
+          const reasons = [
+            partnerRows.some((row) => row.status !== 'closed') ? '合作伙伴资格' : '',
+            ledger ? '佣金账务记录' : '',
+            payout ? '未结束的提现' : '',
+            recipient ? '有效收款人' : '',
+            inquiry ? '未结束的佣金申诉' : '',
+          ].filter(Boolean);
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            `该账户仍保留${reasons.join('、') || '合作伙伴历史'}，请先完成关闭、结算与财务档案处理`,
+            HttpStatus.CONFLICT,
+          );
+        }
         const related = await tx.select({ id: orders.id }).from(orders).where(and(eq(orders.organizationId, organizationId), or(eq(orders.purchaserCustomerUserId, customerUserId), sql`exists (select 1 from registrations own_registration where own_registration.customer_user_id = ${customerUserId}
           and (own_registration.id = ${orders.registrationId} or exists (select 1 from order_items oi where oi.order_id = ${orders.id} and oi.registration_id = own_registration.id)))`))).orderBy(asc(orders.id));
         for (const relatedOrder of related) {

@@ -242,6 +242,27 @@
       "width": 948
     }
   ],
+  "partnerDistribution": {
+    "homepage": {
+      "enabled": false,
+      "limit": 12
+    },
+    "programDraft": {
+      "attributionDays": 30,
+      "eligibleTicketTypeIds": [],
+      "fixedRateBps": 1000,
+      "homepageLimit": 12,
+      "minimumPayoutAmount": 1000,
+      "mode": "fixed",
+      "payoutCadence": "weekly",
+      "promotionPolicy": "推广内容应真实、清晰，不得承诺大会未公开的权益。发现误导宣传、异常流量或套取佣金时，大会可暂停归因与结算。",
+      "publicDirectoryEnabled": false,
+      "settlementDelayDays": 7,
+      "termsContent": "合作伙伴应使用本人专属链接开展真实推广。佣金按成功付款且符合资格的订单明细计算，退款与自购会按规则冲正。",
+      "termsTitle": "大会合作伙伴推广规则",
+      "tiers": []
+    }
+  },
   "backend": {
     "event": {
       "address": "广东省深圳市南山区（具体酒店待定）",

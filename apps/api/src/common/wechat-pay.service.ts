@@ -64,6 +64,7 @@ import {
   integrationEncryptionKeyVersion,
 } from './integration-credentials.js';
 import { RedisService } from './redis.service.js';
+import { partnerAttributionForOrder } from './partner-attribution.js';
 import { RefundGatewayError, WeChatRefundOutcomeSchema } from './refund-policy.js';
 import {
   lockWeChatConfiguration,
@@ -1650,10 +1651,12 @@ export class WeChatPayService implements OnApplicationBootstrap, OnModuleDestroy
       }
 
       const outTradeNo = generateOutTradeNo(order.orderNo);
+      const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderId);
       const [created] = await tx
         .insert(payments)
         .values({
           orderId,
+          partnerAttributionRevisionId,
           provider: PROVIDER,
           channel,
           outTradeNo,

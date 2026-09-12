@@ -14,6 +14,8 @@ import canonicalHomepagePublicData from './canonical-homepage.public.json' with 
 export * from './agent.js';
 export * from './analytics.js';
 export * from './feishu.js';
+export * from './partner-distribution.js';
+export * from './partner-distribution-policy.js';
 
 export const BuildInfoSchema = z.object({
   service: z.string().regex(/^[a-z0-9-]+$/u),
@@ -91,6 +93,9 @@ export const RESERVED_PUBLIC_EVENT_SLUGS = [
   'invoice',
   'order',
   'pay',
+  'partners',
+  'payout',
+  'r',
   'register',
   'ticket',
 ] as const;
@@ -3589,6 +3594,7 @@ export const AliyunSmsTemplateKeySchema = z.enum([
   'invoiceDetailsRequested',
   'invoiceReady',
   'eventReminder',
+  'partnerInvitation',
 ]);
 
 const AliyunSmsTemplateConfigurationSchema = z.object({
@@ -3630,6 +3636,13 @@ const AliyunSmsTemplatesSchema = z.object({
   invoiceDetailsRequested: AliyunSmsTemplateConfigurationSchema,
   invoiceReady: AliyunSmsTemplateConfigurationSchema,
   eventReminder: AliyunSmsTemplateConfigurationSchema,
+  partnerInvitation: AliyunSmsTemplateConfigurationSchema.default({
+    enabled: false,
+    templateCode: '',
+    status: 'unverified',
+    lastVerifiedAt: null,
+    lastError: null,
+  }),
 });
 
 export const AliyunSmsConfigurationSchema = z.object({
@@ -3682,6 +3695,7 @@ export const UpdateAliyunSmsConfigurationSchema = z
       invoiceDetailsRequested: UpdateAliyunSmsTemplateConfigurationSchema,
       invoiceReady: UpdateAliyunSmsTemplateConfigurationSchema,
       eventReminder: UpdateAliyunSmsTemplateConfigurationSchema,
+      partnerInvitation: UpdateAliyunSmsTemplateConfigurationSchema.optional(),
     }),
   })
   .strict()

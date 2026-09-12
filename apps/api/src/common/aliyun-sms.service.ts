@@ -95,6 +95,10 @@ const TEST_PARAMETERS: Record<AliyunSmsTemplateKey, Record<string, string>> = {
     startsAt: '明天 09:00',
     venue: '测试会场',
   },
+  partnerInvitation: {
+    eventName: '短信连接测试',
+    url: 'https://example.com/account',
+  },
 };
 
 @Injectable()

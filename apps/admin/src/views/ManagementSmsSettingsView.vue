@@ -89,6 +89,12 @@ const templateRows: Array<{
     description: '运营人员发送大会开始提醒',
     variables: ['eventName', 'startsAt', 'venue'],
   },
+  {
+    key: 'partnerInvitation',
+    name: '合作伙伴资格开通',
+    description: '管理员按大会开通合作伙伴资格后发送个人中心入口',
+    variables: ['eventName', 'url'],
+  },
 ];
 
 const templateGroups = [
@@ -119,7 +125,7 @@ const templateGroups = [
     key: 'operations',
     name: '运营通知',
     description: '用于大会前的运营提醒。',
-    keys: ['eventReminder'] as AliyunSmsTemplateKey[],
+    keys: ['eventReminder', 'partnerInvitation'] as AliyunSmsTemplateKey[],
   },
 ].map((group) => ({
   ...group,

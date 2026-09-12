@@ -16,6 +16,7 @@ import { TemplateInvoiceModule } from './modules/template-invoice.module.js';
 import { CustomerModule } from './modules/customer.module.js';
 import { configuredSuperAdministratorId } from './common/staff-account.js';
 import { AgentModule } from './modules/agent.module.js';
+import { PartnerDistributionModule } from './modules/partner-distribution.module.js';
 import { AgentOperationInterceptor } from './common/agent-operation.interceptor.js';
 import {
   decodeAgentAccessSecret,
@@ -70,6 +71,7 @@ if (
     BatchOrdersModule,
     RefundModule,
     AgentModule,
+    PartnerDistributionModule,
     HealthModule,
   ],
   providers: [

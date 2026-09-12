@@ -7,7 +7,7 @@ import {
 } from '@conference/contracts';
 
 const PUBLIC_EXACT_PATHS = new Set(['/', '/faq', '/apply/cooperation']);
-const PUBLIC_PREFIXES = ['/members', '/speakers', '/s'];
+const PUBLIC_PREFIXES = ['/members', '/partners', '/speakers', '/s'];
 const SENSITIVE_PREFIXES = [
   '/register',
   '/account',
@@ -15,6 +15,8 @@ const SENSITIVE_PREFIXES = [
   '/invoice',
   '/ticket',
   '/pay',
+  '/payout',
+  '/r',
   '/admin',
   '/api',
 ];

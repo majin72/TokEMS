@@ -18,6 +18,7 @@ import {
   type PublicAttendeeNeedList,
   type PublicEvent,
   type PublicEventMemberList,
+  type PublicPartnerSummary,
   type Session,
 } from '@conference/contracts';
 import { resolveEventExperience } from '~/composables/useEventExperience';
@@ -93,6 +94,11 @@ if (eventLoadError.value) {
   });
 }
 if (loadedEvent.value) event.value = loadedEvent.value;
+const { data: featuredPartners } = await useAsyncData<{ items: PublicPartnerSummary[] }>(
+  `conference-partners-${eventRouteKey.value}`,
+  () => api.getEventPartners(event.value.slug, 24, 'homepage').catch(() => ({ items: [], nextCursor: null })),
+  { deep: false, watch: [eventRouteKey] },
+);
 const livePublicMetrics = ref({ ...event.value.publicMetrics });
 const activeDay = ref(1);
 const openFaq = ref<number | null>(null);
@@ -963,6 +969,7 @@ onBeforeUnmount(() => {
           <a v-if="memberDirectoryState.visible" href="#members">{{
             blockCopy('home.navigation', 'membersLabel', '会员')
           }}</a>
+          <a v-if="featuredPartners?.items.length" href="#event-partners">合作伙伴</a>
           <a v-if="blockEnabled('home.tickets')" href="#tickets">{{
             blockCopy('home.navigation', 'ticketsLabel', '门票')
           }}</a>
@@ -1628,6 +1635,38 @@ onBeforeUnmount(() => {
             下一页
           </button>
         </nav>
+      </div>
+    </section>
+
+    <section v-if="featuredPartners?.items.length" id="event-partners" class="event-partners">
+      <div class="wrap">
+        <div class="sec-head reveal event-partners__head">
+          <div>
+            <span class="kicker">EVENT PARTNERS</span>
+            <h2 class="sec-title">与大会同行的合作伙伴</h2>
+            <p class="sec-sub">认识他们的专业背景与合作方向，也可以通过专属入口完成报名。</p>
+          </div>
+          <NuxtLink :to="publicEventScopedPath('/partners', event.slug)">查看全部 <span>→</span></NuxtLink>
+        </div>
+        <div class="event-partners__grid">
+          <NuxtLink
+            v-for="item in featuredPartners.items"
+            :key="item.publicSlug"
+            class="event-partner-card reveal"
+            :to="publicEventScopedPath(`/partners/${encodeURIComponent(item.publicSlug)}`, event.slug)"
+          >
+            <span class="event-partner-card__avatar">
+              <img v-if="item.avatarUrl" :src="item.avatarUrl" :alt="`${item.displayName}的头像`" loading="lazy">
+              <b v-else>{{ attendeeAvatarInitial(item.displayName) }}</b>
+            </span>
+            <span class="event-partner-card__copy">
+              <small>{{ item.industry || 'PARTNER' }}</small>
+              <strong>{{ item.displayName }}</strong>
+              <em>{{ [item.company, item.title].filter(Boolean).join(' · ') }}</em>
+            </span>
+            <span aria-hidden="true">↗</span>
+          </NuxtLink>
+        </div>
       </div>
     </section>
 

@@ -8,6 +8,7 @@ import type {
   CustomerRegistrationSummary,
   CustomerServiceHubItem,
   EventPurchaseContext,
+  PartnerRelationshipView,
 } from '@conference/contracts';
 import { publicEventHomePath, publicEventScopedPath } from '@conference/contracts';
 import { nextTick, watch } from 'vue';
@@ -47,6 +48,7 @@ const organizerCopyStatus = ref('');
 const latestServiceHubRequestByRegistration = new Map<string, number>();
 let serviceHubRequestSequence = 0;
 const invoiceHighlights = ref<CustomerInvoiceCenterItem[]>([]);
+const partnerships = ref<PartnerRelationshipView[]>([]);
 const invoiceCounts = ref<CustomerInvoiceCenterCounts>({
   all: 0,
   eligible: 0,
@@ -160,6 +162,9 @@ const statusLabels: Record<string, string> = {
   rejected: '已驳回',
   adjustment_required: '待调整',
   voided: '已作废',
+  pending_confirmation: '待确认规则',
+  active: '合作中',
+  paused: '已暂停',
 };
 const statusLabel = (value: string) => statusLabels[value] ?? value;
 const serviceStateLabels: Record<CustomerServiceHubItem['state'], string> = {
@@ -789,6 +794,11 @@ async function loadInvoiceSummary() {
   invoiceCounts.value = result.counts;
 }
 
+async function loadPartnerships() {
+  const result = await customer.partnerships();
+  partnerships.value = result.items;
+}
+
 async function initialize() {
   loading.value = true;
   errorMessage.value = '';
@@ -796,7 +806,12 @@ async function initialize() {
     await customer.refresh();
     if (customer.session.value) {
       syncProfile();
-      await Promise.all([loadRegistrations(), loadPurchasedOrders(), loadInvoiceSummary()]);
+      await Promise.all([
+        loadRegistrations(),
+        loadPurchasedOrders(),
+        loadInvoiceSummary(),
+        loadPartnerships(),
+      ]);
       await loadRequestedRegistration();
     }
   } catch {
@@ -1117,6 +1132,25 @@ useHead({ title: '个人中心' });
                     }}
                   </p>
                 </div>
+              </div>
+
+              <div v-if="partnerships.length" class="partner-center-cards">
+                <NuxtLink
+                  v-for="item in partnerships"
+                  :key="item.id"
+                  :to="`/account/partnerships/${item.eventId}`"
+                  class="partner-center-card"
+                >
+                  <span>EVENT PARTNER</span>
+                  <div>
+                    <strong>{{ item.eventName }}合作伙伴中心</strong>
+                    <small>
+                      {{ statusLabel(item.qualificationStatus) }} · 可提现
+                      {{ money(item.balances.available, item.balances.currency) }}
+                    </small>
+                  </div>
+                  <b aria-hidden="true">→</b>
+                </NuxtLink>
               </div>
 
               <article
@@ -2027,6 +2061,44 @@ useHead({ title: '个人中心' });
   --account-body: 13px;
   min-height: 100vh;
   background: var(--account-canvas);
+}
+
+.partner-center-cards {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.partner-center-card {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 17px 20px;
+  border: 1px solid #cddcf4;
+  border-radius: 12px;
+  background: #edf4ff;
+  color: #263851;
+}
+
+.partner-center-card > span {
+  color: #1d5cda;
+  font: 750 10px var(--conference-font-mono);
+  letter-spacing: 0.1em;
+}
+
+.partner-center-card div {
+  display: grid;
+  gap: 4px;
+}
+
+.partner-center-card small {
+  color: #64738a;
+}
+
+.partner-center-card b {
+  color: #1d5cda;
+  font-size: 18px;
 }
 
 .account-shell {

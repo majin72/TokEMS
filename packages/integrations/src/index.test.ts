@@ -28,5 +28,12 @@ describe('Aliyun SMS helpers', () => {
     expect(configuration.templates.paymentSucceeded.enabled).toBe(false);
     expect(configuration.templates.ticketIssued.enabled).toBe(false);
     expect(configuration.templates.refundSucceeded.enabled).toBe(false);
+    expect(configuration.templates.partnerInvitation).toEqual({
+      enabled: false,
+      templateCode: '',
+      status: 'unverified',
+      lastVerifiedAt: null,
+      lastError: null,
+    });
   });
 });
