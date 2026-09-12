@@ -317,12 +317,12 @@
                 "enabled": true,
                 "items": [
                   {
-                    "assetId": "b31a178f-a55b-4363-9ca9-6da23ab8d54b",
+                    "assetId": "99e6c684-2e29-4ac9-9b5b-13230e78ea84",
                     "background": "light",
                     "enabled": true,
                     "group": "speaker",
-                    "id": "bcd01dd7-7e8e-445c-b451-2522bd606e69",
-                    "name": "移山科技",
+                    "id": "2387d3ef-6245-4d48-b959-ad59f16e6542",
+                    "name": "爱搜 AI / AIDSO",
                     "scale": 1
                   },
                   {
@@ -335,12 +335,12 @@
                     "scale": 1
                   },
                   {
-                    "assetId": "99e6c684-2e29-4ac9-9b5b-13230e78ea84",
+                    "assetId": "b31a178f-a55b-4363-9ca9-6da23ab8d54b",
                     "background": "light",
                     "enabled": true,
                     "group": "speaker",
-                    "id": "2387d3ef-6245-4d48-b959-ad59f16e6542",
-                    "name": "爱搜 AI / AIDSO",
+                    "id": "bcd01dd7-7e8e-445c-b451-2522bd606e69",
+                    "name": "移山科技",
                     "scale": 1
                   },
                   {
