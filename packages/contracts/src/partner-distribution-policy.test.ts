@@ -25,11 +25,24 @@ describe('partner distribution financial policy', () => {
 
   it('rounds every eligible order line down to cents', () => {
     expect(
-      calculateCommissionLine({ grossAmount: 1999, refundedAmount: 500, rateBps: 1000, eligible: true }),
-    ).toEqual({ grossAmount: 1999, refundedAmount: 500, eligibleAmount: 1499, commissionAmount: 149 });
-    expect(
-      calculateCommissionLine({ grossAmount: 1999, rateBps: 1000, eligible: false }),
-    ).toEqual({ grossAmount: 1999, refundedAmount: 0, eligibleAmount: 0, commissionAmount: 0 });
+      calculateCommissionLine({
+        grossAmount: 1999,
+        refundedAmount: 500,
+        rateBps: 1000,
+        eligible: true,
+      }),
+    ).toEqual({
+      grossAmount: 1999,
+      refundedAmount: 500,
+      eligibleAmount: 1499,
+      commissionAmount: 149,
+    });
+    expect(calculateCommissionLine({ grossAmount: 1999, rateBps: 1000, eligible: false })).toEqual({
+      grossAmount: 1999,
+      refundedAmount: 0,
+      eligibleAmount: 0,
+      commissionAmount: 0,
+    });
   });
 
   it('releases after both the configured delay and refund window buffer', () => {
@@ -55,6 +68,8 @@ describe('partner distribution financial policy', () => {
     expect(shouldApplyMerchantTransferState('unknown', 'PROCESSING')).toBe(true);
     expect(shouldApplyMerchantTransferState('PROCESSING', 'SUCCESS')).toBe(true);
     expect(shouldApplyMerchantTransferState('SUCCESS', 'PROCESSING')).toBe(false);
+    expect(shouldApplyMerchantTransferState('CANCELING', 'TRANSFERING')).toBe(false);
+    expect(shouldApplyMerchantTransferState('TRANSFERING', 'CANCELING')).toBe(true);
   });
 
   it('blocks a transfer when any merchant limit would be exceeded', () => {

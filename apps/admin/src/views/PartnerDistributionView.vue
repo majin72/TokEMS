@@ -25,8 +25,15 @@ const selectedRequestIds = ref<string[]>([]);
 const enableForm = reactive({ publicUserId: '', ratePercent: '10', note: '' });
 const adjustmentForm = reactive({ partnerId: '', direction: 'credit', amountYuan: '', reason: '' });
 const reconciliationForm = reactive({
-  batchId: '', windowStart: '', windowEnd: '', checkedCount: '', differenceCount: '',
-  differenceAmountYuan: '', evidenceReference: '', evidenceDigest: '', note: '',
+  batchId: '',
+  windowStart: '',
+  windowEnd: '',
+  checkedCount: '',
+  differenceCount: '',
+  differenceAmountYuan: '',
+  evidenceReference: '',
+  evidenceDigest: '',
+  note: '',
 });
 const programForm = reactive({
   mode: 'fixed' as 'fixed' | 'order_count_tiered',
@@ -38,7 +45,8 @@ const programForm = reactive({
   publicDirectoryEnabled: false,
   homepageLimit: '12',
   termsTitle: '大会合作伙伴推广规则',
-  termsContent: '合作伙伴应使用本人专属链接开展真实推广。佣金按成功付款且符合资格的订单明细计算，退款与自购会按规则冲正。',
+  termsContent:
+    '合作伙伴应使用本人专属链接开展真实推广。佣金按成功付款且符合资格的订单明细计算，退款与自购会按规则冲正。',
   promotionPolicy: '推广内容应真实、清晰，不得承诺大会未公开的权益。',
 });
 const transferForm = reactive({
@@ -53,7 +61,9 @@ const transferForm = reactive({
 });
 
 const canManagePartners = computed(() => session.can('event.partner.manage'));
-const canReadPartners = computed(() => session.can('event.partner.read') || canManagePartners.value);
+const canReadPartners = computed(
+  () => session.can('event.partner.read') || canManagePartners.value,
+);
 const canManageRules = computed(() => session.can('event.partner.rules.manage'));
 const canReadCommissions = computed(() => session.can('event.commission.read'));
 const canManageCommissions = computed(() => session.can('event.commission.manage'));
@@ -65,13 +75,13 @@ const canReadPayoutSettings = computed(
   () => session.can('org.payout.settings.read') || canManagePayoutSettings.value,
 );
 const tabs = computed<Array<{ id: Tab; label: string }>>(() => [
-  ...((canReadPartners.value || canReadCommissions.value)
+  ...(canReadPartners.value || canReadCommissions.value
     ? [{ id: 'overview' as const, label: '概览' }]
     : []),
   ...(canReadPartners.value ? [{ id: 'partners' as const, label: '合作伙伴' }] : []),
   ...(canReadCommissions.value ? [{ id: 'commissions' as const, label: '佣金订单' }] : []),
   ...(canReviewPayouts.value ? [{ id: 'payouts' as const, label: '提现与对账' }] : []),
-  ...((canManageRules.value || canReadPayoutSettings.value)
+  ...(canManageRules.value || canReadPayoutSettings.value
     ? [{ id: 'settings' as const, label: '分销设置' }]
     : []),
 ]);
@@ -92,11 +102,30 @@ function dateTime(value: unknown) {
 
 function label(value: unknown) {
   const labels: Record<string, string> = {
-    pending_confirmation: '待确认', active: '生效中', paused: '已暂停', closed: '已关闭',
-    provisional: '预计', pending: '等待释放', available: '可提现', reserved: '已占用', paid: '已结算',
-    submitted: '待审核', approved: '已通过', batched: '已组批', executing: '出款中', succeeded: '已到账',
-    rejected: '已驳回', unknown: '待查单', draft: '待复核', completed: '已完成', held: '已暂停', cancelled: '已取消',
-    open: '待处理', under_review: '待复核', resolved: '已解决', failed: '失败',
+    pending_confirmation: '待确认',
+    active: '生效中',
+    paused: '已暂停',
+    closed: '已关闭',
+    provisional: '预计',
+    pending: '等待释放',
+    available: '可提现',
+    reserved: '已占用',
+    paid: '已结算',
+    submitted: '待审核',
+    approved: '已通过',
+    batched: '已组批',
+    executing: '出款中',
+    succeeded: '已到账',
+    rejected: '已驳回',
+    unknown: '待查单',
+    draft: '待复核',
+    completed: '已完成',
+    held: '已暂停',
+    cancelled: '已取消',
+    open: '待处理',
+    under_review: '待复核',
+    resolved: '已解决',
+    failed: '失败',
   };
   return labels[String(value)] ?? String(value ?? '—');
 }
@@ -137,10 +166,16 @@ function hydrateProgram() {
 function hydrateTransfer() {
   const configuration = (payoutSettings.value.configuration ?? {}) as Record<string, unknown>;
   transferForm.enabled = configuration.enabled === true;
-  transferForm.singleTransferYuan = String(Number(configuration.singleTransferLimit ?? 20000) / 100);
+  transferForm.singleTransferYuan = String(
+    Number(configuration.singleTransferLimit ?? 20000) / 100,
+  );
   transferForm.dailyUserYuan = String(Number(configuration.dailyUserLimit ?? 200000) / 100);
-  transferForm.dailyMerchantYuan = String(Number(configuration.dailyMerchantLimit ?? 5000000) / 100);
-  transferForm.monthlyMerchantYuan = String(Number(configuration.monthlyMerchantLimit ?? 3000000000) / 100);
+  transferForm.dailyMerchantYuan = String(
+    Number(configuration.dailyMerchantLimit ?? 5000000) / 100,
+  );
+  transferForm.monthlyMerchantYuan = String(
+    Number(configuration.monthlyMerchantLimit ?? 3000000000) / 100,
+  );
   transferForm.jobType = String(configuration.jobType ?? transferForm.jobType);
   transferForm.remunerationDescription = String(
     configuration.remunerationDescription ?? transferForm.remunerationDescription,
@@ -152,32 +187,36 @@ async function load() {
   loading.value = true;
   errorMessage.value = '';
   try {
-    const [overviewResult, partnerResult, commissionResult, inquiryResult, payoutResult, settingsResult] =
-      await Promise.all([
-        canReadPartners.value || canReadCommissions.value
-          ? conferenceApi.getPartnerDistributionOverview()
-          : Promise.resolve({}),
-        canReadPartners.value ? conferenceApi.getEventPartners() : Promise.resolve({ items: [] }),
-        canReadCommissions.value
-          ? conferenceApi.getPartnerCommissions()
-          : Promise.resolve({ items: [] }),
-        canReadCommissions.value
-          ? conferenceApi.getPartnerCommissionInquiries()
-          : Promise.resolve({ items: [] }),
-        canReviewPayouts.value
-          ? conferenceApi.getPartnerPayouts()
-          : Promise.resolve({
-              requests: [],
-              batches: [],
-              inquiries: [],
-              recipients: [],
-              documents: [],
-              reconciliations: [],
-            }),
-        canReadPayoutSettings.value
-          ? conferenceApi.getPartnerPayoutSettings()
-          : Promise.resolve({}),
-      ]);
+    const [
+      overviewResult,
+      partnerResult,
+      commissionResult,
+      inquiryResult,
+      payoutResult,
+      settingsResult,
+    ] = await Promise.all([
+      canReadPartners.value || canReadCommissions.value
+        ? conferenceApi.getPartnerDistributionOverview()
+        : Promise.resolve({}),
+      canReadPartners.value ? conferenceApi.getEventPartners() : Promise.resolve({ items: [] }),
+      canReadCommissions.value
+        ? conferenceApi.getPartnerCommissions()
+        : Promise.resolve({ items: [] }),
+      canReadCommissions.value
+        ? conferenceApi.getPartnerCommissionInquiries()
+        : Promise.resolve({ items: [] }),
+      canReviewPayouts.value
+        ? conferenceApi.getPartnerPayouts()
+        : Promise.resolve({
+            requests: [],
+            batches: [],
+            inquiries: [],
+            recipients: [],
+            documents: [],
+            reconciliations: [],
+          }),
+      canReadPayoutSettings.value ? conferenceApi.getPartnerPayoutSettings() : Promise.resolve({}),
+    ]);
     overview.value = overviewResult;
     partners.value = partnerResult.items;
     commissions.value = commissionResult.items;
@@ -218,45 +257,48 @@ async function run(action: () => Promise<unknown>, message: string) {
 
 function enablePartner() {
   return run(
-    () => conferenceApi.enableEventPartner({
-      customerPublicUserId: Number(enableForm.publicUserId),
-      personalRateBps: enableForm.ratePercent ? numberValue(enableForm.ratePercent, 100) : null,
-      sortOrder: 0,
-      internalNote: enableForm.note,
-      sendInvitation: true,
-    }),
+    () =>
+      conferenceApi.enableEventPartner({
+        customerPublicUserId: Number(enableForm.publicUserId),
+        personalRateBps: enableForm.ratePercent ? numberValue(enableForm.ratePercent, 100) : null,
+        sortOrder: 0,
+        internalNote: enableForm.note,
+        sendInvitation: true,
+      }),
     '合作伙伴资格已开通，用户确认规则后开始归因。',
   );
 }
 
 function updatePartner(item: PartnerRelationshipView, status: 'active' | 'paused' | 'closed') {
   return run(
-    () => conferenceApi.updateEventPartner(item.id, {
-      expectedVersion: item.version,
-      qualificationStatus: status,
-      attributionEnabled: status === 'active',
-    }),
+    () =>
+      conferenceApi.updateEventPartner(item.id, {
+        expectedVersion: item.version,
+        qualificationStatus: status,
+        attributionEnabled: status === 'active',
+      }),
     '合作伙伴状态已更新。',
   );
 }
 
 function publishProgram() {
   return run(
-    () => conferenceApi.publishPartnerProgram({
-      mode: programForm.mode,
-      fixedRateBps: numberValue(programForm.ratePercent, 100),
-      tiers: programForm.mode === 'order_count_tiered' ? parseTiers() : [],
-      eligibleTicketTypeIds: [],
-      attributionDays: numberValue(programForm.attributionDays),
-      settlementDelayDays: numberValue(programForm.settlementDelayDays),
-      minimumPayoutAmount: numberValue(programForm.minimumPayoutYuan, 100),
-      payoutCadence: 'weekly',
-      termsTitle: programForm.termsTitle,
-      termsContent: programForm.termsContent,
-      promotionPolicy: programForm.promotionPolicy,
-      publicDirectoryEnabled: programForm.publicDirectoryEnabled,
-      homepageLimit: numberValue(programForm.homepageLimit),
-    }),
+    () =>
+      conferenceApi.publishPartnerProgram({
+        mode: programForm.mode,
+        fixedRateBps: numberValue(programForm.ratePercent, 100),
+        tiers: programForm.mode === 'order_count_tiered' ? parseTiers() : [],
+        eligibleTicketTypeIds: [],
+        attributionDays: numberValue(programForm.attributionDays),
+        settlementDelayDays: numberValue(programForm.settlementDelayDays),
+        minimumPayoutAmount: numberValue(programForm.minimumPayoutYuan, 100),
+        payoutCadence: 'weekly',
+        termsTitle: programForm.termsTitle,
+        termsContent: programForm.termsContent,
+        promotionPolicy: programForm.promotionPolicy,
+        publicDirectoryEnabled: programForm.publicDirectoryEnabled,
+        homepageLimit: numberValue(programForm.homepageLimit),
+      }),
     '新版分销规则已发布，现有合作伙伴需重新确认。',
   );
 }
@@ -265,7 +307,10 @@ function reviewPayout(item: MoneyRow, decision: 'approve' | 'reject') {
   let taxAmount: number | undefined;
   if (decision === 'approve') {
     const grossYuan = Number(item.grossAmount ?? 0) / 100;
-    const input = window.prompt(`请输入本次代扣税费（元），税前金额为 ¥${grossYuan.toFixed(2)}`, '0');
+    const input = window.prompt(
+      `请输入本次代扣税费（元），税前金额为 ¥${grossYuan.toFixed(2)}`,
+      '0',
+    );
     if (input === null) return;
     const value = Number(input);
     if (!Number.isFinite(value) || value < 0 || value > grossYuan) {
@@ -275,35 +320,40 @@ function reviewPayout(item: MoneyRow, decision: 'approve' | 'reject') {
     taxAmount = Math.round(value * 100);
   }
   return run(
-    () => conferenceApi.reviewPartnerPayout(String(item.id), {
-      expectedVersion: Number(item.version),
-      decision,
-      reason: decision === 'approve' ? '资料与金额已核验' : '收款资料需补充',
-      ...(taxAmount === undefined ? {} : { taxAmount }),
-    }),
-    decision === 'approve' ? '结算金额已核定，等待合作伙伴确认。' : '提现申请已驳回并释放占用金额。',
+    () =>
+      conferenceApi.reviewPartnerPayout(String(item.id), {
+        expectedVersion: Number(item.version),
+        decision,
+        reason: decision === 'approve' ? '资料与金额已核验' : '收款资料需补充',
+        ...(taxAmount === undefined ? {} : { taxAmount }),
+      }),
+    decision === 'approve'
+      ? '结算金额已核定，等待合作伙伴确认。'
+      : '提现申请已驳回并释放占用金额。',
   );
 }
 
 function createBatch(channel: 'manual_bank' | 'wechat_transfer') {
   return run(
-    () => conferenceApi.createPartnerPayoutBatch({
-      requestIds: selectedRequestIds.value,
-      channel,
-      cutoffAt: new Date().toISOString(),
-      idempotencyKey: `partner-payout-batch-${crypto.randomUUID()}`,
-    }),
+    () =>
+      conferenceApi.createPartnerPayoutBatch({
+        requestIds: selectedRequestIds.value,
+        channel,
+        cutoffAt: new Date().toISOString(),
+        idempotencyKey: `partner-payout-batch-${crypto.randomUUID()}`,
+      }),
     '出款批次已建立，请由另一位管理员复核。',
   );
 }
 
 function reviewBatch(item: MoneyRow, decision: 'approve' | 'hold' | 'cancel') {
   return run(
-    () => conferenceApi.reviewPartnerPayoutBatch(String(item.id), {
-      expectedVersion: Number(item.version),
-      decision,
-      reason: decision === 'approve' ? '批次金额与收款人已复核' : '批次需要调整',
-    }),
+    () =>
+      conferenceApi.reviewPartnerPayoutBatch(String(item.id), {
+        expectedVersion: Number(item.version),
+        decision,
+        reason: decision === 'approve' ? '批次金额与收款人已复核' : '批次需要调整',
+      }),
     '出款批次状态已更新。',
   );
 }
@@ -321,7 +371,10 @@ function payoutBatch(request: MoneyRow) {
 
 function payoutReceipt(request: MoneyRow) {
   return payoutDocuments.value.find(
-    (item) => item.payoutRequestId === request.id && item.kind === 'manual_receipt' && item.status === 'active',
+    (item) =>
+      item.payoutRequestId === request.id &&
+      item.kind === 'manual_receipt' &&
+      item.status === 'active',
   );
 }
 
@@ -331,11 +384,7 @@ function uploadReceipt(item: MoneyRow, event: Event) {
   input.value = '';
   if (!file) return;
   return run(
-    () => conferenceApi.uploadPartnerPayoutDocument(
-      String(item.id),
-      'manual_receipt',
-      file,
-    ),
+    () => conferenceApi.uploadPartnerPayoutDocument(String(item.id), 'manual_receipt', file),
     '人工结算回单已完成加密存储登记。',
   );
 }
@@ -344,12 +393,13 @@ function completeManualPayout(item: MoneyRow) {
   const reference = window.prompt('请输入银行回单号或人工结算凭证编号');
   if (!reference?.trim()) return;
   return run(
-    () => conferenceApi.completeManualPartnerPayout(String(item.id), {
-      expectedVersion: Number(item.version),
-      externalReference: reference.trim(),
-      paidAt: new Date().toISOString(),
-      documentAssetId: payoutReceipt(item)?.id ?? null,
-    }),
+    () =>
+      conferenceApi.completeManualPartnerPayout(String(item.id), {
+        expectedVersion: Number(item.version),
+        externalReference: reference.trim(),
+        paidAt: new Date().toISOString(),
+        documentAssetId: payoutReceipt(item)?.id ?? null,
+      }),
     '人工结算已登记到账。',
   );
 }
@@ -364,19 +414,17 @@ function resolveReconciliation(item: MoneyRow) {
 }
 
 function verifyRecipient(item: MoneyRow) {
-  return run(
-    () => conferenceApi.verifyPartnerRecipient(String(item.id)),
-    '收款信息已验证。',
-  );
+  return run(() => conferenceApi.verifyPartnerRecipient(String(item.id)), '收款信息已验证。');
 }
 
 function resolveInquiry(item: MoneyRow, decision: 'explained' | 'rejected') {
   return run(
-    () => conferenceApi.resolvePartnerInquiry(String(item.id), {
-      expectedVersion: Number(item.version),
-      decision,
-      reason: decision === 'explained' ? '订单与佣金明细已核对并向合作伙伴说明' : '申诉证据不足',
-    }),
+    () =>
+      conferenceApi.resolvePartnerInquiry(String(item.id), {
+        expectedVersion: Number(item.version),
+        decision,
+        reason: decision === 'explained' ? '订单与佣金明细已核对并向合作伙伴说明' : '申诉证据不足',
+      }),
     '佣金申诉已处理。',
   );
 }
@@ -385,12 +433,13 @@ function adjustInquiry(item: MoneyRow, direction: 'credit_adjustment' | 'debit_a
   const amount = window.prompt('请输入调整金额（元）');
   if (!amount || Number(amount) <= 0) return;
   return run(
-    () => conferenceApi.resolvePartnerInquiry(String(item.id), {
-      expectedVersion: Number(item.version),
-      decision: direction,
-      reason: direction === 'credit_adjustment' ? '申诉核对后补记佣金' : '申诉核对后冲减佣金',
-      adjustmentAmount: Math.round(Number(amount) * 100),
-    }),
+    () =>
+      conferenceApi.resolvePartnerInquiry(String(item.id), {
+        expectedVersion: Number(item.version),
+        decision: direction,
+        reason: direction === 'credit_adjustment' ? '申诉核对后补记佣金' : '申诉核对后冲减佣金',
+        adjustmentAmount: Math.round(Number(amount) * 100),
+      }),
     Math.round(Number(amount) * 100) >= 100000
       ? '大额调整已提交，需另一位管理员复核相同内容。'
       : '佣金调整已记入账本。',
@@ -402,11 +451,12 @@ function createCommissionAdjustment() {
   if (!adjustmentForm.partnerId || !Number.isSafeInteger(cents) || cents <= 0) return;
   const amount = adjustmentForm.direction === 'debit' ? -cents : cents;
   return run(
-    () => conferenceApi.createPartnerCommissionAdjustment({
-      partnerId: adjustmentForm.partnerId,
-      amount,
-      reason: adjustmentForm.reason,
-    }),
+    () =>
+      conferenceApi.createPartnerCommissionAdjustment({
+        partnerId: adjustmentForm.partnerId,
+        amount,
+        reason: adjustmentForm.reason,
+      }),
     cents >= 100_000
       ? '大额调整已生成待复核记录，需要另一位管理员按原金额复核。'
       : '佣金调整已写入追加式账本。',
@@ -423,39 +473,44 @@ function createReconciliation() {
     !Number.isSafeInteger(checkedCount) ||
     !Number.isSafeInteger(differenceCount) ||
     !Number.isSafeInteger(differenceAmount)
-  ) return;
+  )
+    return;
   return run(
-    () => conferenceApi.createPartnerReconciliation({
-      kind: 'payouts',
-      batchId: reconciliationForm.batchId || null,
-      windowStart: new Date(reconciliationForm.windowStart).toISOString(),
-      windowEnd: new Date(reconciliationForm.windowEnd).toISOString(),
-      checkedCount,
-      differenceCount,
-      differenceAmount,
-      evidenceReference: reconciliationForm.evidenceReference,
-      evidenceDigest: reconciliationForm.evidenceDigest,
-      note: reconciliationForm.note,
-    }),
+    () =>
+      conferenceApi.createPartnerReconciliation({
+        kind: 'payouts',
+        batchId: reconciliationForm.batchId || null,
+        windowStart: new Date(reconciliationForm.windowStart).toISOString(),
+        windowEnd: new Date(reconciliationForm.windowEnd).toISOString(),
+        checkedCount,
+        differenceCount,
+        differenceAmount,
+        evidenceReference: reconciliationForm.evidenceReference,
+        evidenceDigest: reconciliationForm.evidenceDigest,
+        note: reconciliationForm.note,
+      }),
     differenceCount ? '资金账单差异已登记，相关新出款已暂停。' : '资金账单核对结果已登记。',
   );
 }
 
 function saveTransferSettings() {
   return run(
-    () => conferenceApi.updatePartnerPayoutSettings({
-      expectedRevision: Number(payoutSettings.value.revision ?? 0),
-      enabled: transferForm.enabled,
-      sceneId: '1005',
-      jobType: transferForm.jobType,
-      remunerationDescription: transferForm.remunerationDescription,
-      payoutCadence: 'weekly',
-      singleTransferLimit: numberValue(transferForm.singleTransferYuan, 100),
-      dailyUserLimit: numberValue(transferForm.dailyUserYuan, 100),
-      dailyMerchantLimit: numberValue(transferForm.dailyMerchantYuan, 100),
-      monthlyMerchantLimit: numberValue(transferForm.monthlyMerchantYuan, 100),
-      verifiedAt: transferForm.verifiedAt ? new Date(transferForm.verifiedAt).toISOString() : null,
-    }),
+    () =>
+      conferenceApi.updatePartnerPayoutSettings({
+        expectedRevision: Number(payoutSettings.value.revision ?? 0),
+        enabled: transferForm.enabled,
+        sceneId: '1005',
+        jobType: transferForm.jobType,
+        remunerationDescription: transferForm.remunerationDescription,
+        payoutCadence: 'weekly',
+        singleTransferLimit: numberValue(transferForm.singleTransferYuan, 100),
+        dailyUserLimit: numberValue(transferForm.dailyUserYuan, 100),
+        dailyMerchantLimit: numberValue(transferForm.dailyMerchantYuan, 100),
+        monthlyMerchantLimit: numberValue(transferForm.monthlyMerchantYuan, 100),
+        verifiedAt: transferForm.verifiedAt
+          ? new Date(transferForm.verifiedAt).toISOString()
+          : null,
+      }),
     payoutSettings.value.pending
       ? '商家转账配置已完成复核。'
       : '商家转账配置已提交，需另一位管理员复核。',
@@ -504,37 +559,132 @@ onMounted(() => void load());
 
   <template v-else-if="activeTab === 'overview'">
     <section class="partner-metrics">
-      <article><span>有效合作伙伴</span><strong>{{ counts.active ?? 0 }}</strong><small>待确认 {{ counts.pending_confirmation ?? 0 }} 人</small></article>
-      <article><span>等待释放佣金</span><strong>{{ money(commissionTotals.pending) }}</strong><small>默认等待 7 天及退款窗口</small></article>
-      <article><span>可提现佣金</span><strong>{{ money(commissionTotals.available) }}</strong><small>税前满 10 元可申请</small></article>
-      <article><span>提现待处理</span><strong>{{ money((payoutTotals.submitted ?? 0) + (payoutTotals.approved ?? 0)) }}</strong><small>默认每周组批</small></article>
+      <article>
+        <span>有效合作伙伴</span><strong>{{ counts.active ?? 0 }}</strong><small>待确认 {{ counts.pending_confirmation ?? 0 }} 人</small>
+      </article>
+      <article>
+        <span>等待释放佣金</span><strong>{{ money(commissionTotals.pending) }}</strong><small>默认等待 7 天及退款窗口</small>
+      </article>
+      <article>
+        <span>可提现佣金</span><strong>{{ money(commissionTotals.available) }}</strong><small>税前满 10 元可申请</small>
+      </article>
+      <article>
+        <span>提现待处理</span><strong>{{ money((payoutTotals.submitted ?? 0) + (payoutTotals.approved ?? 0)) }}</strong><small>默认每周组批</small>
+      </article>
     </section>
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">CONTROL BOARD</p><h2>当前运行规则</h2></div><span class="state-dot">{{ program ? '已配置' : '功能关闭' }}</span></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">CONTROL BOARD</p>
+          <h2>当前运行规则</h2>
+        </div>
+        <span class="state-dot">{{ program ? '已配置' : '功能关闭' }}</span>
+      </div>
       <dl class="rule-grid">
-        <div><dt>佣金方式</dt><dd>{{ program?.mode === 'order_count_tiered' ? '阶梯比例' : '固定比例' }}</dd></div>
-        <div><dt>基础比例</dt><dd>{{ Number(program?.fixedRateBps ?? 1000) / 100 }}%</dd></div>
-        <div><dt>归因有效期</dt><dd>{{ program?.attributionDays ?? 30 }} 天</dd></div>
-        <div><dt>公开目录</dt><dd>{{ program?.publicDirectoryEnabled ? '已开启' : '已关闭' }}</dd></div>
+        <div>
+          <dt>佣金方式</dt>
+          <dd>{{ program?.mode === 'order_count_tiered' ? '阶梯比例' : '固定比例' }}</dd>
+        </div>
+        <div>
+          <dt>基础比例</dt>
+          <dd>{{ Number(program?.fixedRateBps ?? 1000) / 100 }}%</dd>
+        </div>
+        <div>
+          <dt>归因有效期</dt>
+          <dd>{{ program?.attributionDays ?? 30 }} 天</dd>
+        </div>
+        <div>
+          <dt>公开目录</dt>
+          <dd>{{ program?.publicDirectoryEnabled ? '已开启' : '已关闭' }}</dd>
+        </div>
       </dl>
     </section>
   </template>
 
   <template v-else-if="activeTab === 'partners'">
     <section v-if="canManagePartners" class="partner-panel inline-form">
-      <div><p class="eyebrow">QUICK ENABLE</p><h2>按大会开通合作伙伴</h2><p>用户编号可在系统管理的用户列表查看。</p></div>
-      <label>用户编号<input v-model="enableForm.publicUserId" inputmode="numeric" placeholder="例如 1024" /></label>
+      <div>
+        <p class="eyebrow">QUICK ENABLE</p>
+        <h2>按大会开通合作伙伴</h2>
+        <p>用户编号可在系统管理的用户列表查看。</p>
+      </div>
+      <label>用户编号<input
+        v-model="enableForm.publicUserId"
+        inputmode="numeric"
+        placeholder="例如 1024"
+      /></label>
       <label>个人佣金比例<input v-model="enableForm.ratePercent" inputmode="decimal" /><span>%</span></label>
       <label>内部备注<input v-model="enableForm.note" maxlength="2000" /></label>
-      <button class="button" type="button" :disabled="pending || !enableForm.publicUserId" @click="enablePartner">开通资格</button>
+      <button
+        class="button"
+        type="button"
+        :disabled="pending || !enableForm.publicUserId"
+        @click="enablePartner"
+      >
+        开通资格
+      </button>
     </section>
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">PARTNER DIRECTORY</p><h2>合作伙伴列表</h2></div><span>{{ partners.length }} 人</span></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">PARTNER DIRECTORY</p>
+          <h2>合作伙伴列表</h2>
+        </div>
+        <span>{{ partners.length }} 人</span>
+      </div>
       <div class="data-table-wrap">
         <table class="data-table">
-          <thead><tr><th>伙伴</th><th>公开资料</th><th>佣金比例</th><th>收益余额</th><th>状态</th><th>操作</th></tr></thead><tbody>
-            <tr v-for="item in partners" :key="item.id"><td><strong>{{ item.profile.displayName }}</strong><small>{{ item.profile.company || '未填写公司' }}</small></td><td>{{ label(item.profile.publicStatus) }}</td><td>{{ (item.personalRateBps ?? item.currentProgram?.fixedRateBps ?? 0) / 100 }}%</td><td>{{ money(item.balances.available) }}<small>占用 {{ money(item.balances.reserved) }}</small></td><td><span class="status-badge">{{ label(item.qualificationStatus) }}</span></td><td><div class="row-actions"><button v-if="canManagePartners && item.qualificationStatus !== 'active'" type="button" @click="updatePartner(item, 'active')">启用</button><button v-if="canManagePartners && item.qualificationStatus === 'active'" type="button" @click="updatePartner(item, 'paused')">暂停</button><button v-if="canManagePartners && item.qualificationStatus !== 'closed'" type="button" @click="updatePartner(item, 'closed')">关闭</button></div></td></tr>
-            <tr v-if="!partners.length"><td colspan="6" class="admin-empty">当前大会还没有开通合作伙伴。</td></tr>
+          <thead>
+            <tr>
+              <th>伙伴</th>
+              <th>公开资料</th>
+              <th>佣金比例</th>
+              <th>收益余额</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in partners" :key="item.id">
+              <td>
+                <strong>{{ item.profile.displayName }}</strong><small>{{ item.profile.company || '未填写公司' }}</small>
+              </td>
+              <td>{{ label(item.profile.publicStatus) }}</td>
+              <td>{{ (item.personalRateBps ?? item.currentProgram?.fixedRateBps ?? 0) / 100 }}%</td>
+              <td>
+                {{ money(item.balances.available)
+                }}<small>占用 {{ money(item.balances.reserved) }}</small>
+              </td>
+              <td>
+                <span class="status-badge">{{ label(item.qualificationStatus) }}</span>
+              </td>
+              <td>
+                <div class="row-actions">
+                  <button
+                    v-if="canManagePartners && item.qualificationStatus !== 'active'"
+                    type="button"
+                    @click="updatePartner(item, 'active')"
+                  >
+                    启用
+                  </button><button
+                    v-if="canManagePartners && item.qualificationStatus === 'active'"
+                    type="button"
+                    @click="updatePartner(item, 'paused')"
+                  >
+                    暂停
+                  </button><button
+                    v-if="canManagePartners && item.qualificationStatus !== 'closed'"
+                    type="button"
+                    @click="updatePartner(item, 'closed')"
+                  >
+                    关闭
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!partners.length">
+              <td colspan="6" class="admin-empty">当前大会还没有开通合作伙伴。</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -542,108 +692,844 @@ onMounted(() => void load());
   </template>
 
   <template v-else-if="activeTab === 'commissions'">
-    <form v-if="canManageCommissions" class="partner-panel adjustment-form" @submit.prevent="createCommissionAdjustment">
-      <div><p class="eyebrow">LEDGER ADJUSTMENT</p><h2>佣金调整</h2><p>调整直接写入追加式账本，金额达到 1,000 元时需要第二位管理员复核。</p></div>
-      <label>合作伙伴<select v-model="adjustmentForm.partnerId" required><option value="">请选择</option><option v-for="item in partners" :key="item.id" :value="item.id">{{ item.profile.displayName }}</option></select></label>
-      <label>方向<select v-model="adjustmentForm.direction"><option value="credit">补记佣金</option><option value="debit">冲减佣金</option></select></label>
-      <label>金额（元）<input v-model="adjustmentForm.amountYuan" type="number" min="0.01" step="0.01" required /></label>
+    <form
+      v-if="canManageCommissions"
+      class="partner-panel adjustment-form"
+      @submit.prevent="createCommissionAdjustment"
+    >
+      <div>
+        <p class="eyebrow">LEDGER ADJUSTMENT</p>
+        <h2>佣金调整</h2>
+        <p>调整直接写入追加式账本，金额达到 1,000 元时需要第二位管理员复核。</p>
+      </div>
+      <label>合作伙伴<select v-model="adjustmentForm.partnerId" required>
+        <option value="">请选择</option>
+        <option v-for="item in partners" :key="item.id" :value="item.id">
+          {{ item.profile.displayName }}
+        </option>
+      </select></label>
+      <label>方向<select v-model="adjustmentForm.direction">
+        <option value="credit">补记佣金</option>
+        <option value="debit">冲减佣金</option>
+      </select></label>
+      <label>金额（元）<input
+        v-model="adjustmentForm.amountYuan"
+        type="number"
+        min="0.01"
+        step="0.01"
+        required
+      /></label>
       <label>原因<input v-model="adjustmentForm.reason" minlength="5" maxlength="2000" required /></label>
       <button class="button" type="submit" :disabled="pending">提交调整</button>
     </form>
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">COMMISSION ORDERS</p><h2>佣金订单</h2></div><span>{{ commissions.length }} 笔</span></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">COMMISSION ORDERS</p>
+          <h2>佣金订单</h2>
+        </div>
+        <span>{{ commissions.length }} 笔</span>
+      </div>
       <div class="data-table-wrap">
         <table class="data-table">
-          <thead><tr><th>订单</th><th>计佣金额</th><th>比例</th><th>佣金</th><th>退款冲正</th><th>状态</th><th>建立时间</th></tr></thead><tbody>
-            <tr v-for="item in commissions" :key="String(item.id)"><td><code>{{ String(item.orderId ?? '').slice(0, 12) }}</code></td><td>{{ money(item.eligibleAmount) }}</td><td>{{ Number(item.rateBps ?? 0) / 100 }}%</td><td>{{ money(item.commissionAmount) }}</td><td>{{ money(item.reversedAmount) }}</td><td><span class="status-badge">{{ label(item.status) }}</span></td><td>{{ dateTime(item.createdAt) }}</td></tr>
-            <tr v-if="!commissions.length"><td colspan="7" class="admin-empty">暂无佣金订单。</td></tr>
+          <thead>
+            <tr>
+              <th>订单</th>
+              <th>计佣金额</th>
+              <th>比例</th>
+              <th>佣金</th>
+              <th>退款冲正</th>
+              <th>状态</th>
+              <th>建立时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in commissions" :key="String(item.id)">
+              <td>
+                <code>{{ String(item.orderId ?? '').slice(0, 12) }}</code>
+              </td>
+              <td>{{ money(item.eligibleAmount) }}</td>
+              <td>{{ Number(item.rateBps ?? 0) / 100 }}%</td>
+              <td>{{ money(item.commissionAmount) }}</td>
+              <td>{{ money(item.reversedAmount) }}</td>
+              <td>
+                <span class="status-badge">{{ label(item.status) }}</span>
+              </td>
+              <td>{{ dateTime(item.createdAt) }}</td>
+            </tr>
+            <tr v-if="!commissions.length">
+              <td colspan="7" class="admin-empty">暂无佣金订单。</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">INQUIRIES</p><h2>佣金申诉与调整复核</h2></div><span>{{ inquiries.length }} 条</span></div>
-      <div class="data-table-wrap"><table class="data-table"><thead><tr><th>订单线索</th><th>问题说明</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in inquiries" :key="String(item.id)"><td>{{ item.orderReference }}</td><td>{{ item.description }}</td><td>{{ label(item.status) }}</td><td><div v-if="['open', 'under_review'].includes(String(item.status))" class="row-actions"><button type="button" @click="resolveInquiry(item, 'explained')">已说明</button><button type="button" @click="resolveInquiry(item, 'rejected')">驳回</button><button v-if="canManageCommissions" type="button" @click="adjustInquiry(item, 'credit_adjustment')">补记佣金</button><button v-if="canManageCommissions" type="button" @click="adjustInquiry(item, 'debit_adjustment')">冲减佣金</button></div></td></tr><tr v-if="!inquiries.length"><td colspan="4" class="admin-empty">暂无佣金申诉。</td></tr></tbody></table></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">INQUIRIES</p>
+          <h2>佣金申诉与调整复核</h2>
+        </div>
+        <span>{{ inquiries.length }} 条</span>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>订单线索</th>
+              <th>问题说明</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in inquiries" :key="String(item.id)">
+              <td>{{ item.orderReference }}</td>
+              <td>{{ item.description }}</td>
+              <td>{{ label(item.status) }}</td>
+              <td>
+                <div
+                  v-if="['open', 'under_review'].includes(String(item.status))"
+                  class="row-actions"
+                >
+                  <button type="button" @click="resolveInquiry(item, 'explained')">已说明</button><button type="button" @click="resolveInquiry(item, 'rejected')">驳回</button><button
+                    v-if="canManageCommissions"
+                    type="button"
+                    @click="adjustInquiry(item, 'credit_adjustment')"
+                  >
+                    补记佣金
+                  </button><button
+                    v-if="canManageCommissions"
+                    type="button"
+                    @click="adjustInquiry(item, 'debit_adjustment')"
+                  >
+                    冲减佣金
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!inquiries.length">
+              <td colspan="4" class="admin-empty">暂无佣金申诉。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </template>
 
   <template v-else-if="activeTab === 'payouts'">
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">PAYOUT REQUESTS</p><h2>提现申请</h2></div><div class="row-actions"><button v-if="canExportPayouts" class="button secondary compact" type="button" @click="exportPayouts">导出对账表</button><button v-if="canReviewPayouts" class="button secondary compact" type="button" :disabled="!selectedRequestIds.length" @click="createBatch('manual_bank')">组成人工结算批次</button><button v-if="canReviewPayouts" class="button compact" type="button" :disabled="!selectedRequestIds.length" @click="createBatch('wechat_transfer')">组成微信批次</button></div></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">PAYOUT REQUESTS</p>
+          <h2>提现申请</h2>
+        </div>
+        <div class="row-actions">
+          <button
+            v-if="canExportPayouts"
+            class="button secondary compact"
+            type="button"
+            @click="exportPayouts"
+          >
+            导出对账表
+          </button><button
+            v-if="canReviewPayouts"
+            class="button secondary compact"
+            type="button"
+            :disabled="!selectedRequestIds.length"
+            @click="createBatch('manual_bank')"
+          >
+            组成人工结算批次
+          </button><button
+            v-if="canReviewPayouts"
+            class="button compact"
+            type="button"
+            :disabled="!selectedRequestIds.length"
+            @click="createBatch('wechat_transfer')"
+          >
+            组成微信批次
+          </button>
+        </div>
+      </div>
       <div class="data-table-wrap">
         <table class="data-table">
-          <thead><tr><th>选择</th><th>申请金额</th><th>税额</th><th>净额</th><th>状态</th><th>申请时间</th><th>操作</th></tr></thead><tbody>
-            <tr v-for="item in payoutRequests" :key="String(item.id)"><td><input v-if="item.status === 'approved'" v-model="selectedRequestIds" type="checkbox" :value="String(item.id)" /></td><td>{{ money(item.grossAmount) }}</td><td>{{ money(item.taxAmount) }}</td><td>{{ money(item.netAmount) }}</td><td><span class="status-badge">{{ label(item.status) }}</span></td><td>{{ dateTime(item.createdAt) }}</td><td><div class="row-actions"><template v-if="item.status === 'submitted' && canReviewPayouts"><button type="button" @click="reviewPayout(item, 'approve')">通过</button><button type="button" @click="reviewPayout(item, 'reject')">驳回</button></template><label v-if="item.status === 'batched' && payoutBatch(item)?.channel === 'manual_bank' && canExecutePayouts" class="file-action">{{ payoutReceipt(item) ? '回单已存档' : '上传回单' }}<input type="file" accept="application/pdf,image/jpeg,image/png" @change="uploadReceipt(item, $event)" /></label><button v-if="item.status === 'batched' && payoutBatch(item)?.channel === 'manual_bank' && payoutBatch(item)?.status === 'approved' && canExecutePayouts" type="button" @click="completeManualPayout(item)">登记到账</button></div></td></tr>
-            <tr v-if="!payoutRequests.length"><td colspan="7" class="admin-empty">暂无提现申请。</td></tr>
+          <thead>
+            <tr>
+              <th>选择</th>
+              <th>申请金额</th>
+              <th>税额</th>
+              <th>净额</th>
+              <th>状态</th>
+              <th>申请时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in payoutRequests" :key="String(item.id)">
+              <td>
+                <input
+                  v-if="item.status === 'approved' && !item.batchId"
+                  v-model="selectedRequestIds"
+                  type="checkbox"
+                  :value="String(item.id)"
+                />
+              </td>
+              <td>{{ money(item.grossAmount) }}</td>
+              <td>{{ money(item.taxAmount) }}</td>
+              <td>{{ money(item.netAmount) }}</td>
+              <td>
+                <span class="status-badge">{{ label(item.status) }}</span>
+              </td>
+              <td>{{ dateTime(item.createdAt) }}</td>
+              <td>
+                <div class="row-actions">
+                  <template v-if="item.status === 'submitted' && canReviewPayouts">
+                    <button type="button" @click="reviewPayout(item, 'approve')">通过</button><button type="button" @click="reviewPayout(item, 'reject')">
+                      驳回
+                    </button>
+                  </template><button
+                    v-if="
+                      ['under_review', 'approved'].includes(String(item.status)) &&
+                        !item.batchId &&
+                        canReviewPayouts
+                    "
+                    type="button"
+                    @click="reviewPayout(item, 'reject')"
+                  >
+                    驳回并释放
+                  </button><label
+                    v-if="
+                      item.status === 'batched' &&
+                        payoutBatch(item)?.channel === 'manual_bank' &&
+                        canExecutePayouts
+                    "
+                    class="file-action"
+                  >{{ payoutReceipt(item) ? '回单已存档' : '上传回单'
+                  }}<input
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png"
+                    @change="uploadReceipt(item, $event)"
+                  /></label><button
+                    v-if="
+                      item.status === 'batched' &&
+                        payoutBatch(item)?.channel === 'manual_bank' &&
+                        payoutBatch(item)?.status === 'approved' &&
+                        canExecutePayouts
+                    "
+                    type="button"
+                    @click="completeManualPayout(item)"
+                  >
+                    登记到账
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!payoutRequests.length">
+              <td colspan="7" class="admin-empty">暂无提现申请。</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">RECIPIENT REVIEW</p><h2>收款人验证</h2></div><span>敏感账号信息加密保存</span></div>
-      <div class="data-table-wrap"><table class="data-table"><thead><tr><th>伙伴编号</th><th>主体</th><th>渠道</th><th>状态</th><th>提交时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in recipients" :key="String(item.id)"><td><code>{{ String(item.partnerId ?? '').slice(0,12) }}</code></td><td>{{ item.type === 'organization' ? '企业' : '自然人' }}</td><td>{{ item.channel === 'wechat_transfer' ? '微信商家转账' : '人工结算' }}</td><td>{{ label(item.status) }}</td><td>{{ dateTime(item.createdAt) }}</td><td><button v-if="item.status === 'pending' && canReviewPayouts" type="button" @click="verifyRecipient(item)">验证通过</button></td></tr><tr v-if="!recipients.length"><td colspan="6" class="admin-empty">暂无待验证收款人。</td></tr></tbody></table></div>
-    </section>
-    <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">PAYOUT BATCHES</p><h2>出款批次</h2></div><span>执行、回调和查单共用同一状态机</span></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">RECIPIENT REVIEW</p>
+          <h2>收款人验证</h2>
+        </div>
+        <span>敏感账号信息加密保存</span>
+      </div>
       <div class="data-table-wrap">
         <table class="data-table">
-          <thead><tr><th>渠道</th><th>笔数</th><th>金额</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
-            <tr v-for="item in payoutBatches" :key="String(item.id)"><td>{{ item.channel === 'wechat_transfer' ? '微信商家转账' : '人工对公结算' }}</td><td>{{ item.requestCount }}</td><td>{{ money(item.netAmount) }}</td><td><span class="status-badge">{{ label(item.status) }}</span></td><td>{{ dateTime(item.createdAt) }}</td><td><div class="row-actions"><button v-if="item.status === 'draft' && canReviewPayouts" type="button" @click="reviewBatch(item, 'approve')">复核通过</button><button v-if="item.status === 'draft' && canReviewPayouts" type="button" @click="reviewBatch(item, 'cancel')">取消</button><button v-if="item.status === 'approved' && item.channel === 'wechat_transfer' && canExecutePayouts" type="button" @click="executeBatch(item)">执行出款</button></div></td></tr>
+          <thead>
+            <tr>
+              <th>伙伴编号</th>
+              <th>主体</th>
+              <th>渠道</th>
+              <th>状态</th>
+              <th>提交时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in recipients" :key="String(item.id)">
+              <td>
+                <code>{{ String(item.partnerId ?? '').slice(0, 12) }}</code>
+              </td>
+              <td>{{ item.type === 'organization' ? '企业' : '自然人' }}</td>
+              <td>{{ item.channel === 'wechat_transfer' ? '微信商家转账' : '人工结算' }}</td>
+              <td>{{ label(item.status) }}</td>
+              <td>{{ dateTime(item.createdAt) }}</td>
+              <td>
+                <button
+                  v-if="item.status === 'pending' && canReviewPayouts"
+                  type="button"
+                  @click="verifyRecipient(item)"
+                >
+                  验证通过
+                </button>
+              </td>
+            </tr>
+            <tr v-if="!recipients.length">
+              <td colspan="6" class="admin-empty">暂无待验证收款人。</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
-    <form v-if="canExecutePayouts" class="partner-panel reconciliation-form" @submit.prevent="createReconciliation">
-      <div><p class="eyebrow">FUND BILL</p><h2>登记资金账单核对结果</h2><p>保存账单证据编号和 SHA-256。存在差异时，系统会暂停相关批次和新的出款。</p></div>
-      <label>关联批次<select v-model="reconciliationForm.batchId"><option value="">大会全部出款</option><option v-for="item in payoutBatches" :key="String(item.id)" :value="String(item.id)">{{ item.channel === 'wechat_transfer' ? '微信' : '人工' }} · {{ String(item.id).slice(0, 8) }}</option></select></label>
-      <div class="field-pair"><label>账单开始时间<input v-model="reconciliationForm.windowStart" type="datetime-local" required /></label><label>账单结束时间<input v-model="reconciliationForm.windowEnd" type="datetime-local" required /></label></div>
-      <div class="field-pair"><label>检查笔数<input v-model="reconciliationForm.checkedCount" type="number" min="0" step="1" required /></label><label>差异笔数<input v-model="reconciliationForm.differenceCount" type="number" min="0" step="1" required /></label></div>
-      <label>差异金额（元，可为负数）<input v-model="reconciliationForm.differenceAmountYuan" type="number" step="0.01" required /></label>
+    <section class="partner-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">PAYOUT BATCHES</p>
+          <h2>出款批次</h2>
+        </div>
+        <span>执行、回调和查单共用同一状态机</span>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>渠道</th>
+              <th>笔数</th>
+              <th>金额</th>
+              <th>状态</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in payoutBatches" :key="String(item.id)">
+              <td>{{ item.channel === 'wechat_transfer' ? '微信商家转账' : '人工对公结算' }}</td>
+              <td>{{ item.requestCount }}</td>
+              <td>{{ money(item.netAmount) }}</td>
+              <td>
+                <span class="status-badge">{{ label(item.status) }}</span>
+              </td>
+              <td>{{ dateTime(item.createdAt) }}</td>
+              <td>
+                <div class="row-actions">
+                  <button
+                    v-if="['draft', 'held'].includes(String(item.status)) && canReviewPayouts"
+                    type="button"
+                    @click="reviewBatch(item, 'approve')"
+                  >
+                    复核通过
+                  </button><button
+                    v-if="item.status === 'draft' && canReviewPayouts"
+                    type="button"
+                    @click="reviewBatch(item, 'hold')"
+                  >
+                    暂停
+                  </button><button
+                    v-if="
+                      ['draft', 'held', 'approved'].includes(String(item.status)) &&
+                        canReviewPayouts
+                    "
+                    type="button"
+                    @click="reviewBatch(item, 'cancel')"
+                  >
+                    取消
+                  </button><button
+                    v-if="
+                      item.status === 'approved' &&
+                        item.channel === 'wechat_transfer' &&
+                        canExecutePayouts
+                    "
+                    type="button"
+                    @click="executeBatch(item)"
+                  >
+                    执行出款
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <form
+      v-if="canExecutePayouts"
+      class="partner-panel reconciliation-form"
+      @submit.prevent="createReconciliation"
+    >
+      <div>
+        <p class="eyebrow">FUND BILL</p>
+        <h2>登记资金账单核对结果</h2>
+        <p>保存账单证据编号和 SHA-256。存在差异时，系统会暂停相关批次和新的出款。</p>
+      </div>
+      <label>关联批次<select v-model="reconciliationForm.batchId">
+        <option value="">大会全部出款</option>
+        <option v-for="item in payoutBatches" :key="String(item.id)" :value="String(item.id)">
+          {{ item.channel === 'wechat_transfer' ? '微信' : '人工' }} ·
+          {{ String(item.id).slice(0, 8) }}
+        </option>
+      </select></label>
+      <div class="field-pair">
+        <label>账单开始时间<input
+          v-model="reconciliationForm.windowStart"
+          type="datetime-local"
+          required
+        /></label><label>账单结束时间<input v-model="reconciliationForm.windowEnd" type="datetime-local" required /></label>
+      </div>
+      <div class="field-pair">
+        <label>检查笔数<input
+          v-model="reconciliationForm.checkedCount"
+          type="number"
+          min="0"
+          step="1"
+          required
+        /></label><label>差异笔数<input
+          v-model="reconciliationForm.differenceCount"
+          type="number"
+          min="0"
+          step="1"
+          required
+        /></label>
+      </div>
+      <label>差异金额（元，可为负数）<input
+        v-model="reconciliationForm.differenceAmountYuan"
+        type="number"
+        step="0.01"
+        required
+      /></label>
       <label>账单证据编号<input v-model="reconciliationForm.evidenceReference" maxlength="240" required /></label>
-      <label>账单文件 SHA-256<input v-model="reconciliationForm.evidenceDigest" maxlength="64" pattern="[a-fA-F0-9]{64}" required /></label>
-      <label>核对说明<textarea v-model="reconciliationForm.note" rows="3" maxlength="1000" /></label>
+      <label>账单文件 SHA-256<input
+        v-model="reconciliationForm.evidenceDigest"
+        maxlength="64"
+        pattern="[a-fA-F0-9]{64}"
+        required
+      /></label>
+      <label>核对说明<textarea v-model="reconciliationForm.note" rows="3" maxlength="1000" />
+      </label>
       <button class="button" type="submit" :disabled="pending">登记核对结果</button>
     </form>
     <section class="partner-panel">
-      <div class="panel-heading"><div><p class="eyebrow">RECONCILIATION</p><h2>财务对账</h2></div><span>差异需保留核对依据</span></div>
-      <div class="data-table-wrap"><table class="data-table"><thead><tr><th>类型</th><th>检查范围</th><th>检查笔数</th><th>差异</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in reconciliations" :key="String(item.id)"><td>{{ item.kind === 'payouts' ? '出款' : item.kind === 'refunds' ? '退款' : '支付' }}</td><td>{{ dateTime(item.windowStart) }} 至 {{ dateTime(item.windowEnd) }}</td><td>{{ item.checkedCount ?? 0 }}</td><td>{{ item.differenceCount ?? 0 }} 笔 / {{ money(item.differenceAmount) }}</td><td>{{ label(item.status) }}</td><td><button v-if="['difference', 'failed'].includes(String(item.status)) && canExecutePayouts" type="button" @click="resolveReconciliation(item)">登记核对结果</button></td></tr><tr v-if="!reconciliations.length"><td colspan="6" class="admin-empty">暂无对账记录。</td></tr></tbody></table></div>
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">RECONCILIATION</p>
+          <h2>财务对账</h2>
+        </div>
+        <span>差异需保留核对依据</span>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>检查范围</th>
+              <th>检查笔数</th>
+              <th>差异</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in reconciliations" :key="String(item.id)">
+              <td>
+                {{ item.kind === 'payouts' ? '出款' : item.kind === 'refunds' ? '退款' : '支付' }}
+              </td>
+              <td>{{ dateTime(item.windowStart) }} 至 {{ dateTime(item.windowEnd) }}</td>
+              <td>{{ item.checkedCount ?? 0 }}</td>
+              <td>{{ item.differenceCount ?? 0 }} 笔 / {{ money(item.differenceAmount) }}</td>
+              <td>{{ label(item.status) }}</td>
+              <td>
+                <button
+                  v-if="['difference', 'failed'].includes(String(item.status)) && canExecutePayouts"
+                  type="button"
+                  @click="resolveReconciliation(item)"
+                >
+                  登记核对结果
+                </button>
+              </td>
+            </tr>
+            <tr v-if="!reconciliations.length">
+              <td colspan="6" class="admin-empty">暂无对账记录。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </template>
 
   <template v-else>
     <section class="partner-settings-grid">
       <form class="partner-panel settings-form" @submit.prevent="publishProgram">
-        <div class="panel-heading"><div><p class="eyebrow">PROGRAM RULES</p><h2>大会分销规则</h2></div><span>发布后伙伴重新确认</span></div>
-        <label>计佣方式<select v-model="programForm.mode"><option value="fixed">固定比例</option><option value="order_count_tiered">按有效订单阶梯</option></select></label>
-        <label>基础佣金比例<div class="input-unit"><input v-model="programForm.ratePercent" inputmode="decimal" /><span>%</span></div></label>
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">PROGRAM RULES</p>
+            <h2>大会分销规则</h2>
+          </div>
+          <span>发布后伙伴重新确认</span>
+        </div>
+        <label>计佣方式<select v-model="programForm.mode">
+          <option value="fixed">固定比例</option>
+          <option value="order_count_tiered">按有效订单阶梯</option>
+        </select></label>
+        <label>基础佣金比例
+          <div class="input-unit">
+            <input v-model="programForm.ratePercent" inputmode="decimal" /><span>%</span>
+          </div></label>
         <label v-if="programForm.mode === 'order_count_tiered'">阶梯设置<textarea v-model="programForm.tiers" rows="4" /><small>每行为“有效订单数:佣金百分比”，一笔批量订单只计一个阶梯订单。</small></label>
-        <div class="field-pair"><label>归因有效期<input v-model="programForm.attributionDays" inputmode="numeric" /></label><label>结算等待天数<input v-model="programForm.settlementDelayDays" inputmode="numeric" /></label></div>
-        <div class="field-pair"><label>最低提现金额<input v-model="programForm.minimumPayoutYuan" inputmode="decimal" /></label><label>首页展示人数<input v-model="programForm.homepageLimit" inputmode="numeric" /></label></div>
+        <div class="field-pair">
+          <label>归因有效期<input v-model="programForm.attributionDays" inputmode="numeric" /></label><label>结算等待天数<input v-model="programForm.settlementDelayDays" inputmode="numeric" /></label>
+        </div>
+        <div class="field-pair">
+          <label>最低提现金额<input
+            v-model="programForm.minimumPayoutYuan"
+            inputmode="decimal"
+          /></label><label>首页展示人数<input v-model="programForm.homepageLimit" inputmode="numeric" /></label>
+        </div>
         <label class="switch-row"><input v-model="programForm.publicDirectoryEnabled" type="checkbox" /><span>开启合作伙伴公开目录与首页区块</span></label>
         <label>规则标题<input v-model="programForm.termsTitle" maxlength="160" /></label>
-        <label>规则正文<textarea v-model="programForm.termsContent" rows="5" maxlength="40000" /></label>
-        <label>推广规范<textarea v-model="programForm.promotionPolicy" rows="4" maxlength="20000" /></label>
-        <button v-if="canManageRules" class="button" type="submit" :disabled="pending">发布新版规则</button>
+        <label>规则正文<textarea v-model="programForm.termsContent" rows="5" maxlength="40000" />
+        </label>
+        <label>推广规范<textarea v-model="programForm.promotionPolicy" rows="4" maxlength="20000" />
+        </label>
+        <button v-if="canManageRules" class="button" type="submit" :disabled="pending">
+          发布新版规则
+        </button>
       </form>
 
       <form class="partner-panel settings-form" @submit.prevent="saveTransferSettings">
-        <div class="panel-heading"><div><p class="eyebrow">WECHAT TRANSFER</p><h2>微信商家转账</h2></div><span>场景 1005</span></div>
-        <p class="settings-note">此处复用组织微信支付凭据。配置需另一位管理员复核，未知渠道状态继续占用资金。</p>
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">WECHAT TRANSFER</p>
+            <h2>微信商家转账</h2>
+          </div>
+          <span>场景 1005</span>
+        </div>
+        <p class="settings-note">
+          此处复用组织微信支付凭据。配置需另一位管理员复核，未知渠道状态继续占用资金。
+        </p>
         <label class="switch-row"><input v-model="transferForm.enabled" type="checkbox" /><span>启用微信商家转账</span></label>
         <label>岗位类型<input v-model="transferForm.jobType" maxlength="32" /></label>
         <label>报酬说明<input v-model="transferForm.remunerationDescription" maxlength="32" /></label>
-        <div class="field-pair"><label>单笔上限（元）<input v-model="transferForm.singleTransferYuan" inputmode="decimal" /></label><label>单用户单日上限<input v-model="transferForm.dailyUserYuan" inputmode="decimal" /></label></div>
-        <div class="field-pair"><label>商户单日上限<input v-model="transferForm.dailyMerchantYuan" inputmode="decimal" /></label><label>商户月度上限<input v-model="transferForm.monthlyMerchantYuan" inputmode="decimal" /></label></div>
+        <div class="field-pair">
+          <label>单笔上限（元）<input
+            v-model="transferForm.singleTransferYuan"
+            inputmode="decimal"
+          /></label><label>单用户单日上限<input v-model="transferForm.dailyUserYuan" inputmode="decimal" /></label>
+        </div>
+        <div class="field-pair">
+          <label>商户单日上限<input
+            v-model="transferForm.dailyMerchantYuan"
+            inputmode="decimal"
+          /></label><label>商户月度上限<input v-model="transferForm.monthlyMerchantYuan" inputmode="decimal" /></label>
+        </div>
         <label>资质验收时间<input v-model="transferForm.verifiedAt" type="datetime-local" /></label>
-        <p v-if="payoutSettings.pending" class="pending-review">已有一份待复核配置。另一位管理员使用相同内容提交后生效。</p>
-        <button v-if="canManagePayoutSettings" class="button" type="submit" :disabled="pending">提交配置</button>
+        <p v-if="payoutSettings.pending" class="pending-review">
+          已有一份待复核配置。另一位管理员使用相同内容提交后生效。
+        </p>
+        <button v-if="canManagePayoutSettings" class="button" type="submit" :disabled="pending">
+          提交配置
+        </button>
       </form>
     </section>
   </template>
 </template>
 
 <style scoped>
-.partner-tabs{display:flex;gap:8px;margin:0 0 22px;padding:6px;border:1px solid var(--line,#dbe3ee);border-radius:14px;background:#fff;overflow:auto}.partner-tabs button{border:0;background:transparent;padding:11px 18px;border-radius:9px;color:#526176;white-space:nowrap;font-weight:650}.partner-tabs button.active{background:#0e2b50;color:#fff}.partner-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}.partner-metrics article,.partner-panel{border:1px solid #dbe3ee;border-radius:16px;background:#fff;box-shadow:0 12px 32px rgba(21,50,83,.05)}.partner-metrics article{padding:20px}.partner-metrics span,.partner-metrics small{display:block;color:#6f7e90}.partner-metrics strong{display:block;margin:10px 0 5px;font:700 28px/1.1 Georgia,"Songti SC",serif;color:#102e52}.partner-panel{padding:22px;margin-bottom:18px}.panel-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:18px}.panel-heading h2{margin:2px 0 0;font:700 24px/1.2 Georgia,"Songti SC",serif;color:#102e52}.panel-heading>span,.state-dot{color:#64748b;font-size:13px}.rule-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0}.rule-grid div{padding:15px;border-radius:12px;background:#f5f8fc}.rule-grid dt{color:#718096;font-size:12px}.rule-grid dd{margin:7px 0 0;color:#163b66;font-weight:700}.inline-form{display:grid;grid-template-columns:minmax(220px,1.4fr) repeat(3,minmax(150px,1fr)) auto;gap:14px;align-items:end}.inline-form h2{margin:3px 0 5px;color:#102e52}.inline-form p{margin:0;color:#69788a}.inline-form label,.settings-form label{display:grid;gap:7px;color:#405168;font-size:13px;font-weight:650}.inline-form input,.settings-form input,.settings-form select,.settings-form textarea{width:100%;box-sizing:border-box;border:1px solid #ccd7e5;border-radius:10px;background:#fff;padding:10px 12px;color:#17385e;font:inherit}.data-table td strong,.data-table td small{display:block}.data-table td small{margin-top:4px;color:#77869a}.row-actions{display:flex;flex-wrap:wrap;gap:7px}.row-actions button{border:1px solid #c9d6e5;border-radius:8px;background:#fff;padding:6px 9px;color:#21466f}.partner-settings-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr);gap:18px}.settings-form{display:grid;gap:15px}.field-pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.input-unit{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px}.switch-row{grid-template-columns:auto 1fr!important;align-items:center}.switch-row input{width:auto}.settings-note,.pending-review{margin:0;padding:12px;border-radius:10px;background:#f4f7fb;color:#5e6e82;font-size:13px;line-height:1.65}.pending-review{background:#fff7e8;color:#8a5a0a}.data-table code{font-size:12px;color:#47627f}@media(max-width:1100px){.partner-metrics{grid-template-columns:repeat(2,1fr)}.inline-form{grid-template-columns:1fr 1fr}.partner-settings-grid{grid-template-columns:1fr}}@media(max-width:680px){.partner-metrics,.field-pair,.inline-form{grid-template-columns:1fr}.partner-panel{padding:16px}.panel-heading{display:block}.partner-tabs{margin-inline:-4px}}
-.file-action{border:1px solid #c9d6e5;border-radius:8px;background:#fff;padding:6px 9px;color:#21466f;cursor:pointer}.file-action input{display:none}
-.adjustment-form{display:grid;grid-template-columns:minmax(230px,1.5fr) repeat(4,minmax(130px,1fr)) auto;align-items:end;gap:14px}.adjustment-form h2,.reconciliation-form h2{margin:3px 0 5px;color:#102e52}.adjustment-form p,.reconciliation-form p{margin:0;color:#69788a}.adjustment-form label,.reconciliation-form label{display:grid;gap:7px;color:#405168;font-size:13px;font-weight:650}.adjustment-form input,.adjustment-form select,.reconciliation-form input,.reconciliation-form select,.reconciliation-form textarea{width:100%;box-sizing:border-box;border:1px solid #ccd7e5;border-radius:10px;background:#fff;padding:10px 12px;color:#17385e;font:inherit}.reconciliation-form{display:grid;grid-template-columns:1fr 1fr;gap:14px}.reconciliation-form>div:first-child,.reconciliation-form>label:last-of-type,.reconciliation-form>button{grid-column:1/-1}.reconciliation-form>.field-pair{grid-column:1/-1}@media(max-width:1100px){.adjustment-form{grid-template-columns:1fr 1fr}}@media(max-width:680px){.adjustment-form,.reconciliation-form{grid-template-columns:1fr}.reconciliation-form>div:first-child,.reconciliation-form>label:last-of-type,.reconciliation-form>button,.reconciliation-form>.field-pair{grid-column:auto}}
+.partner-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 22px;
+  padding: 6px;
+  border: 1px solid var(--line, #dbe3ee);
+  border-radius: 14px;
+  background: #fff;
+  overflow: auto;
+}
+.partner-tabs button {
+  border: 0;
+  background: transparent;
+  padding: 11px 18px;
+  border-radius: 9px;
+  color: #526176;
+  white-space: nowrap;
+  font-weight: 650;
+}
+.partner-tabs button.active {
+  background: #0e2b50;
+  color: #fff;
+}
+.partner-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.partner-metrics article,
+.partner-panel {
+  border: 1px solid #dbe3ee;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(21, 50, 83, 0.05);
+}
+.partner-metrics article {
+  padding: 20px;
+}
+.partner-metrics span,
+.partner-metrics small {
+  display: block;
+  color: #6f7e90;
+}
+.partner-metrics strong {
+  display: block;
+  margin: 10px 0 5px;
+  font:
+    700 28px/1.1 Georgia,
+    'Songti SC',
+    serif;
+  color: #102e52;
+}
+.partner-panel {
+  padding: 22px;
+  margin-bottom: 18px;
+}
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 18px;
+}
+.panel-heading h2 {
+  margin: 2px 0 0;
+  font:
+    700 24px/1.2 Georgia,
+    'Songti SC',
+    serif;
+  color: #102e52;
+}
+.panel-heading > span,
+.state-dot {
+  color: #64748b;
+  font-size: 13px;
+}
+.rule-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 0;
+}
+.rule-grid div {
+  padding: 15px;
+  border-radius: 12px;
+  background: #f5f8fc;
+}
+.rule-grid dt {
+  color: #718096;
+  font-size: 12px;
+}
+.rule-grid dd {
+  margin: 7px 0 0;
+  color: #163b66;
+  font-weight: 700;
+}
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(150px, 1fr)) auto;
+  gap: 14px;
+  align-items: end;
+}
+.inline-form h2 {
+  margin: 3px 0 5px;
+  color: #102e52;
+}
+.inline-form p {
+  margin: 0;
+  color: #69788a;
+}
+.inline-form label,
+.settings-form label {
+  display: grid;
+  gap: 7px;
+  color: #405168;
+  font-size: 13px;
+  font-weight: 650;
+}
+.inline-form input,
+.settings-form input,
+.settings-form select,
+.settings-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #ccd7e5;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  color: #17385e;
+  font: inherit;
+}
+.data-table td strong,
+.data-table td small {
+  display: block;
+}
+.data-table td small {
+  margin-top: 4px;
+  color: #77869a;
+}
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.row-actions button {
+  border: 1px solid #c9d6e5;
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px 9px;
+  color: #21466f;
+}
+.partner-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 18px;
+}
+.settings-form {
+  display: grid;
+  gap: 15px;
+}
+.field-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.input-unit {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+.switch-row {
+  grid-template-columns: auto 1fr !important;
+  align-items: center;
+}
+.switch-row input {
+  width: auto;
+}
+.settings-note,
+.pending-review {
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f4f7fb;
+  color: #5e6e82;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.pending-review {
+  background: #fff7e8;
+  color: #8a5a0a;
+}
+.data-table code {
+  font-size: 12px;
+  color: #47627f;
+}
+@media (max-width: 1100px) {
+  .partner-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .inline-form {
+    grid-template-columns: 1fr 1fr;
+  }
+  .partner-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 680px) {
+  .partner-metrics,
+  .field-pair,
+  .inline-form {
+    grid-template-columns: 1fr;
+  }
+  .partner-panel {
+    padding: 16px;
+  }
+  .panel-heading {
+    display: block;
+  }
+  .partner-tabs {
+    margin-inline: -4px;
+  }
+}
+.file-action {
+  border: 1px solid #c9d6e5;
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px 9px;
+  color: #21466f;
+  cursor: pointer;
+}
+.file-action input {
+  display: none;
+}
+.adjustment-form {
+  display: grid;
+  grid-template-columns: minmax(230px, 1.5fr) repeat(4, minmax(130px, 1fr)) auto;
+  align-items: end;
+  gap: 14px;
+}
+.adjustment-form h2,
+.reconciliation-form h2 {
+  margin: 3px 0 5px;
+  color: #102e52;
+}
+.adjustment-form p,
+.reconciliation-form p {
+  margin: 0;
+  color: #69788a;
+}
+.adjustment-form label,
+.reconciliation-form label {
+  display: grid;
+  gap: 7px;
+  color: #405168;
+  font-size: 13px;
+  font-weight: 650;
+}
+.adjustment-form input,
+.adjustment-form select,
+.reconciliation-form input,
+.reconciliation-form select,
+.reconciliation-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #ccd7e5;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  color: #17385e;
+  font: inherit;
+}
+.reconciliation-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.reconciliation-form > div:first-child,
+.reconciliation-form > label:last-of-type,
+.reconciliation-form > button {
+  grid-column: 1/-1;
+}
+.reconciliation-form > .field-pair {
+  grid-column: 1/-1;
+}
+@media (max-width: 1100px) {
+  .adjustment-form {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 680px) {
+  .adjustment-form,
+  .reconciliation-form {
+    grid-template-columns: 1fr;
+  }
+  .reconciliation-form > div:first-child,
+  .reconciliation-form > label:last-of-type,
+  .reconciliation-form > button,
+  .reconciliation-form > .field-pair {
+    grid-column: auto;
+  }
+}
 </style>

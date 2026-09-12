@@ -2810,32 +2810,41 @@ export const notificationTemplates = pgTable(
   ],
 );
 
-export const invoiceDocumentAccessLinks = pgTable('invoice_document_access_links', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
-  eventId: integer('event_id').references(() => events.id),
-  orderId: uuid('order_id').references(() => orders.id),
-  invoiceRequestId: uuid('invoice_request_id').references(() => invoiceRequests.id),
-  invoiceDocumentId: uuid('invoice_document_id').references(() => invoiceDocuments.id),
-  documentIdentity: text('document_identity'),
-  purpose: varchar('purpose', { length: 32 }).notNull(),
-  recipientHash: varchar('recipient_hash', { length: 64 }).notNull(),
-  tokenHash: varchar('token_hash', { length: 64 }).notNull(),
-  sealedToken: text('sealed_token'),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  revokedAt: timestamp('revoked_at', { withTimezone: true }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  uniqueIndex('invoice_file_access_token_unique').on(table.tokenHash),
-  index('invoice_file_access_invoice_idx').on(table.invoiceRequestId, table.createdAt),
-  check('invoice_file_access_scope', sql`(
+export const invoiceDocumentAccessLinks = pgTable(
+  'invoice_document_access_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id),
+    eventId: integer('event_id').references(() => events.id),
+    orderId: uuid('order_id').references(() => orders.id),
+    invoiceRequestId: uuid('invoice_request_id').references(() => invoiceRequests.id),
+    invoiceDocumentId: uuid('invoice_document_id').references(() => invoiceDocuments.id),
+    documentIdentity: text('document_identity'),
+    purpose: varchar('purpose', { length: 32 }).notNull(),
+    recipientHash: varchar('recipient_hash', { length: 64 }).notNull(),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    sealedToken: text('sealed_token'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('invoice_file_access_token_unique').on(table.tokenHash),
+    index('invoice_file_access_invoice_idx').on(table.invoiceRequestId, table.createdAt),
+    check(
+      'invoice_file_access_scope',
+      sql`(
     ${table.purpose} in ('invoice', 'account') and ${table.eventId} is not null and ${table.orderId} is not null
     and ${table.invoiceRequestId} is not null and ${table.invoiceDocumentId} is not null and ${table.documentIdentity} is not null
   ) or (
     ${table.purpose} = 'test' and ${table.eventId} is null and ${table.orderId} is null
     and ${table.invoiceRequestId} is null and ${table.invoiceDocumentId} is null and ${table.documentIdentity} is null
-  )`),
-]);
+  )`,
+    ),
+  ],
+);
 
 export const notificationDeliveries = pgTable(
   'notification_deliveries',
@@ -3317,7 +3326,10 @@ export const eventPartnerProgramVersions = pgTable(
       .$type<Array<{ minimumOrderCount: number; rateBps: number }>>()
       .notNull()
       .default([]),
-    eligibleTicketTypeIds: jsonb('eligible_ticket_type_ids').$type<string[]>().notNull().default([]),
+    eligibleTicketTypeIds: jsonb('eligible_ticket_type_ids')
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     attributionDays: integer('attribution_days').notNull().default(30),
     settlementDelayDays: integer('settlement_delay_days').notNull().default(7),
     minimumPayoutAmount: integer('minimum_payout_amount').notNull().default(1000),
@@ -3438,7 +3450,11 @@ export const eventPartners = pgTable(
       table.eventId,
       table.customerUserId,
     ),
-    uniqueIndex('event_partners_public_slug_unique').on(table.organizationId, table.eventId, table.publicSlug),
+    uniqueIndex('event_partners_public_slug_unique').on(
+      table.organizationId,
+      table.eventId,
+      table.publicSlug,
+    ),
     unique('event_partners_id_scope_unique').on(table.id, table.organizationId, table.eventId),
     unique('event_partners_id_organization_unique').on(table.id, table.organizationId),
     index('event_partners_directory_idx').on(
@@ -3559,7 +3575,10 @@ export const eventPartnerRuleAcceptances = pgTable(
       foreignColumns: [customerUsers.id, customerUsers.organizationId],
       name: 'event_partner_rule_acceptances_customer_scope_fk',
     }).onDelete('restrict'),
-    uniqueIndex('event_partner_rule_acceptances_unique').on(table.partnerId, table.programVersionId),
+    uniqueIndex('event_partner_rule_acceptances_unique').on(
+      table.partnerId,
+      table.programVersionId,
+    ),
   ],
 );
 
@@ -3586,6 +3605,12 @@ export const partnerReferralLinks = pgTable(
       foreignColumns: [eventPartners.id, eventPartners.organizationId, eventPartners.eventId],
       name: 'partner_referral_links_partner_scope_fk',
     }).onDelete('restrict'),
+    unique('partner_referral_links_id_scope_unique').on(
+      table.id,
+      table.partnerId,
+      table.organizationId,
+      table.eventId,
+    ),
     uniqueIndex('partner_referral_links_code_unique').on(table.code),
     uniqueIndex('partner_referral_links_active_partner_unique')
       .on(table.partnerId)
@@ -3618,9 +3643,14 @@ export const partnerReferralVisitDays = pgTable(
       name: 'partner_referral_visit_days_partner_scope_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [table.referralLinkId],
-      foreignColumns: [partnerReferralLinks.id],
-      name: 'partner_referral_visit_days_link_fk',
+      columns: [table.referralLinkId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerReferralLinks.id,
+        partnerReferralLinks.partnerId,
+        partnerReferralLinks.organizationId,
+        partnerReferralLinks.eventId,
+      ],
+      name: 'partner_referral_visit_days_link_scope_fk',
     }).onDelete('restrict'),
     check(
       'partner_referral_visit_days_counts_check',
@@ -3666,9 +3696,14 @@ export const partnerAttributionRevisions = pgTable(
       name: 'partner_attribution_revisions_partner_scope_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [table.referralLinkId],
-      foreignColumns: [partnerReferralLinks.id],
-      name: 'partner_attribution_revisions_referral_link_fk',
+      columns: [table.referralLinkId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerReferralLinks.id,
+        partnerReferralLinks.partnerId,
+        partnerReferralLinks.organizationId,
+        partnerReferralLinks.eventId,
+      ],
+      name: 'partner_attribution_revisions_referral_scope_fk',
     }).onDelete('restrict'),
     foreignKey({
       columns: [table.programVersionId, table.organizationId, table.eventId],
@@ -3684,7 +3719,10 @@ export const partnerAttributionRevisions = pgTable(
       foreignColumns: [customerUsers.id, customerUsers.organizationId],
       name: 'partner_attribution_revisions_customer_scope_fk',
     }).onDelete('restrict'),
-    uniqueIndex('partner_attribution_revisions_order_version_unique').on(table.orderId, table.orderVersion),
+    uniqueIndex('partner_attribution_revisions_order_version_unique').on(
+      table.orderId,
+      table.orderVersion,
+    ),
     unique('partner_attribution_revisions_id_order_unique').on(table.id, table.orderId),
     index('partner_attribution_revisions_partner_time_idx').on(table.partnerId, table.createdAt),
     check(
@@ -3722,8 +3760,17 @@ export const partnerFinancialEventInbox = pgTable(
     ...timestamps,
   },
   (table) => [
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'partner_financial_event_inbox_event_scope_fk',
+    }).onDelete('restrict'),
     uniqueIndex('partner_financial_event_inbox_key_unique').on(table.eventKey),
-    index('partner_financial_event_inbox_due_idx').on(table.status, table.nextAttemptAt, table.createdAt),
+    index('partner_financial_event_inbox_due_idx').on(
+      table.status,
+      table.nextAttemptAt,
+      table.createdAt,
+    ),
     check(
       'partner_financial_event_inbox_status_check',
       sql`${table.status} in ('pending', 'processing', 'processed', 'retrying', 'failed')`,
@@ -3751,7 +3798,17 @@ export const partnerCommissions = pgTable(
     reversedAmount: integer('reversed_amount').notNull().default(0),
     currency: varchar('currency', { length: 3 }).$type<'CNY'>().notNull().default('CNY'),
     status: varchar('status', { length: 32 })
-      .$type<'provisional' | 'pending' | 'available' | 'reserved' | 'paid' | 'held' | 'reversed' | 'partially_reversed' | 'recovery_due'>()
+      .$type<
+        | 'provisional'
+        | 'pending'
+        | 'available'
+        | 'reserved'
+        | 'paid'
+        | 'held'
+        | 'reversed'
+        | 'partially_reversed'
+        | 'recovery_due'
+      >()
       .notNull()
       .default('provisional'),
     releaseAt: timestamp('release_at', { withTimezone: true }).notNull(),
@@ -3780,7 +3837,10 @@ export const partnerCommissions = pgTable(
       foreignColumns: [partnerAttributionRevisions.id, partnerAttributionRevisions.orderId],
       name: 'partner_commissions_attribution_scope_fk',
     }).onDelete('restrict'),
-    uniqueIndex('partner_commissions_order_attribution_unique').on(table.orderId, table.attributionRevisionId),
+    uniqueIndex('partner_commissions_order_attribution_unique').on(
+      table.orderId,
+      table.attributionRevisionId,
+    ),
     uniqueIndex('partner_commissions_partner_sequence_unique').on(table.partnerId, table.sequence),
     unique('partner_commissions_id_scope_unique').on(
       table.id,
@@ -3788,8 +3848,16 @@ export const partnerCommissions = pgTable(
       table.organizationId,
       table.eventId,
     ),
-    index('partner_commissions_partner_status_idx').on(table.partnerId, table.status, table.releaseAt),
-    index('partner_commissions_event_status_idx').on(table.organizationId, table.eventId, table.status),
+    index('partner_commissions_partner_status_idx').on(
+      table.partnerId,
+      table.status,
+      table.releaseAt,
+    ),
+    index('partner_commissions_event_status_idx').on(
+      table.organizationId,
+      table.eventId,
+      table.status,
+    ),
     check(
       'partner_commissions_status_check',
       sql`${table.status} in ('provisional', 'pending', 'available', 'reserved', 'paid', 'held', 'reversed', 'partially_reversed', 'recovery_due')`,
@@ -3798,7 +3866,10 @@ export const partnerCommissions = pgTable(
       'partner_commissions_money_check',
       sql`${table.rateBps} between 0 and 10000 and ${table.eligibleAmount} >= 0 and ${table.refundedAmount} >= 0 and ${table.commissionAmount} >= 0 and ${table.reversedAmount} >= 0`,
     ),
-    check('partner_commissions_sequence_check', sql`${table.sequence} >= 1 and ${table.version} >= 1`),
+    check(
+      'partner_commissions_sequence_check',
+      sql`${table.sequence} >= 1 and ${table.version} >= 1`,
+    ),
   ],
 );
 
@@ -3840,11 +3911,25 @@ export const partnerCommissionItems = pgTable(
     }).onDelete('restrict'),
     foreignKey({
       columns: [table.orderItemId, table.orderId, table.organizationId, table.eventId],
-      foreignColumns: [orderItems.id, orderItems.orderId, orderItems.organizationId, orderItems.eventId],
+      foreignColumns: [
+        orderItems.id,
+        orderItems.orderId,
+        orderItems.organizationId,
+        orderItems.eventId,
+      ],
       name: 'partner_commission_items_order_item_scope_fk',
     }).onDelete('restrict'),
-    uniqueIndex('partner_commission_items_commission_item_unique').on(table.commissionId, table.orderItemId),
+    uniqueIndex('partner_commission_items_commission_item_unique').on(
+      table.commissionId,
+      table.orderItemId,
+    ),
     uniqueIndex('partner_commission_items_id_scope_unique').on(table.id, table.commissionId),
+    unique('partner_commission_items_id_partner_scope_unique').on(
+      table.id,
+      table.partnerId,
+      table.organizationId,
+      table.eventId,
+    ),
     index('partner_commission_items_order_idx').on(table.orderId, table.orderItemId),
     check(
       'partner_commission_items_eligibility_check',
@@ -3888,8 +3973,25 @@ export const partnerPayoutBatches = pgTable(
     ...timestamps,
   },
   (table) => [
-    uniqueIndex('partner_payout_batches_idempotency_unique').on(table.organizationId, table.idempotencyKey),
-    index('partner_payout_batches_status_idx').on(table.organizationId, table.status, table.cutoffAt),
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'partner_payout_batches_event_scope_fk',
+    }).onDelete('restrict'),
+    unique('partner_payout_batches_id_scope_unique').on(
+      table.id,
+      table.organizationId,
+      table.eventId,
+    ),
+    uniqueIndex('partner_payout_batches_idempotency_unique').on(
+      table.organizationId,
+      table.idempotencyKey,
+    ),
+    index('partner_payout_batches_status_idx').on(
+      table.organizationId,
+      table.status,
+      table.cutoffAt,
+    ),
     check(
       'partner_payout_batches_status_check',
       sql`${table.status} in ('draft', 'approved', 'executing', 'completed', 'held', 'cancelled')`,
@@ -3941,11 +4043,19 @@ export const partnerPayoutRecipients = pgTable(
       foreignColumns: [customerUsers.id, customerUsers.organizationId],
       name: 'partner_payout_recipients_customer_scope_fk',
     }).onDelete('restrict'),
+    unique('partner_payout_recipients_id_scope_unique').on(
+      table.id,
+      table.partnerId,
+      table.organizationId,
+    ),
     uniqueIndex('partner_payout_recipients_active_fingerprint_unique')
       .on(table.organizationId, table.accountFingerprint)
       .where(sql`${table.status} in ('pending', 'verified')`),
     index('partner_payout_recipients_partner_idx').on(table.partnerId, table.status),
-    check('partner_payout_recipients_type_check', sql`${table.type} in ('individual', 'organization')`),
+    check(
+      'partner_payout_recipients_type_check',
+      sql`${table.type} in ('individual', 'organization')`,
+    ),
     check(
       'partner_payout_recipients_channel_check',
       sql`${table.channel} in ('manual_bank', 'wechat_transfer')`,
@@ -3966,9 +4076,20 @@ export const partnerPayoutRequests = pgTable(
     eventId: integer('event_id').notNull(),
     partnerId: uuid('partner_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
-    batchId: uuid('batch_id').references(() => partnerPayoutBatches.id, { onDelete: 'restrict' }),
+    batchId: uuid('batch_id'),
     status: varchar('status', { length: 24 })
-      .$type<'submitted' | 'under_review' | 'approved' | 'batched' | 'executing' | 'succeeded' | 'rejected' | 'cancelled' | 'failed' | 'unknown'>()
+      .$type<
+        | 'submitted'
+        | 'under_review'
+        | 'approved'
+        | 'batched'
+        | 'executing'
+        | 'succeeded'
+        | 'rejected'
+        | 'cancelled'
+        | 'failed'
+        | 'unknown'
+      >()
       .notNull()
       .default('submitted'),
     grossAmount: integer('gross_amount').notNull(),
@@ -3993,18 +4114,38 @@ export const partnerPayoutRequests = pgTable(
       name: 'partner_payout_requests_partner_scope_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [table.recipientId],
-      foreignColumns: [partnerPayoutRecipients.id],
-      name: 'partner_payout_requests_recipient_fk',
+      columns: [table.recipientId, table.partnerId, table.organizationId],
+      foreignColumns: [
+        partnerPayoutRecipients.id,
+        partnerPayoutRecipients.partnerId,
+        partnerPayoutRecipients.organizationId,
+      ],
+      name: 'partner_payout_requests_recipient_scope_fk',
     }).onDelete('restrict'),
-    uniqueIndex('partner_payout_requests_idempotency_unique').on(table.partnerId, table.idempotencyKey),
+    foreignKey({
+      columns: [table.batchId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutBatches.id,
+        partnerPayoutBatches.organizationId,
+        partnerPayoutBatches.eventId,
+      ],
+      name: 'partner_payout_requests_batch_scope_fk',
+    }).onDelete('restrict'),
+    uniqueIndex('partner_payout_requests_idempotency_unique').on(
+      table.partnerId,
+      table.idempotencyKey,
+    ),
     unique('partner_payout_requests_id_scope_unique').on(
       table.id,
       table.partnerId,
       table.organizationId,
       table.eventId,
     ),
-    index('partner_payout_requests_status_idx').on(table.organizationId, table.status, table.createdAt),
+    index('partner_payout_requests_status_idx').on(
+      table.organizationId,
+      table.status,
+      table.createdAt,
+    ),
     check(
       'partner_payout_requests_status_check',
       sql`${table.status} in ('submitted', 'under_review', 'approved', 'batched', 'executing', 'succeeded', 'rejected', 'cancelled', 'failed', 'unknown')`,
@@ -4066,19 +4207,39 @@ export const partnerPayoutExecutions = pgTable(
       name: 'partner_payout_executions_request_scope_fk',
     }).onDelete('restrict'),
     foreignKey({
-      columns: [table.batchId],
-      foreignColumns: [partnerPayoutBatches.id],
-      name: 'partner_payout_executions_batch_fk',
+      columns: [table.batchId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutBatches.id,
+        partnerPayoutBatches.organizationId,
+        partnerPayoutBatches.eventId,
+      ],
+      name: 'partner_payout_executions_batch_scope_fk',
     }).onDelete('restrict'),
-    uniqueIndex('partner_payout_executions_request_version_unique').on(table.payoutRequestId, table.version),
+    unique('partner_payout_executions_id_scope_unique').on(
+      table.id,
+      table.partnerId,
+      table.organizationId,
+      table.eventId,
+    ),
+    uniqueIndex('partner_payout_executions_request_version_unique').on(
+      table.payoutRequestId,
+      table.version,
+    ),
     uniqueIndex('partner_payout_executions_merchant_bill_unique').on(table.merchantBillNo),
-    index('partner_payout_executions_status_idx').on(table.organizationId, table.status, table.updatedAt),
+    index('partner_payout_executions_status_idx').on(
+      table.organizationId,
+      table.status,
+      table.updatedAt,
+    ),
     check(
       'partner_payout_executions_channel_check',
       sql`${table.channel} in ('manual_bank', 'wechat_transfer')`,
     ),
     check('partner_payout_executions_amount_check', sql`${table.amount} > 0`),
-    check('partner_payout_executions_counts_check', sql`${table.queryCount} >= 0 and ${table.version} >= 1`),
+    check(
+      'partner_payout_executions_counts_check',
+      sql`${table.queryCount} >= 0 and ${table.version} >= 1`,
+    ),
   ],
 );
 
@@ -4089,20 +4250,22 @@ export const partnerLedgerEntries = pgTable(
     organizationId: uuid('organization_id').notNull(),
     eventId: integer('event_id').notNull(),
     partnerId: uuid('partner_id').notNull(),
-    commissionId: uuid('commission_id').references(() => partnerCommissions.id, {
-      onDelete: 'restrict',
-    }),
-    commissionItemId: uuid('commission_item_id').references(() => partnerCommissionItems.id, {
-      onDelete: 'restrict',
-    }),
-    payoutRequestId: uuid('payout_request_id').references(() => partnerPayoutRequests.id, {
-      onDelete: 'restrict',
-    }),
-    payoutExecutionId: uuid('payout_execution_id').references(() => partnerPayoutExecutions.id, {
-      onDelete: 'restrict',
-    }),
+    commissionId: uuid('commission_id'),
+    commissionItemId: uuid('commission_item_id'),
+    payoutRequestId: uuid('payout_request_id'),
+    payoutExecutionId: uuid('payout_execution_id'),
     entryType: varchar('entry_type', { length: 32 })
-      .$type<'commission' | 'refund_reversal' | 'self_referral_reversal' | 'manual_adjustment' | 'payout_reservation' | 'payout_release' | 'tax_withholding' | 'payout' | 'recovery'>()
+      .$type<
+        | 'commission'
+        | 'refund_reversal'
+        | 'self_referral_reversal'
+        | 'manual_adjustment'
+        | 'payout_reservation'
+        | 'payout_release'
+        | 'tax_withholding'
+        | 'payout'
+        | 'recovery'
+      >()
       .notNull(),
     balanceBucket: varchar('balance_bucket', { length: 24 })
       .$type<'pending' | 'available' | 'reserved' | 'paid' | 'recovery_due'>()
@@ -4123,8 +4286,58 @@ export const partnerLedgerEntries = pgTable(
       foreignColumns: [eventPartners.id, eventPartners.organizationId, eventPartners.eventId],
       name: 'partner_ledger_entries_partner_scope_fk',
     }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.commissionId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerCommissions.id,
+        partnerCommissions.partnerId,
+        partnerCommissions.organizationId,
+        partnerCommissions.eventId,
+      ],
+      name: 'partner_ledger_entries_commission_scope_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.commissionItemId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerCommissionItems.id,
+        partnerCommissionItems.partnerId,
+        partnerCommissionItems.organizationId,
+        partnerCommissionItems.eventId,
+      ],
+      name: 'partner_ledger_entries_commission_item_scope_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.payoutRequestId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutRequests.id,
+        partnerPayoutRequests.partnerId,
+        partnerPayoutRequests.organizationId,
+        partnerPayoutRequests.eventId,
+      ],
+      name: 'partner_ledger_entries_payout_request_scope_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.payoutExecutionId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutExecutions.id,
+        partnerPayoutExecutions.partnerId,
+        partnerPayoutExecutions.organizationId,
+        partnerPayoutExecutions.eventId,
+      ],
+      name: 'partner_ledger_entries_payout_execution_scope_fk',
+    }).onDelete('restrict'),
+    unique('partner_ledger_entries_id_scope_unique').on(
+      table.id,
+      table.partnerId,
+      table.organizationId,
+      table.eventId,
+    ),
     uniqueIndex('partner_ledger_entries_business_key_unique').on(table.businessKey),
-    index('partner_ledger_entries_balance_idx').on(table.partnerId, table.balanceBucket, table.createdAt),
+    index('partner_ledger_entries_balance_idx').on(
+      table.partnerId,
+      table.balanceBucket,
+      table.createdAt,
+    ),
     index('partner_ledger_entries_order_fact_idx').on(table.commissionId, table.commissionItemId),
     check(
       'partner_ledger_entries_type_check',
@@ -4144,12 +4357,8 @@ export const partnerPayoutDocuments = pgTable(
     organizationId: uuid('organization_id').notNull(),
     eventId: integer('event_id').notNull(),
     partnerId: uuid('partner_id').notNull(),
-    payoutRequestId: uuid('payout_request_id').references(() => partnerPayoutRequests.id, {
-      onDelete: 'restrict',
-    }),
-    payoutExecutionId: uuid('payout_execution_id').references(() => partnerPayoutExecutions.id, {
-      onDelete: 'restrict',
-    }),
+    payoutRequestId: uuid('payout_request_id'),
+    payoutExecutionId: uuid('payout_execution_id'),
     kind: varchar('kind', { length: 32 })
       .$type<'settlement_statement' | 'tax_document' | 'manual_receipt' | 'wechat_receipt'>()
       .notNull(),
@@ -4171,8 +4380,29 @@ export const partnerPayoutDocuments = pgTable(
       foreignColumns: [eventPartners.id, eventPartners.organizationId, eventPartners.eventId],
       name: 'partner_payout_documents_partner_scope_fk',
     }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.payoutRequestId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutRequests.id,
+        partnerPayoutRequests.partnerId,
+        partnerPayoutRequests.organizationId,
+        partnerPayoutRequests.eventId,
+      ],
+      name: 'partner_payout_documents_request_scope_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.payoutExecutionId, table.partnerId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutExecutions.id,
+        partnerPayoutExecutions.partnerId,
+        partnerPayoutExecutions.organizationId,
+        partnerPayoutExecutions.eventId,
+      ],
+      name: 'partner_payout_documents_execution_scope_fk',
+    }).onDelete('restrict'),
     uniqueIndex('partner_payout_documents_digest_unique').on(
       table.organizationId,
+      table.payoutRequestId,
       table.contentDigest,
       table.kind,
     ),
@@ -4193,9 +4423,7 @@ export const partnerCommissionInquiries = pgTable(
     eventId: integer('event_id').notNull(),
     partnerId: uuid('partner_id').notNull(),
     customerUserId: uuid('customer_user_id').notNull(),
-    type: varchar('type', { length: 24 })
-      .$type<'missing_order' | 'amount_dispute'>()
-      .notNull(),
+    type: varchar('type', { length: 24 }).$type<'missing_order' | 'amount_dispute'>().notNull(),
     status: varchar('status', { length: 24 })
       .$type<'open' | 'under_review' | 'resolved' | 'rejected'>()
       .notNull()
@@ -4211,10 +4439,7 @@ export const partnerCommissionInquiries = pgTable(
       onDelete: 'restrict',
     }),
     adjustmentProposedAt: timestamp('adjustment_proposed_at', { withTimezone: true }),
-    adjustmentLedgerEntryId: uuid('adjustment_ledger_entry_id').references(
-      () => partnerLedgerEntries.id,
-      { onDelete: 'restrict' },
-    ),
+    adjustmentLedgerEntryId: uuid('adjustment_ledger_entry_id'),
     resolvedBy: uuid('resolved_by').references(() => users.id, { onDelete: 'restrict' }),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     version: integer('version').notNull().default(1),
@@ -4230,6 +4455,21 @@ export const partnerCommissionInquiries = pgTable(
       columns: [table.customerUserId, table.organizationId],
       foreignColumns: [customerUsers.id, customerUsers.organizationId],
       name: 'partner_commission_inquiries_customer_scope_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.adjustmentLedgerEntryId,
+        table.partnerId,
+        table.organizationId,
+        table.eventId,
+      ],
+      foreignColumns: [
+        partnerLedgerEntries.id,
+        partnerLedgerEntries.partnerId,
+        partnerLedgerEntries.organizationId,
+        partnerLedgerEntries.eventId,
+      ],
+      name: 'partner_commission_inquiries_adjustment_scope_fk',
     }).onDelete('restrict'),
     index('partner_commission_inquiries_status_idx').on(
       table.organizationId,
@@ -4259,10 +4499,8 @@ export const partnerReconciliationRuns = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     organizationId: uuid('organization_id').notNull(),
     eventId: integer('event_id'),
-    batchId: uuid('batch_id').references(() => partnerPayoutBatches.id, { onDelete: 'restrict' }),
-    kind: varchar('kind', { length: 24 })
-      .$type<'payments' | 'refunds' | 'payouts'>()
-      .notNull(),
+    batchId: uuid('batch_id'),
+    kind: varchar('kind', { length: 24 }).$type<'payments' | 'refunds' | 'payouts'>().notNull(),
     status: varchar('status', { length: 24 })
       .$type<'running' | 'matched' | 'difference' | 'resolved' | 'failed'>()
       .notNull()
@@ -4280,7 +4518,26 @@ export const partnerReconciliationRuns = pgTable(
     ...timestamps,
   },
   (table) => [
-    index('partner_reconciliation_runs_status_idx').on(table.organizationId, table.kind, table.status, table.createdAt),
+    foreignKey({
+      columns: [table.organizationId, table.eventId],
+      foreignColumns: [events.organizationId, events.id],
+      name: 'partner_reconciliation_runs_event_scope_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.batchId, table.organizationId, table.eventId],
+      foreignColumns: [
+        partnerPayoutBatches.id,
+        partnerPayoutBatches.organizationId,
+        partnerPayoutBatches.eventId,
+      ],
+      name: 'partner_reconciliation_runs_batch_scope_fk',
+    }).onDelete('restrict'),
+    index('partner_reconciliation_runs_status_idx').on(
+      table.organizationId,
+      table.kind,
+      table.status,
+      table.createdAt,
+    ),
     check(
       'partner_reconciliation_runs_kind_check',
       sql`${table.kind} in ('payments', 'refunds', 'payouts')`,

@@ -69,7 +69,11 @@ import {
 } from '../common/partner-distribution.service.js';
 
 function parse<T>(
-  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: { issues: unknown } } },
+  schema: {
+    safeParse(
+      value: unknown,
+    ): { success: true; data: T } | { success: false; error: { issues: unknown } };
+  },
   value: unknown,
   message: string,
 ) {
@@ -103,7 +107,11 @@ class PublicPartnerController {
     @Query('surface') surfaceValue: string | undefined,
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    const limit = parse(z.coerce.number().int().min(1).max(100).default(24), limitValue, '分页参数无效');
+    const limit = parse(
+      z.coerce.number().int().min(1).max(100).default(24),
+      limitValue,
+      '分页参数无效',
+    );
     const surface = parse(
       z.enum(['directory', 'homepage']).default('directory'),
       surfaceValue,
@@ -187,7 +195,9 @@ class PublicPartnerController {
 @ApiTags('partner-referrals')
 @Controller('r')
 class PartnerReferralController {
-  constructor(@Inject(PartnerDistributionService) private readonly partners: PartnerDistributionService) {}
+  constructor(
+    @Inject(PartnerDistributionService) private readonly partners: PartnerDistributionService,
+  ) {}
 
   @Get(':code')
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
@@ -202,7 +212,8 @@ class PartnerReferralController {
       .header('Cache-Control', 'private, no-store')
       .setCookie(PARTNER_REFERRAL_COOKIE, result.cookie, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production' || process.env.DEPLOYMENT_MODE === 'production',
+        secure:
+          process.env.NODE_ENV === 'production' || process.env.DEPLOYMENT_MODE === 'production',
         sameSite: 'lax',
         path: '/api/v1',
         maxAge: result.maxAge,
@@ -379,11 +390,7 @@ class CustomerPartnerController {
       body,
       '微信收款人绑定信息校验失败',
     );
-    return this.transfers.startRecipientOAuth(
-      request.customerSession,
-      eventId,
-      input.displayName,
-    );
+    return this.transfers.startRecipientOAuth(request.customerSession, eventId, input.displayName);
   }
 
   @Post(':eventId/recipients/wechat/oauth/complete')
@@ -424,11 +431,7 @@ class CustomerPartnerController {
     @Param('requestId', ParseUUIDPipe) requestId: string,
     @Body() body: unknown,
   ) {
-    const input = parse(
-      ConfirmPartnerPayoutSettlementSchema,
-      body,
-      '结算金额确认信息校验失败',
-    );
+    const input = parse(ConfirmPartnerPayoutSettlementSchema, body, '结算金额确认信息校验失败');
     return this.partners.confirmPayoutSettlement(
       request.customerSession,
       eventId,
@@ -479,7 +482,9 @@ class CustomerPartnerController {
 @ApiTags('partner-payout-documents')
 @Controller('partner-payout-documents')
 class PartnerPayoutDocumentController {
-  constructor(@Inject(PartnerDistributionService) private readonly partners: PartnerDistributionService) {}
+  constructor(
+    @Inject(PartnerDistributionService) private readonly partners: PartnerDistributionService,
+  ) {}
 
   @Get(':documentId/download')
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
@@ -489,11 +494,19 @@ class PartnerPayoutDocumentController {
     @Res() reply: FastifyReply,
   ) {
     const result = await this.partners.downloadPayoutDocument(documentId, token);
-    const extension = result.mediaType === 'application/pdf' ? 'pdf' : result.mediaType === 'image/png' ? 'png' : 'jpg';
+    const extension =
+      result.mediaType === 'application/pdf'
+        ? 'pdf'
+        : result.mediaType === 'image/png'
+          ? 'png'
+          : 'jpg';
     return reply
       .header('Cache-Control', 'private, no-store')
       .header('Content-Type', result.mediaType)
-      .header('Content-Disposition', `attachment; filename="partner-payout-${result.kind}.${extension}"`)
+      .header(
+        'Content-Disposition',
+        `attachment; filename="partner-payout-${result.kind}.${extension}"`,
+      )
       .header('X-Content-Type-Options', 'nosniff')
       .send(result.body);
   }
@@ -637,11 +650,24 @@ export class AdminPartnerController {
     @Param('eventId', ParseIntPipe) eventId: number,
     @Res() reply: FastifyReply,
   ) {
-    const rows = await this.partners.exportPayouts(request.user.organizationId, eventId);
+    const rows = await this.partners.exportPayouts(
+      request.user.organizationId,
+      eventId,
+      request.user.sub,
+    );
     const escape = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
     const header = [
-      '提现申请ID', '合作伙伴路径', '结算渠道', '状态', '税前金额（分）', '税额（分）',
-      '实付金额（分）', '币种', '申请时间', '审核时间', '完成时间',
+      '提现申请ID',
+      '合作伙伴路径',
+      '结算渠道',
+      '状态',
+      '税前金额（分）',
+      '税额（分）',
+      '实付金额（分）',
+      '币种',
+      '申请时间',
+      '审核时间',
+      '完成时间',
     ];
     const csv = [
       header,
@@ -658,7 +684,9 @@ export class AdminPartnerController {
         row.reviewedAt?.toISOString() ?? '',
         row.completedAt?.toISOString() ?? '',
       ]),
-    ].map((row) => row.map(escape).join(',')).join('\n');
+    ]
+      .map((row) => row.map(escape).join(','))
+      .join('\n');
     return reply
       .header('Content-Type', 'text/csv; charset=utf-8')
       .header('Content-Disposition', `attachment; filename="partner-payouts-${eventId}.csv"`)
@@ -783,11 +811,13 @@ export class AdminPartnerController {
   @RequireGrant('event.payout.review')
   reviewBatch(
     @Req() request: AdminRequest,
+    @Param('eventId', ParseIntPipe) eventId: number,
     @Param('batchId', ParseUUIDPipe) batchId: string,
     @Body() body: unknown,
   ) {
     return this.partners.approvePayoutBatch(
       request.user.organizationId,
+      eventId,
       batchId,
       request.user.sub,
       parse(ApprovePartnerPayoutBatchSchema, body, '出款批次复核信息校验失败'),
@@ -798,12 +828,14 @@ export class AdminPartnerController {
   @RequireGrant('event.payout.execute')
   executeBatch(
     @Req() request: AdminRequest,
+    @Param('eventId', ParseIntPipe) eventId: number,
     @Param('batchId', ParseUUIDPipe) batchId: string,
     @Body() body: unknown,
   ) {
     const input = parse(ExecutePartnerPayoutBatchSchema, body, '出款执行信息校验失败');
     return this.transfers.executeBatch(
       request.user.organizationId,
+      eventId,
       batchId,
       request.user.sub,
       input.expectedVersion,
@@ -814,12 +846,14 @@ export class AdminPartnerController {
   @RequireGrant('event.payout.execute')
   queryExecution(
     @Req() request: AdminRequest,
+    @Param('eventId', ParseIntPipe) eventId: number,
     @Param('executionId', ParseUUIDPipe) executionId: string,
     @Body() body: unknown,
   ) {
     const input = parse(QueryPartnerPayoutExecutionSchema, body, '转账查单信息校验失败');
     return this.transfers.queryExecution(
       request.user.organizationId,
+      eventId,
       executionId,
       input.expectedVersion,
     );
@@ -847,9 +881,15 @@ export class AdminPartnerController {
   @RequireGrant('event.payout.review')
   verifyRecipient(
     @Req() request: AdminRequest,
+    @Param('eventId', ParseIntPipe) eventId: number,
     @Param('recipientId', ParseUUIDPipe) recipientId: string,
   ) {
-    return this.partners.verifyRecipient(request.user.organizationId, recipientId, request.user.sub);
+    return this.partners.verifyRecipient(
+      request.user.organizationId,
+      eventId,
+      recipientId,
+      request.user.sub,
+    );
   }
 }
 
@@ -860,7 +900,9 @@ export class AdminPartnerController {
   defaultExclusionReason: 'Merchant transfer configuration is reserved for human operators',
 })
 class OrganizationPayoutSettingsController {
-  constructor(@Inject(PartnerDistributionService) private readonly partners: PartnerDistributionService) {}
+  constructor(
+    @Inject(PartnerDistributionService) private readonly partners: PartnerDistributionService,
+  ) {}
 
   @Get()
   @RequireGrant('org.payout.settings.read')
@@ -871,11 +913,7 @@ class OrganizationPayoutSettingsController {
   @Patch()
   @RequireGrant('org.payout.settings.manage')
   update(@Req() request: AdminRequest, @Body() body: unknown) {
-    const input = parse(
-      UpdatePartnerTransferConfigurationSchema,
-      body,
-      '商家转账配置校验失败',
-    );
+    const input = parse(UpdatePartnerTransferConfigurationSchema, body, '商家转账配置校验失败');
     const { expectedRevision, ...configuration } = input;
     return this.partners.updateTransferConfiguration(
       request.user.organizationId,
@@ -889,7 +927,9 @@ class OrganizationPayoutSettingsController {
 @ApiTags('wechat-partner-payout-notifications')
 @Controller('partner-payouts/wechat')
 class MerchantTransferNotificationController {
-  constructor(@Inject(MerchantTransferService) private readonly transfers: MerchantTransferService) {}
+  constructor(
+    @Inject(MerchantTransferService) private readonly transfers: MerchantTransferService,
+  ) {}
 
   @Get('recipient-oauth/callback')
   @Throttle({ default: { limit: 120, ttl: 60_000 } })

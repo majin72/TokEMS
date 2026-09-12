@@ -69,6 +69,7 @@ export function shouldApplyMerchantTransferState(
   if (incoming === 'SUCCESS' || incoming === 'FAIL' || incoming === 'CANCELLED') return true;
   if (incoming === 'unknown') return current === 'prepared' || current === 'unknown';
   if (current === 'prepared' || current === 'unknown') return true;
+  if (current === 'CANCELING' && incoming === 'TRANSFERING') return false;
   return MERCHANT_TRANSFER_STATE_RANK[incoming] >= MERCHANT_TRANSFER_STATE_RANK[current];
 }
 

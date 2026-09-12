@@ -18,6 +18,7 @@ import {
   partnerPayoutRecipients,
   partnerPayoutRequests,
   partnerReferralLinks,
+  partnerReferralVisitDays,
   partnerReconciliationRuns,
   payments,
   refundItemAllocations,
@@ -25,7 +26,7 @@ import {
   registrations,
   ticketTypes,
 } from '@conference/database';
-import { eq, sql, sum } from 'drizzle-orm';
+import { and, eq, sql, sum } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   processPartnerFinancialInbox,
@@ -302,6 +303,63 @@ persistent('partner financial ledger with real PostgreSQL', () => {
         verifiedAt: new Date(),
       })
       .returning();
+    const [otherPartner] = await db
+      .insert(eventPartners)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        customerUserId: purchaserCustomerId,
+        publicSlug: `partner-other-${organizationId.slice(0, 8)}`,
+        qualificationStatus: 'active',
+        attributionEnabled: true,
+        currentProgramVersionId: program!.id,
+        acceptedProgramVersionId: program!.id,
+        activatedAt: new Date(),
+      })
+      .returning();
+    const [otherRecipient] = await db
+      .insert(partnerPayoutRecipients)
+      .values({
+        organizationId,
+        partnerId: otherPartner!.id,
+        customerUserId: purchaserCustomerId,
+        type: 'individual',
+        channel: 'wechat_transfer',
+        status: 'verified',
+        displayNameCiphertext: 'sealed-other-name',
+        accountReferenceCiphertext: 'sealed-other-account',
+        accountFingerprint: 'e'.repeat(64),
+        appId: 'wx-partner-test',
+        openIdCiphertext: 'sealed-other-openid',
+        verifiedAt: new Date(),
+      })
+      .returning();
+    await expect(
+      db.insert(partnerPayoutRequests).values({
+        organizationId,
+        eventId: event!.id,
+        partnerId: partner!.id,
+        recipientId: otherRecipient!.id,
+        status: 'submitted',
+        grossAmount: 1_000,
+        netAmount: 1_000,
+        idempotencyKey: `invalid-recipient-scope:${organizationId}`,
+        settlementSnapshot: { source: 'scope-test' },
+        recipientVersion: otherRecipient!.version,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      db.insert(partnerReferralVisitDays).values({
+        organizationId,
+        eventId: event!.id,
+        partnerId: otherPartner!.id,
+        referralLinkId: link!.id,
+        localDate: '2026-09-13',
+        visits: 1,
+        uniqueVisits: 1,
+        timezoneSnapshot: 'Asia/Shanghai',
+      }),
+    ).rejects.toThrow();
     const [batch] = await db
       .insert(partnerPayoutBatches)
       .values({
@@ -312,8 +370,9 @@ persistent('partner financial ledger with real PostgreSQL', () => {
         cutoffAt: new Date(),
         requestCount: 1,
         grossAmount: 1_000,
-        netAmount: 1_000,
-        budgetReservedAmount: 1_000,
+        taxAmount: 100,
+        netAmount: 900,
+        budgetReservedAmount: 900,
         idempotencyKey: `callback-batch:${organizationId}`,
       })
       .returning();
@@ -327,7 +386,8 @@ persistent('partner financial ledger with real PostgreSQL', () => {
         batchId: batch!.id,
         status: 'executing',
         grossAmount: 1_000,
-        netAmount: 1_000,
+        taxAmount: 100,
+        netAmount: 900,
         idempotencyKey: `callback-request:${organizationId}`,
         settlementSnapshot: { source: 'partner-worker-test' },
         recipientVersion: recipient!.version,
@@ -346,11 +406,11 @@ persistent('partner financial ledger with real PostgreSQL', () => {
         status: 'PROCESSING',
         jobType: '大会推广伙伴',
         remunerationDescription: '大会推广佣金',
-        amount: 1_000,
+        amount: 900,
         recipientVersion: recipient!.version,
         merchantBillNo: `CALLBACK${organizationId.replaceAll('-', '').slice(0, 20)}`,
         recipientSnapshot: { recipientId: recipient!.id },
-        requestSnapshot: { transfer_amount: 1_000 },
+        requestSnapshot: { transfer_amount: 900 },
       })
       .returning();
     await db.insert(partnerLedgerEntries).values([
@@ -421,6 +481,25 @@ persistent('partner financial ledger with real PostgreSQL', () => {
         sql`${partnerLedgerEntries.partnerId} = ${partner!.id} and ${partnerLedgerEntries.balanceBucket} = 'paid'`,
       );
     expect(Number(paidBalance?.value ?? 0)).toBe(1_000);
+    const paidBreakdown = await db
+      .select({
+        entryType: partnerLedgerEntries.entryType,
+        value: sum(partnerLedgerEntries.amount),
+      })
+      .from(partnerLedgerEntries)
+      .where(
+        and(
+          eq(partnerLedgerEntries.payoutRequestId, payoutRequest!.id),
+          eq(partnerLedgerEntries.balanceBucket, 'paid'),
+        ),
+      )
+      .groupBy(partnerLedgerEntries.entryType);
+    expect(
+      Object.fromEntries(paidBreakdown.map((row) => [row.entryType, Number(row.value ?? 0)])),
+    ).toEqual({
+      payout: 900,
+      tax_withholding: 100,
+    });
 
     const [refund] = await db
       .insert(refunds)
@@ -457,16 +536,20 @@ persistent('partner financial ledger with real PostgreSQL', () => {
     await db
       .update(registrations)
       .set({ customerUserId: partnerCustomerId })
-      .where(eq(registrations.id, registrationRows[1]!.id));
+      .where(eq(registrations.id, registrationRows[0]!.id));
     await db.insert(partnerFinancialEventInbox).values({
       organizationId,
       eventId: event!.id,
       eventType: 'PartnerAttendeeClaimed',
-      eventKey: `test-claim:${itemRows[1]!.id}`,
-      payload: { orderItemId: itemRows[1]!.id, customerUserId: partnerCustomerId },
+      eventKey: `test-claim:${itemRows[0]!.id}`,
+      payload: { orderItemId: itemRows[0]!.id, customerUserId: partnerCustomerId },
     });
 
-    expect(await processPartnerFinancialInbox(db)).toBe(2);
+    const concurrentProcessed = await Promise.all([
+      processPartnerFinancialInbox(db),
+      processPartnerFinancialInbox(db),
+    ]);
+    expect(concurrentProcessed.reduce((total, value) => total + value, 0)).toBe(2);
     expect(await processPartnerFinancialInbox(db)).toBe(0);
     const [recovery] = await db
       .select({ value: sum(partnerLedgerEntries.amount) })
@@ -478,9 +561,18 @@ persistent('partner financial ledger with real PostgreSQL', () => {
       .select()
       .from(partnerCommissionItems)
       .where(eq(partnerCommissionItems.commissionId, commissionRows[0]!.id));
-    expect(Number(recovery?.value ?? 0)).toBe(1_500);
-    expect(updatedItems.find((item) => item.orderItemId === itemRows[0]!.id)?.refundedAmount).toBe(5_000);
-    expect(updatedItems.find((item) => item.orderItemId === itemRows[1]!.id)?.eligibility).toBe('self_attendee');
+    expect(Number(recovery?.value ?? 0)).toBe(1_000);
+    expect(updatedItems.find((item) => item.orderItemId === itemRows[0]!.id)?.refundedAmount).toBe(
+      5_000,
+    );
+    expect(updatedItems.find((item) => item.orderItemId === itemRows[0]!.id)?.eligibility).toBe(
+      'self_attendee',
+    );
+    const [recoveryCommission] = await db
+      .select({ status: partnerCommissions.status })
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.id, commissionRows[0]!.id));
+    expect(recoveryCommission!.status).toBe('recovery_due');
 
     await db
       .update(partnerFinancialEventInbox)
@@ -515,8 +607,182 @@ persistent('partner financial ledger with real PostgreSQL', () => {
       .from(partnerFinancialEventInbox)
       .where(eq(partnerFinancialEventInbox.eventKey, expiredLeaseKey));
     expect(replayedItem!.refundedAmount).toBe(5_000);
-    expect(Number(replayedRecovery?.value ?? 0)).toBe(1_500);
+    expect(Number(replayedRecovery?.value ?? 0)).toBe(1_000);
     expect(recoveredLease!.status).toBe('processed');
+
+    const [laterRegistration] = await db
+      .insert(registrations)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        ticketTypeId: ticketType!.id,
+        registrationCode: `PR${organizationId.slice(0, 8)}L`,
+        status: 'confirmed',
+        attendee: {
+          name: '后续参会人',
+          mobile: '13800000099',
+          email: 'later@example.test',
+          company: '测试公司',
+          title: '测试职位',
+          city: '上海',
+        },
+        attendeeMobileE164: '+8613800000099',
+        attendeeEmailNormalized: 'later@example.test',
+      })
+      .returning();
+    const laterPurchaseIntentId = randomUUID();
+    const { laterOrder, laterItem } = await db.transaction(async (tx) => {
+      await tx.execute(sql`set constraints all deferred`);
+      const [createdOrder] = await tx
+        .insert(orders)
+        .values({
+          organizationId,
+          eventId: event!.id,
+          registrationId: laterRegistration!.id,
+          modelVersion: 2,
+          quantity: 1,
+          purchaserCustomerUserId: purchaserCustomerId,
+          purchaseIntentId: laterPurchaseIntentId,
+          purchaserSnapshot: {
+            customerUserId: purchaserCustomerId,
+            mobile: '+8613822222222',
+            name: '购买人',
+            email: 'buyer@example.test',
+            company: '购买方',
+            title: '采购',
+            city: '上海',
+          },
+          orderNo: `PL${organizationId.replaceAll('-', '').slice(0, 20)}`,
+          status: 'paid',
+          amount: 20_000,
+          currency: 'CNY',
+          pricingSnapshot: { refundPolicy: { enabled: false } },
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .returning();
+      const [createdItem] = await tx
+        .insert(orderItems)
+        .values({
+          orderId: createdOrder!.id,
+          registrationId: laterRegistration!.id,
+          organizationId,
+          eventId: event!.id,
+          position: 1,
+          ticketTypeId: ticketType!.id,
+          unitPrice: 20_000,
+          allocatedAmount: 20_000,
+          pricingSnapshot: { unitPrice: 20_000 },
+          state: 'active',
+        })
+        .returning();
+      return { laterOrder: createdOrder!, laterItem: createdItem! };
+    });
+    const [laterAttribution] = await db
+      .insert(partnerAttributionRevisions)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        orderId: laterOrder!.id,
+        purchaseIntentId: laterPurchaseIntentId,
+        orderVersion: laterOrder!.version,
+        partnerId: partner!.id,
+        referralLinkId: link!.id,
+        programVersionId: program!.id,
+        decision: 'attributed',
+        decisionReason: '测试后续有效主动点击',
+        attributionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000),
+        purchaserCustomerUserId: purchaserCustomerId,
+        orderSnapshot: { quantity: 1, amount: 20_000, currency: 'CNY' },
+        createdBy: 'checkout',
+      })
+      .returning();
+    const [laterPayment] = await db
+      .insert(payments)
+      .values({
+        orderId: laterOrder!.id,
+        partnerAttributionRevisionId: laterAttribution!.id,
+        provider: 'partner-test',
+        status: 'succeeded',
+        amount: 20_000,
+        currency: 'CNY',
+        succeededAt: paidAt,
+      })
+      .returning();
+    await db
+      .update(orders)
+      .set({ settledPaymentId: laterPayment!.id })
+      .where(eq(orders.id, laterOrder!.id));
+    const [laterRefund] = await db
+      .insert(refunds)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        orderId: laterOrder!.id,
+        paymentId: laterPayment!.id,
+        refundNo: `RL${organizationId.replaceAll('-', '').slice(0, 20)}`,
+        amount: 2_000,
+        currency: 'CNY',
+        status: 'succeeded',
+        reason: '乱序退款测试',
+        idempotencyKey: `partner-later-refund:${organizationId}`,
+      })
+      .returning();
+    await db.insert(refundItemAllocations).values({
+      refundId: laterRefund!.id,
+      paymentId: laterPayment!.id,
+      orderId: laterOrder!.id,
+      orderItemId: laterItem.id,
+      organizationId,
+      eventId: event!.id,
+      amount: 2_000,
+      basis: '乱序退款测试',
+    });
+    const laterRefundEventKey = `test-later-refund:${laterRefund!.id}`;
+    await db.insert(partnerFinancialEventInbox).values({
+      organizationId,
+      eventId: event!.id,
+      eventType: 'RefundSucceeded',
+      eventKey: laterRefundEventKey,
+      payload: { refundId: laterRefund!.id },
+    });
+    await db.insert(partnerFinancialEventInbox).values({
+      organizationId,
+      eventId: event!.id,
+      eventType: 'PaymentSucceeded',
+      eventKey: `test-later-payment:${laterPayment!.id}`,
+      payload: { orderId: laterOrder!.id },
+    });
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const [deferredRefund] = await db
+      .select({ status: partnerFinancialEventInbox.status })
+      .from(partnerFinancialEventInbox)
+      .where(eq(partnerFinancialEventInbox.eventKey, laterRefundEventKey));
+    expect(deferredRefund!.status).toBe('retrying');
+    await db
+      .update(partnerFinancialEventInbox)
+      .set({ nextAttemptAt: new Date(0) })
+      .where(eq(partnerFinancialEventInbox.eventKey, laterRefundEventKey));
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    expect(await releasePartnerCommissions(db)).toBe(1);
+    const [recoveredBalance] = await db
+      .select({ value: sum(partnerLedgerEntries.amount) })
+      .from(partnerLedgerEntries)
+      .where(
+        sql`${partnerLedgerEntries.partnerId} = ${partner!.id} and ${partnerLedgerEntries.balanceBucket} = 'recovery_due'`,
+      );
+    const [availableAfterRecovery] = await db
+      .select({ value: sum(partnerLedgerEntries.amount) })
+      .from(partnerLedgerEntries)
+      .where(
+        sql`${partnerLedgerEntries.partnerId} = ${partner!.id} and ${partnerLedgerEntries.balanceBucket} = 'available'`,
+      );
+    const [oldCommissionAfterRecovery] = await db
+      .select({ status: partnerCommissions.status })
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.id, commissionRows[0]!.id));
+    expect(Number(recoveredBalance?.value ?? 0)).toBe(0);
+    expect(Number(availableAfterRecovery?.value ?? 0)).toBe(800);
+    expect(oldCommissionAfterRecovery!.status).toBe('partially_reversed');
 
     await expect(reconcilePartnerFinancialFacts(db)).resolves.toEqual({
       missingPayments: 0,

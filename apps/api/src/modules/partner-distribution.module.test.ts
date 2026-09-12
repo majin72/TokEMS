@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { grantAllows } from '../common/auth.guard.js';
 import { AdminPartnerController } from './partner-distribution.module.js';
 
@@ -28,22 +28,13 @@ describe('partner distribution administration permissions', () => {
 
   it('protects transfer execution and reconciliation exports independently', () => {
     expect(
-      Reflect.getMetadata(
-        REQUIRED_GRANTS_METADATA,
-        AdminPartnerController.prototype.payouts,
-      ),
+      Reflect.getMetadata(REQUIRED_GRANTS_METADATA, AdminPartnerController.prototype.payouts),
     ).toEqual(['event.payout.review']);
     expect(
-      Reflect.getMetadata(
-        REQUIRED_GRANTS_METADATA,
-        AdminPartnerController.prototype.executeBatch,
-      ),
+      Reflect.getMetadata(REQUIRED_GRANTS_METADATA, AdminPartnerController.prototype.executeBatch),
     ).toEqual(['event.payout.execute']);
     expect(
-      Reflect.getMetadata(
-        REQUIRED_GRANTS_METADATA,
-        AdminPartnerController.prototype.exportPayouts,
-      ),
+      Reflect.getMetadata(REQUIRED_GRANTS_METADATA, AdminPartnerController.prototype.exportPayouts),
     ).toEqual(['event.payout.export']);
     expect(
       Reflect.getMetadata(
@@ -57,5 +48,60 @@ describe('partner distribution administration permissions', () => {
         AdminPartnerController.prototype.createReconciliation,
       ),
     ).toEqual(['event.payout.execute']);
+  });
+
+  it('forwards the route event scope to every resource-specific payout operation', async () => {
+    const partners = {
+      approvePayoutBatch: vi.fn().mockResolvedValue({}),
+      exportPayouts: vi.fn().mockResolvedValue([]),
+      verifyRecipient: vi.fn().mockResolvedValue({}),
+    };
+    const transfers = {
+      executeBatch: vi.fn().mockResolvedValue({}),
+      queryExecution: vi.fn().mockResolvedValue({}),
+    };
+    const controller = new AdminPartnerController(partners as never, transfers as never);
+    const request = { user: { organizationId: 'organization-1', sub: 'staff-1' } } as never;
+    const batchId = '00000000-0000-4000-8000-000000000001';
+    const executionId = '00000000-0000-4000-8000-000000000002';
+    const recipientId = '00000000-0000-4000-8000-000000000003';
+
+    await controller.reviewBatch(request, 42, batchId, {
+      expectedVersion: 1,
+      decision: 'approve',
+      reason: '复核信息完整，同意执行',
+    });
+    await controller.executeBatch(request, 42, batchId, { expectedVersion: 2 });
+    await controller.queryExecution(request, 42, executionId, { expectedVersion: 3 });
+    await controller.verifyRecipient(request, 42, recipientId);
+    const reply = {
+      header: vi.fn(),
+      send: vi.fn(),
+    };
+    reply.header.mockReturnValue(reply);
+    await controller.exportPayouts(request, 42, reply as never);
+
+    expect(partners.approvePayoutBatch).toHaveBeenCalledWith(
+      'organization-1',
+      42,
+      batchId,
+      'staff-1',
+      expect.objectContaining({ expectedVersion: 1 }),
+    );
+    expect(transfers.executeBatch).toHaveBeenCalledWith(
+      'organization-1',
+      42,
+      batchId,
+      'staff-1',
+      2,
+    );
+    expect(transfers.queryExecution).toHaveBeenCalledWith('organization-1', 42, executionId, 3);
+    expect(partners.verifyRecipient).toHaveBeenCalledWith(
+      'organization-1',
+      42,
+      recipientId,
+      'staff-1',
+    );
+    expect(partners.exportPayouts).toHaveBeenCalledWith('organization-1', 42, 'staff-1');
   });
 });

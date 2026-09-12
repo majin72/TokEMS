@@ -491,6 +491,13 @@
       "when": 1789228143173,
       "tag": "0069_outgoing_whirlwind",
       "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1789254820613,
+      "tag": "0070_partner_distribution_scope_guards",
+      "breakpoints": true
     }
   ]
 }

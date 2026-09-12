@@ -25,6 +25,7 @@ import {
   eventPartners,
   partnerFinancialEventInbox,
   partnerLedgerEntries,
+  partnerCommissions,
   partnerPayoutBatches,
   partnerPayoutExecutions,
   partnerPayoutRecipients,
@@ -122,10 +123,18 @@ function parseRecipientOAuthState(raw: string): RecipientOAuthState {
   try {
     value = JSON.parse(raw);
   } catch {
-    throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权状态无效', HttpStatus.UNAUTHORIZED);
+    throw new DomainError(
+      API_ERROR_CODES.UNAUTHORIZED,
+      '微信授权状态无效',
+      HttpStatus.UNAUTHORIZED,
+    );
   }
   if (!value || typeof value !== 'object') {
-    throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权状态无效', HttpStatus.UNAUTHORIZED);
+    throw new DomainError(
+      API_ERROR_CODES.UNAUTHORIZED,
+      '微信授权状态无效',
+      HttpStatus.UNAUTHORIZED,
+    );
   }
   const record = value as Record<string, unknown>;
   if (
@@ -138,7 +147,11 @@ function parseRecipientOAuthState(raw: string): RecipientOAuthState {
     typeof record.displayNameCiphertext !== 'string' ||
     !record.displayNameCiphertext
   ) {
-    throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权状态无效', HttpStatus.UNAUTHORIZED);
+    throw new DomainError(
+      API_ERROR_CODES.UNAUTHORIZED,
+      '微信授权状态无效',
+      HttpStatus.UNAUTHORIZED,
+    );
   }
   return record as RecipientOAuthState;
 }
@@ -152,7 +165,11 @@ function parseRecipientOAuthHandoff(raw: string): RecipientOAuthHandoff {
     typeof value.appId !== 'string' ||
     !value.appId
   ) {
-    throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权交接信息无效', HttpStatus.UNAUTHORIZED);
+    throw new DomainError(
+      API_ERROR_CODES.UNAUTHORIZED,
+      '微信授权交接信息无效',
+      HttpStatus.UNAUTHORIZED,
+    );
   }
   return { ...state, openidCiphertext: value.openidCiphertext, appId: value.appId };
 }
@@ -174,8 +191,7 @@ function publicConfig(raw: Record<string, unknown>): WeChatPublicConfig {
     mchId: typeof raw.mchId === 'string' ? raw.mchId : '',
     merchantCertificateSerial:
       typeof raw.merchantCertificateSerial === 'string' ? raw.merchantCertificateSerial : '',
-    platformPublicKeyId:
-      typeof raw.platformPublicKeyId === 'string' ? raw.platformPublicKeyId : '',
+    platformPublicKeyId: typeof raw.platformPublicKeyId === 'string' ? raw.platformPublicKeyId : '',
     oauthEnabled: raw.oauthEnabled === true,
   };
 }
@@ -250,7 +266,9 @@ export class MerchantTransferService {
       );
     }
     const config = publicConfig(row.config);
-    const transferConfig = PartnerTransferConfigurationSchema.parse(row.config.merchantTransfer ?? {});
+    const transferConfig = PartnerTransferConfigurationSchema.parse(
+      row.config.merchantTransfer ?? {},
+    );
     const secretValues = decryptIntegrationCredentials(
       organizationId,
       PROVIDER,
@@ -321,13 +339,21 @@ export class MerchantTransferService {
       !Number.isFinite(Number(timestamp)) ||
       Math.abs(Date.now() / 1000 - Number(timestamp)) > 300
     ) {
-      throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信转账签名信息无效', HttpStatus.UNAUTHORIZED);
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '微信转账签名信息无效',
+        HttpStatus.UNAUTHORIZED,
+      );
     }
     const verifier = createVerify('RSA-SHA256');
     verifier.update(`${timestamp}\n${nonce}\n${body}\n`);
     verifier.end();
     if (!verifier.verify(credentials.platformPublicKey, signature, 'base64')) {
-      throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信转账签名校验失败', HttpStatus.UNAUTHORIZED);
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '微信转账签名校验失败',
+        HttpStatus.UNAUTHORIZED,
+      );
     }
   }
 
@@ -391,11 +417,7 @@ export class MerchantTransferService {
     ).toString('base64');
   }
 
-  async startRecipientOAuth(
-    session: AuthenticatedCustomer,
-    eventId: number,
-    displayName: string,
-  ) {
+  async startRecipientOAuth(session: AuthenticatedCustomer, eventId: number, displayName: string) {
     const integration = await this.integration(session.organizationId);
     if (!integration.config.oauthEnabled || !integration.credentials.appSecret) {
       throw new DomainError(
@@ -432,7 +454,11 @@ export class MerchantTransferService {
         .limit(1),
     ]);
     if (!partner) {
-      throw new DomainError(API_ERROR_CODES.FORBIDDEN, '当前大会未开通合作伙伴资格', HttpStatus.FORBIDDEN);
+      throw new DomainError(
+        API_ERROR_CODES.FORBIDDEN,
+        '当前大会未开通合作伙伴资格',
+        HttpStatus.FORBIDDEN,
+      );
     }
     if (!recentSession) {
       throw new DomainError(
@@ -471,13 +497,21 @@ export class MerchantTransferService {
 
   async consumeRecipientOAuthCallback(code: string, state: string) {
     if (!code || !state || code.length > 200 || state.length > 200) {
-      throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, '微信授权回调参数无效', HttpStatus.BAD_REQUEST);
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '微信授权回调参数无效',
+        HttpStatus.BAD_REQUEST,
+      );
     }
     const raw = await this.redis
       .getClient()
       .getdel(`tokems:partner-recipient-oauth:state:${state}`);
     if (!raw) {
-      throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权状态无效或已过期', HttpStatus.UNAUTHORIZED);
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '微信授权状态无效或已过期',
+        HttpStatus.UNAUTHORIZED,
+      );
     }
     const record = parseRecipientOAuthState(raw);
     const integration = await this.integration(record.organizationId);
@@ -504,7 +538,11 @@ export class MerchantTransferService {
       );
     }
     if (!tokenBody.openid || tokenBody.errcode) {
-      throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权失败，请重新绑定', HttpStatus.UNAUTHORIZED);
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '微信授权失败，请重新绑定',
+        HttpStatus.UNAUTHORIZED,
+      );
     }
     const handoffCode = randomBytes(24).toString('base64url');
     const handoff: RecipientOAuthHandoff = {
@@ -515,7 +553,8 @@ export class MerchantTransferService {
     await this.redis
       .getClient()
       .setex(`tokems:partner-recipient-oauth:handoff:${handoffCode}`, 120, JSON.stringify(handoff));
-    const webBase = process.env.PAYOUT_PUBLIC_URL ?? process.env.PUBLIC_WEB_URL ?? 'http://localhost:3000';
+    const webBase =
+      process.env.PAYOUT_PUBLIC_URL ?? process.env.PUBLIC_WEB_URL ?? 'http://localhost:3000';
     const redirect = new URL(`/account/partnerships/${record.eventId}`, webBase);
     redirect.hash = `partner-recipient-handoff=${encodeURIComponent(handoffCode)}`;
     return redirect.toString();
@@ -530,7 +569,11 @@ export class MerchantTransferService {
       .getClient()
       .getdel(`tokems:partner-recipient-oauth:handoff:${handoffCode}`);
     if (!raw) {
-      throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权交接码无效或已使用', HttpStatus.UNAUTHORIZED);
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '微信授权交接码无效或已使用',
+        HttpStatus.UNAUTHORIZED,
+      );
     }
     const handoff = parseRecipientOAuthHandoff(raw);
     if (
@@ -540,7 +583,11 @@ export class MerchantTransferService {
       handoff.customerUserId !== session.customerUserId ||
       handoff.customerSessionId !== session.sessionId
     ) {
-      throw new DomainError(API_ERROR_CODES.UNAUTHORIZED, '微信授权与当前登录身份不一致', HttpStatus.UNAUTHORIZED);
+      throw new DomainError(
+        API_ERROR_CODES.UNAUTHORIZED,
+        '微信授权与当前登录身份不一致',
+        HttpStatus.UNAUTHORIZED,
+      );
     }
     const secret = payoutDataSecret();
     const openid = openSecret(handoff.openidCiphertext, secret);
@@ -650,7 +697,16 @@ export class MerchantTransferService {
     state: MerchantTransferState | 'unknown',
     response: WeChatTransferResponse,
   ) {
+    const [scope] = await this.db()
+      .select({ partnerId: partnerPayoutExecutions.partnerId })
+      .from(partnerPayoutExecutions)
+      .where(eq(partnerPayoutExecutions.id, executionId))
+      .limit(1);
+    if (!scope) return undefined;
     return this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${scope.partnerId}`}, 0))`,
+      );
       const [execution] = await tx
         .select()
         .from(partnerPayoutExecutions)
@@ -667,7 +723,11 @@ export class MerchantTransferService {
         return execution;
       }
       const [request] = await tx
-        .select({ grossAmount: partnerPayoutRequests.grossAmount })
+        .select({
+          grossAmount: partnerPayoutRequests.grossAmount,
+          taxAmount: partnerPayoutRequests.taxAmount,
+          netAmount: partnerPayoutRequests.netAmount,
+        })
         .from(partnerPayoutRequests)
         .where(eq(partnerPayoutRequests.id, execution.payoutRequestId))
         .for('update')
@@ -697,7 +757,9 @@ export class MerchantTransferService {
           responseSnapshot: sanitizedTransferResponse(response),
           confirmationPackage: response.package_info ?? execution.confirmationPackage,
           confirmationExpiresAt:
-            state === 'WAIT_USER_CONFIRM' ? new Date(Date.now() + 24 * 60 * 60_000) : execution.confirmationExpiresAt,
+            state === 'WAIT_USER_CONFIRM'
+              ? new Date(Date.now() + 24 * 60 * 60_000)
+              : execution.confirmationExpiresAt,
           lastQueriedAt: now,
           queryCount: execution.queryCount + 1,
           failureCode: disposition?.terminal && !disposition.succeeded ? state : null,
@@ -742,13 +804,41 @@ export class MerchantTransferService {
               payoutExecutionId: execution.id,
               entryType: 'payout',
               balanceBucket: 'paid',
-              amount: request.grossAmount,
+              amount: request.netAmount,
               businessKey: `payout:${execution.payoutRequestId}:wechat:paid`,
-              reason: '微信商家转账到账',
+              reason: '微信商家转账净额到账',
             },
+            ...(request.taxAmount > 0
+              ? [
+                  {
+                    organizationId: execution.organizationId,
+                    eventId: execution.eventId,
+                    partnerId: execution.partnerId,
+                    payoutRequestId: execution.payoutRequestId,
+                    payoutExecutionId: execution.id,
+                    entryType: 'tax_withholding' as const,
+                    balanceBucket: 'paid' as const,
+                    amount: request.taxAmount,
+                    businessKey: `payout:${execution.payoutRequestId}:wechat:tax`,
+                    reason: '微信商家转账代扣税费',
+                  },
+                ]
+              : []),
           ])
           .onConflictDoNothing();
       } else if (disposition?.terminal) {
+        const [recovery] = await tx
+          .select({ value: sum(partnerLedgerEntries.amount) })
+          .from(partnerLedgerEntries)
+          .where(
+            and(
+              eq(partnerLedgerEntries.partnerId, execution.partnerId),
+              eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
+            ),
+          );
+        const recoveryAmount = Math.max(0, Number(recovery?.value ?? 0));
+        const recoveredAmount = Math.min(request.grossAmount, recoveryAmount);
+        const availableAmount = request.grossAmount - recoveredAmount;
         await tx
           .insert(partnerLedgerEntries)
           .values([
@@ -764,20 +854,59 @@ export class MerchantTransferService {
               businessKey: `payout:${execution.payoutRequestId}:wechat:release:reserved`,
               reason: '微信商家转账未到账，释放占用金额',
             },
-            {
-              organizationId: execution.organizationId,
-              eventId: execution.eventId,
-              partnerId: execution.partnerId,
-              payoutRequestId: execution.payoutRequestId,
-              payoutExecutionId: execution.id,
-              entryType: 'payout_release',
-              balanceBucket: 'available',
-              amount: request.grossAmount,
-              businessKey: `payout:${execution.payoutRequestId}:wechat:release:available`,
-              reason: '微信商家转账未到账，释放占用金额',
-            },
+            ...(recoveredAmount > 0
+              ? [
+                  {
+                    organizationId: execution.organizationId,
+                    eventId: execution.eventId,
+                    partnerId: execution.partnerId,
+                    payoutRequestId: execution.payoutRequestId,
+                    payoutExecutionId: execution.id,
+                    entryType: 'recovery' as const,
+                    balanceBucket: 'recovery_due' as const,
+                    amount: -recoveredAmount,
+                    businessKey: `payout:${execution.payoutRequestId}:wechat:release:recovery`,
+                    reason: '释放的微信转账占用金额优先抵扣待追偿金额',
+                  },
+                ]
+              : []),
+            ...(availableAmount > 0
+              ? [
+                  {
+                    organizationId: execution.organizationId,
+                    eventId: execution.eventId,
+                    partnerId: execution.partnerId,
+                    payoutRequestId: execution.payoutRequestId,
+                    payoutExecutionId: execution.id,
+                    entryType: 'payout_release' as const,
+                    balanceBucket: 'available' as const,
+                    amount: availableAmount,
+                    businessKey: `payout:${execution.payoutRequestId}:wechat:release:available`,
+                    reason: '微信商家转账未到账，释放占用金额',
+                  },
+                ]
+              : []),
           ])
           .onConflictDoNothing();
+        if (recoveryAmount > 0 && recoveredAmount === recoveryAmount) {
+          await tx
+            .update(partnerCommissions)
+            .set({
+              status: sql`case
+                when ${partnerCommissions.reversedAmount} >= ${partnerCommissions.commissionAmount} then 'reversed'
+                when ${partnerCommissions.reversedAmount} > 0 then 'partially_reversed'
+                else ${partnerCommissions.status}
+              end`,
+              version: sql`${partnerCommissions.version} + 1`,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(partnerCommissions.partnerId, execution.partnerId),
+                eq(partnerCommissions.status, 'recovery_due'),
+              ),
+            );
+        }
       }
       const unfinished = await tx
         .select({ id: partnerPayoutRequests.id })
@@ -792,14 +921,25 @@ export class MerchantTransferService {
       if (!unfinished.length) {
         await tx
           .update(partnerPayoutBatches)
-          .set({ status: 'completed', completedAt: now, version: sql`${partnerPayoutBatches.version} + 1`, updatedAt: now })
+          .set({
+            status: 'completed',
+            completedAt: now,
+            version: sql`${partnerPayoutBatches.version} + 1`,
+            updatedAt: now,
+          })
           .where(eq(partnerPayoutBatches.id, execution.batchId));
       }
       return updated!;
     });
   }
 
-  async executeBatch(organizationId: string, batchId: string, actorId: string, expectedVersion: number) {
+  async executeBatch(
+    organizationId: string,
+    eventId: number,
+    batchId: string,
+    actorId: string,
+    expectedVersion: number,
+  ) {
     const integration = await this.integration(organizationId);
     const prepared = await this.db().transaction(async (tx) => {
       await tx.execute(
@@ -809,11 +949,16 @@ export class MerchantTransferService {
         .select()
         .from(partnerPayoutBatches)
         .where(
-          and(eq(partnerPayoutBatches.id, batchId), eq(partnerPayoutBatches.organizationId, organizationId)),
+          and(
+            eq(partnerPayoutBatches.id, batchId),
+            eq(partnerPayoutBatches.organizationId, organizationId),
+            eq(partnerPayoutBatches.eventId, eventId),
+          ),
         )
         .for('update')
         .limit(1);
-      if (!batch) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '出款批次不存在', HttpStatus.NOT_FOUND);
+      if (!batch)
+        throw new DomainError(API_ERROR_CODES.NOT_FOUND, '出款批次不存在', HttpStatus.NOT_FOUND);
       if (!batch.eventId) {
         throw new DomainError(
           API_ERROR_CODES.INVALID_STATE_TRANSITION,
@@ -871,7 +1016,10 @@ export class MerchantTransferService {
       const rows = await tx
         .select({ request: partnerPayoutRequests, recipient: partnerPayoutRecipients })
         .from(partnerPayoutRequests)
-        .innerJoin(partnerPayoutRecipients, eq(partnerPayoutRecipients.id, partnerPayoutRequests.recipientId))
+        .innerJoin(
+          partnerPayoutRecipients,
+          eq(partnerPayoutRecipients.id, partnerPayoutRequests.recipientId),
+        )
         .where(
           and(
             eq(partnerPayoutRequests.batchId, batch.id),
@@ -893,6 +1041,33 @@ export class MerchantTransferService {
           '出款批次中存在不可执行的申请或收款人',
           HttpStatus.CONFLICT,
         );
+      }
+      const partnerIds = [...new Set(rows.map((row) => row.request.partnerId))].sort();
+      for (const partnerId of partnerIds) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${partnerId}`}, 0))`,
+        );
+      }
+      if (partnerIds.length) {
+        const [blockedPartner] = await tx
+          .select({ partnerId: partnerLedgerEntries.partnerId })
+          .from(partnerLedgerEntries)
+          .where(
+            and(
+              inArray(partnerLedgerEntries.partnerId, partnerIds),
+              eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
+            ),
+          )
+          .groupBy(partnerLedgerEntries.partnerId)
+          .having(sql`sum(${partnerLedgerEntries.amount}) > 0`)
+          .limit(1);
+        if (blockedPartner) {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '出款批次中存在新增待追偿金额，请重新组批',
+            HttpStatus.CONFLICT,
+          );
+        }
       }
       const dayStart = startOfShanghaiDay();
       const monthStart = startOfShanghaiMonth();
@@ -927,9 +1102,18 @@ export class MerchantTransferService {
         const [userDay] = await tx
           .select({ value: sum(partnerPayoutExecutions.amount) })
           .from(partnerPayoutExecutions)
+          .innerJoin(
+            partnerPayoutRequests,
+            eq(partnerPayoutRequests.id, partnerPayoutExecutions.payoutRequestId),
+          )
+          .innerJoin(
+            partnerPayoutRecipients,
+            eq(partnerPayoutRecipients.id, partnerPayoutRequests.recipientId),
+          )
           .where(
             and(
-              eq(partnerPayoutExecutions.partnerId, row.request.partnerId),
+              eq(partnerPayoutExecutions.organizationId, organizationId),
+              eq(partnerPayoutRecipients.accountFingerprint, row.recipient.accountFingerprint),
               gte(partnerPayoutExecutions.createdAt, dayStart),
               inArray(partnerPayoutExecutions.status, [...ACTIVE_EXECUTION_STATES]),
             ),
@@ -1009,7 +1193,11 @@ export class MerchantTransferService {
         runningMonth += row.request.netAmount;
         await tx
           .update(partnerPayoutRequests)
-          .set({ status: 'executing', version: sql`${partnerPayoutRequests.version} + 1`, updatedAt: new Date() })
+          .set({
+            status: 'executing',
+            version: sql`${partnerPayoutRequests.version} + 1`,
+            updatedAt: new Date(),
+          })
           .where(eq(partnerPayoutRequests.id, row.request.id));
       }
       await tx
@@ -1021,6 +1209,23 @@ export class MerchantTransferService {
           updatedAt: new Date(),
         })
         .where(eq(partnerPayoutBatches.id, batch.id));
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.payout_batch.execution_started',
+        resourceType: 'partner_payout_batch',
+        resourceId: batch.id,
+        before: { status: batch.status, version: batch.version },
+        after: {
+          status: 'executing',
+          executionCount: executions.length,
+          merchantId: integration.config.mchId,
+          integrationRevision: integration.row.revision,
+        },
+        traceId: randomUUID(),
+      });
       return executions;
     });
 
@@ -1033,7 +1238,9 @@ export class MerchantTransferService {
         transfer_scene_id: execution.sceneId,
         openid,
         ...(execution.amount >= 200_000
-          ? { user_name: this.encryptedName(displayName, integration.credentials.platformPublicKey) }
+          ? {
+              user_name: this.encryptedName(displayName, integration.credentials.platformPublicKey),
+            }
           : {}),
         transfer_amount: execution.amount,
         transfer_remark: execution.remunerationDescription,
@@ -1057,7 +1264,12 @@ export class MerchantTransferService {
     return { batchId, items: results };
   }
 
-  async queryExecution(organizationId: string, executionId: string, expectedVersion?: number) {
+  async queryExecution(
+    organizationId: string,
+    eventId: number,
+    executionId: string,
+    expectedVersion?: number,
+  ) {
     const [execution] = await this.db()
       .select()
       .from(partnerPayoutExecutions)
@@ -1065,12 +1277,17 @@ export class MerchantTransferService {
         and(
           eq(partnerPayoutExecutions.id, executionId),
           eq(partnerPayoutExecutions.organizationId, organizationId),
+          eq(partnerPayoutExecutions.eventId, eventId),
           eq(partnerPayoutExecutions.channel, 'wechat_transfer'),
         ),
       )
       .limit(1);
     if (!execution || !execution.merchantBillNo) {
-      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '微信转账执行记录不存在', HttpStatus.NOT_FOUND);
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '微信转账执行记录不存在',
+        HttpStatus.NOT_FOUND,
+      );
     }
     if (expectedVersion && execution.version !== expectedVersion) {
       throw new DomainError(
@@ -1099,7 +1316,10 @@ export class MerchantTransferService {
     const [row] = await this.db()
       .select({ execution: partnerPayoutExecutions, request: partnerPayoutRequests })
       .from(partnerPayoutExecutions)
-      .innerJoin(partnerPayoutRequests, eq(partnerPayoutRequests.id, partnerPayoutExecutions.payoutRequestId))
+      .innerJoin(
+        partnerPayoutRequests,
+        eq(partnerPayoutRequests.id, partnerPayoutExecutions.payoutRequestId),
+      )
       .where(
         and(
           eq(partnerPayoutRequests.id, requestId),
@@ -1109,7 +1329,12 @@ export class MerchantTransferService {
         ),
       )
       .limit(1);
-    if (!row || row.execution.status !== 'WAIT_USER_CONFIRM' || !row.execution.confirmationPackage) {
+    if (
+      !row ||
+      row.execution.status !== 'WAIT_USER_CONFIRM' ||
+      !row.execution.confirmationPackage ||
+      (row.execution.confirmationExpiresAt && row.execution.confirmationExpiresAt <= new Date())
+    ) {
       throw new DomainError(
         API_ERROR_CODES.INVALID_STATE_TRANSITION,
         '当前提现无需微信用户确认',
@@ -1136,6 +1361,7 @@ export class MerchantTransferService {
     const [updated] = await this.db()
       .update(partnerPayoutRequests)
       .set({
+        userConfirmedAt: new Date(),
         version: sql`${partnerPayoutRequests.version} + 1`,
         updatedAt: new Date(),
       })
@@ -1147,6 +1373,15 @@ export class MerchantTransferService {
           eq(partnerPayoutRequests.version, expectedVersion),
           eq(partnerPayoutRequests.status, 'executing'),
           sql`exists (select 1 from event_partners ep where ep.id = ${partnerPayoutRequests.partnerId} and ep.customer_user_id = ${session.customerUserId})`,
+          sql`exists (
+            select 1 from partner_payout_executions execution
+            where execution.payout_request_id = ${partnerPayoutRequests.id}
+              and execution.status = 'WAIT_USER_CONFIRM'
+              and (
+                execution.confirmation_expires_at is null
+                or execution.confirmation_expires_at > now()
+              )
+          )`,
         ),
       )
       .returning();
@@ -1171,7 +1406,12 @@ export class MerchantTransferService {
     },
   ) {
     const integration = await this.integration(organizationId);
-    this.verifySignedMessage(rawBody.toString('utf8'), headers, integration.config, integration.credentials);
+    this.verifySignedMessage(
+      rawBody.toString('utf8'),
+      headers,
+      integration.config,
+      integration.credentials,
+    );
     let notification: WeChatNotification;
     let resource: WeChatTransferResponse & { mchid?: string };
     try {
@@ -1195,17 +1435,31 @@ export class MerchantTransferService {
       decipher.setAAD(Buffer.from(notification.resource.associated_data ?? '', 'utf8'));
       decipher.setAuthTag(ciphertext.subarray(-16));
       resource = JSON.parse(
-        Buffer.concat([decipher.update(ciphertext.subarray(0, -16)), decipher.final()]).toString('utf8'),
+        Buffer.concat([decipher.update(ciphertext.subarray(0, -16)), decipher.final()]).toString(
+          'utf8',
+        ),
       ) as WeChatTransferResponse & { mchid?: string };
     } catch {
-      throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, '微信转账通知内容无效', HttpStatus.BAD_REQUEST);
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '微信转账通知内容无效',
+        HttpStatus.BAD_REQUEST,
+      );
     }
     if (resource.mchid !== integration.config.mchId || !resource.out_bill_no) {
-      throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, '微信转账通知商户归属无效', HttpStatus.BAD_REQUEST);
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '微信转账通知商户归属无效',
+        HttpStatus.BAD_REQUEST,
+      );
     }
     const state = MerchantTransferStateSchema.safeParse(resource.state);
     if (!state.success || !['SUCCESS', 'FAIL', 'CANCELLED'].includes(state.data)) {
-      throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, '微信转账通知终态无效', HttpStatus.BAD_REQUEST);
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '微信转账通知终态无效',
+        HttpStatus.BAD_REQUEST,
+      );
     }
     const [execution] = await this.db()
       .select({
@@ -1221,7 +1475,11 @@ export class MerchantTransferService {
       )
       .limit(1);
     if (!execution) {
-      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '微信转账通知未匹配本地记录', HttpStatus.NOT_FOUND);
+      throw new DomainError(
+        API_ERROR_CODES.NOT_FOUND,
+        '微信转账通知未匹配本地记录',
+        HttpStatus.NOT_FOUND,
+      );
     }
     await this.db()
       .insert(partnerFinancialEventInbox)
@@ -1241,7 +1499,11 @@ export class MerchantTransferService {
 
   async reconcileStaleExecutions(limit = 50) {
     const stale = await this.db()
-      .select({ id: partnerPayoutExecutions.id, organizationId: partnerPayoutExecutions.organizationId })
+      .select({
+        id: partnerPayoutExecutions.id,
+        organizationId: partnerPayoutExecutions.organizationId,
+        eventId: partnerPayoutExecutions.eventId,
+      })
       .from(partnerPayoutExecutions)
       .where(
         and(
@@ -1260,7 +1522,9 @@ export class MerchantTransferService {
       )
       .limit(limit);
     for (const execution of stale) {
-      await this.queryExecution(execution.organizationId, execution.id).catch(() => undefined);
+      await this.queryExecution(execution.organizationId, execution.eventId, execution.id).catch(
+        () => undefined,
+      );
     }
     return { checked: stale.length };
   }

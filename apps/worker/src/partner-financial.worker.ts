@@ -75,10 +75,7 @@ export async function enqueuePartnerFinancialEvent(
     .onConflictDoNothing();
 }
 
-function refundWindowEnd(
-  paidAt: Date,
-  pricingSnapshot: Record<string, unknown>,
-) {
+function refundWindowEnd(paidAt: Date, pricingSnapshot: Record<string, unknown>) {
   const policy = pricingSnapshot.refundPolicy;
   if (!policy || typeof policy !== 'object') return null;
   const record = policy as Record<string, unknown>;
@@ -87,10 +84,16 @@ function refundWindowEnd(
   return new Date(paidAt.getTime() + days * 24 * 60 * 60_000);
 }
 
-async function consumePayment(db: ConferenceDatabase, inboxId: string, payload: Record<string, unknown>) {
+async function consumePayment(
+  db: ConferenceDatabase,
+  inboxId: string,
+  payload: Record<string, unknown>,
+) {
   const orderId = stringField(payload, 'orderId');
   await db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`partner-commission:${orderId}`}, 0))`);
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`partner-commission:${orderId}`}, 0))`,
+    );
     const [scope] = await tx
       .select({ order: orders, payment: payments, attribution: partnerAttributionRevisions })
       .from(orders)
@@ -108,6 +111,9 @@ async function consumePayment(db: ConferenceDatabase, inboxId: string, payload: 
       )
       .limit(1);
     if (!scope?.attribution.partnerId || !scope.attribution.programVersionId) return;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`partner-commission-sequence:${scope.attribution.partnerId}`}, 0))`,
+    );
     const [existing] = await tx
       .select({ id: partnerCommissions.id })
       .from(partnerCommissions)
@@ -153,7 +159,8 @@ async function consumePayment(db: ConferenceDatabase, inboxId: string, payload: 
     );
     const eligibleTickets = new Set(program.eligibleTicketTypeIds);
     const calculated = lines.map((line) => {
-      const ticketEligible = eligibleTickets.size === 0 || eligibleTickets.has(line.item.ticketTypeId);
+      const ticketEligible =
+        eligibleTickets.size === 0 || eligibleTickets.has(line.item.ticketTypeId);
       const selfAttendee = line.registration.customerUserId === partner.customerUserId;
       const eligibility = !ticketEligible
         ? ('ticket_excluded' as const)
@@ -170,7 +177,10 @@ async function consumePayment(db: ConferenceDatabase, inboxId: string, payload: 
         }),
       };
     });
-    const eligibleAmount = calculated.reduce((total, item) => total + item.result.eligibleAmount, 0);
+    const eligibleAmount = calculated.reduce(
+      (total, item) => total + item.result.eligibleAmount,
+      0,
+    );
     const commissionAmount = calculated.reduce(
       (total, item) => total + item.result.commissionAmount,
       0,
@@ -240,7 +250,8 @@ async function consumePayment(db: ConferenceDatabase, inboxId: string, payload: 
         reason: '支付成功后生成待结算佣金',
         evidence: { orderId, paymentId: scope.payment.id },
       }));
-    if (ledgerRows.length) await tx.insert(partnerLedgerEntries).values(ledgerRows).onConflictDoNothing();
+    if (ledgerRows.length)
+      await tx.insert(partnerLedgerEntries).values(ledgerRows).onConflictDoNothing();
   });
 }
 
@@ -261,14 +272,24 @@ async function recalculateCommission(db: ConferenceDatabase, commissionId: strin
     .from(partnerCommissions)
     .where(eq(partnerCommissions.id, commissionId))
     .limit(1);
+  const [recovery] = await db
+    .select({ value: sum(partnerLedgerEntries.amount) })
+    .from(partnerLedgerEntries)
+    .where(
+      and(
+        eq(partnerLedgerEntries.commissionId, commissionId),
+        eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
+      ),
+    );
+  const recoveryAmount = Math.max(0, Number(recovery?.value ?? 0));
   const status =
-    reversedAmount >= commissionAmount
-      ? 'reversed'
-      : reversedAmount > 0
-        ? current?.status === 'paid' || current?.status === 'reserved' || current?.status === 'recovery_due'
-          ? 'recovery_due'
-          : 'partially_reversed'
-        : current?.status ?? 'pending';
+    recoveryAmount > 0
+      ? 'recovery_due'
+      : reversedAmount >= commissionAmount
+        ? 'reversed'
+        : reversedAmount > 0
+          ? 'partially_reversed'
+          : (current?.status ?? 'pending');
   await db
     .update(partnerCommissions)
     .set({
@@ -283,14 +304,47 @@ async function recalculateCommission(db: ConferenceDatabase, commissionId: strin
     .where(eq(partnerCommissions.id, commissionId));
 }
 
-async function consumeRefund(db: ConferenceDatabase, inboxId: string, payload: Record<string, unknown>) {
+async function consumeRefund(
+  db: ConferenceDatabase,
+  inboxId: string,
+  payload: Record<string, unknown>,
+) {
   const refundId = stringField(payload, 'refundId');
   const allocations = await db
-    .select({ allocation: refundItemAllocations, line: partnerCommissionItems, commission: partnerCommissions })
+    .select({
+      allocation: refundItemAllocations,
+      line: partnerCommissionItems,
+      commission: partnerCommissions,
+    })
     .from(refundItemAllocations)
-    .innerJoin(partnerCommissionItems, eq(partnerCommissionItems.orderItemId, refundItemAllocations.orderItemId))
+    .innerJoin(
+      partnerCommissionItems,
+      eq(partnerCommissionItems.orderItemId, refundItemAllocations.orderItemId),
+    )
     .innerJoin(partnerCommissions, eq(partnerCommissions.id, partnerCommissionItems.commissionId))
     .where(eq(refundItemAllocations.refundId, refundId));
+  if (!allocations.length) {
+    const [attributedRefund] = await db
+      .select({ orderId: refunds.orderId })
+      .from(refunds)
+      .innerJoin(payments, eq(payments.id, refunds.paymentId))
+      .innerJoin(
+        partnerAttributionRevisions,
+        eq(partnerAttributionRevisions.id, payments.partnerAttributionRevisionId),
+      )
+      .where(
+        and(
+          eq(refunds.id, refundId),
+          eq(refunds.status, 'succeeded'),
+          eq(partnerAttributionRevisions.decision, 'attributed'),
+        ),
+      )
+      .limit(1);
+    if (attributedRefund) {
+      throw new Error(`Partner commission is not ready for refund ${refundId}`);
+    }
+    return;
+  }
   const touched = new Set<string>();
   for (const row of allocations) {
     await db.transaction(async (tx) => {
@@ -306,9 +360,9 @@ async function consumeRefund(db: ConferenceDatabase, inboxId: string, payload: R
         .where(eq(partnerCommissionItems.id, row.line.id))
         .for('update')
         .limit(1);
-      if (!line || line.eligibility !== 'eligible') return;
+      if (!line) return;
       const [commission] = await tx
-        .select({ status: partnerCommissions.status })
+        .select({ status: partnerCommissions.status, availableAt: partnerCommissions.availableAt })
         .from(partnerCommissions)
         .where(eq(partnerCommissions.id, line.commissionId))
         .for('update')
@@ -325,23 +379,36 @@ async function consumeRefund(db: ConferenceDatabase, inboxId: string, payload: R
         );
       if (!commission) return;
       const nextRefunded = Math.min(line.grossAmount, Number(refundTotal?.value ?? 0));
-      const next = calculateCommissionLine({
-        grossAmount: line.grossAmount,
-        refundedAmount: nextRefunded,
-        rateBps: line.rateBps,
-        eligible: true,
-      });
-      const targetReversedAmount = line.commissionAmount - next.commissionAmount;
+      const commissionEligible = line.eligibility === 'eligible' || line.eligibility === 'refunded';
+      const next = commissionEligible
+        ? calculateCommissionLine({
+            grossAmount: line.grossAmount,
+            refundedAmount: nextRefunded,
+            rateBps: line.rateBps,
+            eligible: true,
+          })
+        : null;
+      const targetReversedAmount = next
+        ? Math.max(line.reversedAmount, line.commissionAmount - next.commissionAmount)
+        : line.reversedAmount;
       const delta = Math.max(0, targetReversedAmount - line.reversedAmount);
       if (nextRefunded === line.refundedAmount && delta === 0) return;
       await tx
         .update(partnerCommissionItems)
         .set({
-          eligibleAmount: next.eligibleAmount,
+          eligibleAmount: next?.eligibleAmount ?? line.eligibleAmount,
           refundedAmount: nextRefunded,
           reversedAmount: targetReversedAmount,
-          eligibility: next.eligibleAmount === 0 ? 'refunded' : 'eligible',
-          eligibilityReason: next.eligibleAmount === 0 ? '订单明细已全额退款' : '订单明细发生部分退款',
+          eligibility: next
+            ? next.eligibleAmount === 0
+              ? 'refunded'
+              : 'eligible'
+            : line.eligibility,
+          eligibilityReason: next
+            ? next.eligibleAmount === 0
+              ? '订单明细已全额退款'
+              : '订单明细发生部分退款'
+            : line.eligibilityReason,
           version: line.version + 1,
           updatedAt: new Date(),
         })
@@ -357,52 +424,59 @@ async function consumeRefund(db: ConferenceDatabase, inboxId: string, payload: R
             ),
           );
         const availableAmount = Math.max(0, Number(available?.value ?? 0));
-        const debitAmount = commission.status === 'pending' ? delta : Math.min(delta, availableAmount);
-        const recoveryAmount = commission.status === 'pending' ? 0 : delta - debitAmount;
+        const pendingSettlement = !commission.availableAt;
+        const debitAmount = pendingSettlement ? delta : Math.min(delta, availableAmount);
+        const recoveryAmount = pendingSettlement ? 0 : delta - debitAmount;
         await tx
           .insert(partnerLedgerEntries)
           .values([
             ...(debitAmount > 0
-              ? [{
-                  organizationId: line.organizationId,
-                  eventId: line.eventId,
-                  partnerId: line.partnerId,
-                  commissionId: line.commissionId,
-                  commissionItemId: line.id,
-                  entryType: 'refund_reversal' as const,
-                  balanceBucket: commission.status === 'pending' ? 'pending' as const : 'available' as const,
-                  amount: -debitAmount,
-                  businessKey: `refund:${row.allocation.id}:commission:${line.id}:debit`,
-                  sourceEventId: inboxId,
-                  reason: '订单明细退款冲正佣金',
-                  evidence: {
-                    refundId,
-                    allocationId: row.allocation.id,
-                    amount: row.allocation.amount,
-                    cumulativeRefundedAmount: nextRefunded,
+              ? [
+                  {
+                    organizationId: line.organizationId,
+                    eventId: line.eventId,
+                    partnerId: line.partnerId,
+                    commissionId: line.commissionId,
+                    commissionItemId: line.id,
+                    entryType: 'refund_reversal' as const,
+                    balanceBucket: pendingSettlement
+                      ? ('pending' as const)
+                      : ('available' as const),
+                    amount: -debitAmount,
+                    businessKey: `refund:${row.allocation.id}:commission:${line.id}:debit`,
+                    sourceEventId: inboxId,
+                    reason: '订单明细退款冲正佣金',
+                    evidence: {
+                      refundId,
+                      allocationId: row.allocation.id,
+                      amount: row.allocation.amount,
+                      cumulativeRefundedAmount: nextRefunded,
+                    },
                   },
-                }]
+                ]
               : []),
             ...(recoveryAmount > 0
-              ? [{
-                  organizationId: line.organizationId,
-                  eventId: line.eventId,
-                  partnerId: line.partnerId,
-                  commissionId: line.commissionId,
-                  commissionItemId: line.id,
-                  entryType: 'recovery' as const,
-                  balanceBucket: 'recovery_due' as const,
-                  amount: recoveryAmount,
-                  businessKey: `refund:${row.allocation.id}:commission:${line.id}:recovery`,
-                  sourceEventId: inboxId,
-                  reason: '退款冲正超过当前可提现余额，登记待追偿',
-                  evidence: {
-                    refundId,
-                    allocationId: row.allocation.id,
-                    amount: row.allocation.amount,
-                    cumulativeRefundedAmount: nextRefunded,
+              ? [
+                  {
+                    organizationId: line.organizationId,
+                    eventId: line.eventId,
+                    partnerId: line.partnerId,
+                    commissionId: line.commissionId,
+                    commissionItemId: line.id,
+                    entryType: 'recovery' as const,
+                    balanceBucket: 'recovery_due' as const,
+                    amount: recoveryAmount,
+                    businessKey: `refund:${row.allocation.id}:commission:${line.id}:recovery`,
+                    sourceEventId: inboxId,
+                    reason: '退款冲正超过当前可提现余额，登记待追偿',
+                    evidence: {
+                      refundId,
+                      allocationId: row.allocation.id,
+                      amount: row.allocation.amount,
+                      cumulativeRefundedAmount: nextRefunded,
+                    },
                   },
-                }]
+                ]
               : []),
           ])
           .onConflictDoNothing();
@@ -419,83 +493,148 @@ async function consumeRefund(db: ConferenceDatabase, inboxId: string, payload: R
   for (const commissionId of touched) await recalculateCommission(db, commissionId);
 }
 
-async function consumeClaim(db: ConferenceDatabase, inboxId: string, payload: Record<string, unknown>) {
+async function consumeClaim(
+  db: ConferenceDatabase,
+  inboxId: string,
+  payload: Record<string, unknown>,
+) {
   const orderItemId = stringField(payload, 'orderItemId');
   const customerUserId = stringField(payload, 'customerUserId');
   const [scope] = await db
-    .select({ line: partnerCommissionItems, commission: partnerCommissions, partner: eventPartners })
+    .select({ line: partnerCommissionItems, partner: eventPartners })
     .from(partnerCommissionItems)
-    .innerJoin(partnerCommissions, eq(partnerCommissions.id, partnerCommissionItems.commissionId))
     .innerJoin(eventPartners, eq(eventPartners.id, partnerCommissionItems.partnerId))
     .where(eq(partnerCommissionItems.orderItemId, orderItemId))
     .limit(1);
-  if (!scope || scope.partner.customerUserId !== customerUserId || scope.line.eligibility !== 'eligible') return;
-  const delta = scope.line.commissionAmount - scope.line.reversedAmount;
-  if (delta <= 0) return;
+  if (!scope) {
+    const [attributedOrder] = await db
+      .select({ partnerCustomerUserId: eventPartners.customerUserId })
+      .from(orderItems)
+      .innerJoin(orders, eq(orders.id, orderItems.orderId))
+      .innerJoin(payments, eq(payments.id, orders.settledPaymentId))
+      .innerJoin(
+        partnerAttributionRevisions,
+        eq(partnerAttributionRevisions.id, payments.partnerAttributionRevisionId),
+      )
+      .innerJoin(eventPartners, eq(eventPartners.id, partnerAttributionRevisions.partnerId))
+      .where(
+        and(eq(orderItems.id, orderItemId), eq(partnerAttributionRevisions.decision, 'attributed')),
+      )
+      .limit(1);
+    if (attributedOrder?.partnerCustomerUserId === customerUserId) {
+      throw new Error(`Partner commission is not ready for attendee claim ${orderItemId}`);
+    }
+    return;
+  }
+  if (scope.partner.customerUserId !== customerUserId) return;
   await db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${scope.line.partnerId}`}, 0))`,
     );
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`partner-commission-item:${scope.line.id}`}, 0))`,
+    );
+    const [line] = await tx
+      .select()
+      .from(partnerCommissionItems)
+      .where(eq(partnerCommissionItems.id, scope.line.id))
+      .for('update')
+      .limit(1);
+    if (!line || line.eligibility !== 'eligible') return;
+    const [commission] = await tx
+      .select({ status: partnerCommissions.status, availableAt: partnerCommissions.availableAt })
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.id, line.commissionId))
+      .for('update')
+      .limit(1);
+    const [identity] = await tx
+      .select({
+        partnerCustomerUserId: eventPartners.customerUserId,
+        attendeeCustomerUserId: registrations.customerUserId,
+      })
+      .from(eventPartners)
+      .innerJoin(partnerCommissionItems, eq(partnerCommissionItems.partnerId, eventPartners.id))
+      .innerJoin(orderItems, eq(orderItems.id, partnerCommissionItems.orderItemId))
+      .innerJoin(registrations, eq(registrations.id, orderItems.registrationId))
+      .where(eq(partnerCommissionItems.id, line.id))
+      .limit(1);
+    if (
+      !commission ||
+      identity?.partnerCustomerUserId !== customerUserId ||
+      identity.attendeeCustomerUserId !== customerUserId
+    ) {
+      return;
+    }
+    const delta = line.commissionAmount - line.reversedAmount;
+    if (delta <= 0) return;
     await tx
       .update(partnerCommissionItems)
       .set({
         eligibleAmount: 0,
-        reversedAmount: scope.line.commissionAmount,
+        reversedAmount: line.commissionAmount,
         eligibility: 'self_attendee',
         eligibilityReason: '合作伙伴在支付后认领该参会名额',
         identityProvisional: false,
-        version: scope.line.version + 1,
+        version: line.version + 1,
         updatedAt: new Date(),
       })
-      .where(eq(partnerCommissionItems.id, scope.line.id));
+      .where(
+        and(
+          eq(partnerCommissionItems.id, line.id),
+          eq(partnerCommissionItems.version, line.version),
+        ),
+      );
     const [available] = await tx
       .select({ value: sum(partnerLedgerEntries.amount) })
       .from(partnerLedgerEntries)
       .where(
         and(
-          eq(partnerLedgerEntries.partnerId, scope.line.partnerId),
+          eq(partnerLedgerEntries.partnerId, line.partnerId),
           eq(partnerLedgerEntries.balanceBucket, 'available'),
         ),
       );
     const availableAmount = Math.max(0, Number(available?.value ?? 0));
-    const debitAmount =
-      scope.commission.status === 'pending' ? delta : Math.min(delta, availableAmount);
-    const recoveryAmount = scope.commission.status === 'pending' ? 0 : delta - debitAmount;
+    const pendingSettlement = !commission.availableAt;
+    const debitAmount = pendingSettlement ? delta : Math.min(delta, availableAmount);
+    const recoveryAmount = pendingSettlement ? 0 : delta - debitAmount;
     await tx
       .insert(partnerLedgerEntries)
       .values([
         ...(debitAmount > 0
-          ? [{
-              organizationId: scope.line.organizationId,
-              eventId: scope.line.eventId,
-              partnerId: scope.line.partnerId,
-              commissionId: scope.line.commissionId,
-              commissionItemId: scope.line.id,
-              entryType: 'self_referral_reversal' as const,
-              balanceBucket:
-                scope.commission.status === 'pending' ? 'pending' as const : 'available' as const,
-              amount: -debitAmount,
-              businessKey: `claim:${orderItemId}:commission:${scope.line.id}:debit`,
-              sourceEventId: inboxId,
-              reason: '支付后认领触发自购冲正',
-              evidence: { orderItemId, customerUserId },
-            }]
+          ? [
+              {
+                organizationId: line.organizationId,
+                eventId: line.eventId,
+                partnerId: line.partnerId,
+                commissionId: line.commissionId,
+                commissionItemId: line.id,
+                entryType: 'self_referral_reversal' as const,
+                balanceBucket: pendingSettlement ? ('pending' as const) : ('available' as const),
+                amount: -debitAmount,
+                businessKey: `claim:${orderItemId}:commission:${line.id}:debit`,
+                sourceEventId: inboxId,
+                reason: '支付后认领触发自购冲正',
+                evidence: { orderItemId, customerUserId },
+              },
+            ]
           : []),
         ...(recoveryAmount > 0
-          ? [{
-              organizationId: scope.line.organizationId,
-              eventId: scope.line.eventId,
-              partnerId: scope.line.partnerId,
-              commissionId: scope.line.commissionId,
-              commissionItemId: scope.line.id,
-              entryType: 'recovery' as const,
-              balanceBucket: 'recovery_due' as const,
-              amount: recoveryAmount,
-              businessKey: `claim:${orderItemId}:commission:${scope.line.id}:recovery`,
-              sourceEventId: inboxId,
-              reason: '认领冲正超过当前可提现余额，登记待追偿',
-              evidence: { orderItemId, customerUserId },
-            }]
+          ? [
+              {
+                organizationId: line.organizationId,
+                eventId: line.eventId,
+                partnerId: line.partnerId,
+                commissionId: line.commissionId,
+                commissionItemId: line.id,
+                entryType: 'recovery' as const,
+                balanceBucket: 'recovery_due' as const,
+                amount: recoveryAmount,
+                businessKey: `claim:${orderItemId}:commission:${line.id}:recovery`,
+                sourceEventId: inboxId,
+                reason: '认领冲正超过当前可提现余额，登记待追偿',
+                evidence: { orderItemId, customerUserId },
+              },
+            ]
           : []),
       ])
       .onConflictDoNothing();
@@ -503,7 +642,7 @@ async function consumeClaim(db: ConferenceDatabase, inboxId: string, payload: Re
       await tx
         .update(partnerCommissions)
         .set({ status: 'recovery_due', updatedAt: new Date() })
-        .where(eq(partnerCommissions.id, scope.line.commissionId));
+        .where(eq(partnerCommissions.id, line.commissionId));
     }
   });
   await recalculateCommission(db, scope.line.commissionId);
@@ -596,7 +735,8 @@ export async function processPartnerFinancialInbox(db: ConferenceDatabase) {
             : new Date(Date.now() + Math.min(6 * 60 * 60_000, 2 ** row.attempts * 5_000)),
           leaseToken: null,
           leaseExpiresAt: null,
-          lastError: error instanceof Error ? error.message.slice(0, 1000) : 'Unknown financial error',
+          lastError:
+            error instanceof Error ? error.message.slice(0, 1000) : 'Unknown financial error',
           updatedAt: new Date(),
         })
         .where(eq(partnerFinancialEventInbox.id, row.id));
@@ -607,12 +747,13 @@ export async function processPartnerFinancialInbox(db: ConferenceDatabase) {
 
 export async function releasePartnerCommissions(db: ConferenceDatabase) {
   const due = await db
-    .select({ id: partnerCommissions.id })
+    .select({ id: partnerCommissions.id, partnerId: partnerCommissions.partnerId })
     .from(partnerCommissions)
     .innerJoin(eventPartners, eq(eventPartners.id, partnerCommissions.partnerId))
     .where(
       and(
-        eq(partnerCommissions.status, 'pending'),
+        inArray(partnerCommissions.status, ['pending', 'partially_reversed']),
+        isNull(partnerCommissions.availableAt),
         lte(partnerCommissions.releaseAt, new Date()),
         eq(eventPartners.settlementHold, false),
       ),
@@ -622,14 +763,36 @@ export async function releasePartnerCommissions(db: ConferenceDatabase) {
   let released = 0;
   for (const candidate of due) {
     await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${candidate.partnerId}`}, 0))`,
+      );
       const [commission] = await tx
         .select()
         .from(partnerCommissions)
         .where(eq(partnerCommissions.id, candidate.id))
         .for('update')
         .limit(1);
-      if (!commission || commission.status !== 'pending' || commission.releaseAt > new Date()) return;
+      if (
+        !commission ||
+        !['pending', 'partially_reversed'].includes(commission.status) ||
+        commission.availableAt ||
+        commission.releaseAt > new Date()
+      ) {
+        return;
+      }
       const amount = commission.commissionAmount - commission.reversedAmount;
+      const [recovery] = await tx
+        .select({ value: sum(partnerLedgerEntries.amount) })
+        .from(partnerLedgerEntries)
+        .where(
+          and(
+            eq(partnerLedgerEntries.partnerId, commission.partnerId),
+            eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
+          ),
+        );
+      const recoveryAmount = Math.max(0, Number(recovery?.value ?? 0));
+      const recoveredAmount = Math.min(amount, recoveryAmount);
+      const availableAmount = amount - recoveredAmount;
       if (amount > 0) {
         await tx
           .insert(partnerLedgerEntries)
@@ -645,23 +808,66 @@ export async function releasePartnerCommissions(db: ConferenceDatabase) {
               businessKey: `commission:${commission.id}:release:pending`,
               reason: '佣金结算等待期结束',
             },
-            {
-              organizationId: commission.organizationId,
-              eventId: commission.eventId,
-              partnerId: commission.partnerId,
-              commissionId: commission.id,
-              entryType: 'commission',
-              balanceBucket: 'available',
-              amount,
-              businessKey: `commission:${commission.id}:release:available`,
-              reason: '佣金转入可提现余额',
-            },
+            ...(recoveredAmount > 0
+              ? [
+                  {
+                    organizationId: commission.organizationId,
+                    eventId: commission.eventId,
+                    partnerId: commission.partnerId,
+                    commissionId: commission.id,
+                    entryType: 'recovery' as const,
+                    balanceBucket: 'recovery_due' as const,
+                    amount: -recoveredAmount,
+                    businessKey: `commission:${commission.id}:release:recovery`,
+                    reason: '新结算佣金抵扣待追偿金额',
+                  },
+                ]
+              : []),
+            ...(availableAmount > 0
+              ? [
+                  {
+                    organizationId: commission.organizationId,
+                    eventId: commission.eventId,
+                    partnerId: commission.partnerId,
+                    commissionId: commission.id,
+                    entryType: 'commission' as const,
+                    balanceBucket: 'available' as const,
+                    amount: availableAmount,
+                    businessKey: `commission:${commission.id}:release:available`,
+                    reason: '佣金转入可提现余额',
+                  },
+                ]
+              : []),
           ])
           .onConflictDoNothing();
       }
+      if (recoveryAmount > 0 && recoveredAmount === recoveryAmount) {
+        await tx
+          .update(partnerCommissions)
+          .set({
+            status: sql`case
+              when ${partnerCommissions.reversedAmount} >= ${partnerCommissions.commissionAmount} then 'reversed'
+              when ${partnerCommissions.reversedAmount} > 0 then 'partially_reversed'
+              else ${partnerCommissions.status}
+            end`,
+            version: sql`${partnerCommissions.version} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(partnerCommissions.partnerId, commission.partnerId),
+              eq(partnerCommissions.status, 'recovery_due'),
+            ),
+          );
+      }
       await tx
         .update(partnerCommissions)
-        .set({ status: amount > 0 ? 'available' : 'reversed', availableAt: new Date(), version: commission.version + 1, updatedAt: new Date() })
+        .set({
+          status: amount <= 0 ? 'reversed' : availableAmount > 0 ? 'available' : 'paid',
+          availableAt: new Date(),
+          version: commission.version + 1,
+          updatedAt: new Date(),
+        })
         .where(eq(partnerCommissions.id, commission.id));
       released += 1;
     });
@@ -730,14 +936,21 @@ export async function reconcilePartnerFinancialFacts(db: ConferenceDatabase) {
       partnerCommissionItems,
       eq(partnerCommissionItems.orderItemId, refundItemAllocations.orderItemId),
     )
-    .leftJoin(
-      partnerFinancialEventInbox,
+    .where(
       and(
-        eq(partnerFinancialEventInbox.eventType, 'RefundSucceeded'),
-        sql`${partnerFinancialEventInbox.payload}->>'refundId' = ${refunds.id}::text`,
+        eq(refunds.status, 'succeeded'),
+        sql`${partnerCommissionItems.refundedAmount} < (
+          select least(
+            ${partnerCommissionItems.grossAmount},
+            coalesce(sum(allocation.amount), 0)
+          )
+          from refund_item_allocations allocation
+          inner join refunds completed_refund on completed_refund.id = allocation.refund_id
+          where allocation.order_item_id = ${partnerCommissionItems.orderItemId}
+            and completed_refund.status = 'succeeded'
+        )`,
       ),
     )
-    .where(and(eq(refunds.status, 'succeeded'), isNull(partnerFinancialEventInbox.id)))
     .limit(500);
   for (const item of missingRefunds) {
     await db
@@ -851,9 +1064,7 @@ function sanitizedTransferResponse(response: TransferResponse) {
   };
 }
 
-function wechatTransferCredentials(
-  integration: typeof organizationIntegrations.$inferSelect,
-) {
+function wechatTransferCredentials(integration: typeof organizationIntegrations.$inferSelect) {
   if (!integration.encryptedCredentials) return null;
   const secrets = decryptIntegrationCredentials(
     integration.organizationId,
@@ -864,9 +1075,7 @@ function wechatTransferCredentials(
   const value = {
     mchId: typeof config.mchId === 'string' ? config.mchId : '',
     certificateSerial:
-      typeof config.merchantCertificateSerial === 'string'
-        ? config.merchantCertificateSerial
-        : '',
+      typeof config.merchantCertificateSerial === 'string' ? config.merchantCertificateSerial : '',
     platformPublicKeyId:
       typeof config.platformPublicKeyId === 'string' ? config.platformPublicKeyId : '',
     merchantPrivateKey: secrets.merchantPrivateKey ?? '',
@@ -897,7 +1106,8 @@ function verifyWechatResponse(
   const nonce = response.headers.get('wechatpay-nonce') ?? '';
   const signature = response.headers.get('wechatpay-signature') ?? '';
   const serial = response.headers.get('wechatpay-serial') ?? '';
-  if (!timestamp || !nonce || !signature || serial !== credentials.platformPublicKeyId) return false;
+  if (!timestamp || !nonce || !signature || serial !== credentials.platformPublicKeyId)
+    return false;
   const verifier = createVerify('RSA-SHA256');
   verifier.update(`${timestamp}\n${nonce}\n${raw}\n`);
   verifier.end();
@@ -910,7 +1120,16 @@ async function applyQueriedTransferState(
   state: ReturnType<typeof MerchantTransferStateSchema.parse> | 'unknown',
   response: TransferResponse,
 ) {
+  const [scope] = await db
+    .select({ partnerId: partnerPayoutExecutions.partnerId })
+    .from(partnerPayoutExecutions)
+    .where(eq(partnerPayoutExecutions.id, executionId))
+    .limit(1);
+  if (!scope) return;
   await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${scope.partnerId}`}, 0))`,
+    );
     const [execution] = await tx
       .select()
       .from(partnerPayoutExecutions)
@@ -920,14 +1139,19 @@ async function applyQueriedTransferState(
     if (
       !execution ||
       !shouldApplyMerchantTransferState(
-        execution.status as ReturnType<typeof MerchantTransferStateSchema.parse> | 'prepared' | 'unknown',
+        execution.status as
+          ReturnType<typeof MerchantTransferStateSchema.parse> | 'prepared' | 'unknown',
         state,
       )
     ) {
       return;
     }
     const [request] = await tx
-      .select({ grossAmount: partnerPayoutRequests.grossAmount })
+      .select({
+        grossAmount: partnerPayoutRequests.grossAmount,
+        taxAmount: partnerPayoutRequests.taxAmount,
+        netAmount: partnerPayoutRequests.netAmount,
+      })
       .from(partnerPayoutRequests)
       .where(eq(partnerPayoutRequests.id, execution.payoutRequestId))
       .for('update')
@@ -950,6 +1174,10 @@ async function applyQueriedTransferState(
         providerTransferBillNo: response.transfer_bill_no ?? execution.providerTransferBillNo,
         responseSnapshot: sanitizedTransferResponse(response),
         confirmationPackage: response.package_info ?? execution.confirmationPackage,
+        confirmationExpiresAt:
+          state === 'WAIT_USER_CONFIRM'
+            ? new Date(Date.now() + 24 * 60 * 60_000)
+            : execution.confirmationExpiresAt,
         lastQueriedAt: now,
         queryCount: execution.queryCount + 1,
         failureCode: disposition?.terminal && !disposition.succeeded ? state : null,
@@ -970,6 +1198,21 @@ async function applyQueriedTransferState(
       })
       .where(eq(partnerPayoutRequests.id, execution.payoutRequestId));
     if (disposition?.terminal) {
+      const [recovery] =
+        state === 'SUCCESS'
+          ? [{ value: 0 }]
+          : await tx
+              .select({ value: sum(partnerLedgerEntries.amount) })
+              .from(partnerLedgerEntries)
+              .where(
+                and(
+                  eq(partnerLedgerEntries.partnerId, execution.partnerId),
+                  eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
+                ),
+              );
+      const recoveryAmount = Math.max(0, Number(recovery?.value ?? 0));
+      const recoveredAmount = Math.min(request.grossAmount, recoveryAmount);
+      const availableAmount = request.grossAmount - recoveredAmount;
       await tx
         .insert(partnerLedgerEntries)
         .values(
@@ -995,10 +1238,26 @@ async function applyQueriedTransferState(
                   payoutExecutionId: execution.id,
                   entryType: 'payout' as const,
                   balanceBucket: 'paid' as const,
-                  amount: request.grossAmount,
+                  amount: request.netAmount,
                   businessKey: `payout:${execution.payoutRequestId}:wechat:paid`,
-                  reason: '微信商家转账到账',
+                  reason: '微信商家转账净额到账',
                 },
+                ...(request.taxAmount > 0
+                  ? [
+                      {
+                        organizationId: execution.organizationId,
+                        eventId: execution.eventId,
+                        partnerId: execution.partnerId,
+                        payoutRequestId: execution.payoutRequestId,
+                        payoutExecutionId: execution.id,
+                        entryType: 'tax_withholding' as const,
+                        balanceBucket: 'paid' as const,
+                        amount: request.taxAmount,
+                        businessKey: `payout:${execution.payoutRequestId}:wechat:tax`,
+                        reason: '微信商家转账代扣税费',
+                      },
+                    ]
+                  : []),
               ]
             : [
                 {
@@ -1013,21 +1272,60 @@ async function applyQueriedTransferState(
                   businessKey: `payout:${execution.payoutRequestId}:wechat:release:reserved`,
                   reason: '微信商家转账未到账，释放占用金额',
                 },
-                {
-                  organizationId: execution.organizationId,
-                  eventId: execution.eventId,
-                  partnerId: execution.partnerId,
-                  payoutRequestId: execution.payoutRequestId,
-                  payoutExecutionId: execution.id,
-                  entryType: 'payout_release' as const,
-                  balanceBucket: 'available' as const,
-                  amount: request.grossAmount,
-                  businessKey: `payout:${execution.payoutRequestId}:wechat:release:available`,
-                  reason: '微信商家转账未到账，释放占用金额',
-                },
+                ...(recoveredAmount > 0
+                  ? [
+                      {
+                        organizationId: execution.organizationId,
+                        eventId: execution.eventId,
+                        partnerId: execution.partnerId,
+                        payoutRequestId: execution.payoutRequestId,
+                        payoutExecutionId: execution.id,
+                        entryType: 'recovery' as const,
+                        balanceBucket: 'recovery_due' as const,
+                        amount: -recoveredAmount,
+                        businessKey: `payout:${execution.payoutRequestId}:wechat:release:recovery`,
+                        reason: '释放的微信转账占用金额优先抵扣待追偿金额',
+                      },
+                    ]
+                  : []),
+                ...(availableAmount > 0
+                  ? [
+                      {
+                        organizationId: execution.organizationId,
+                        eventId: execution.eventId,
+                        partnerId: execution.partnerId,
+                        payoutRequestId: execution.payoutRequestId,
+                        payoutExecutionId: execution.id,
+                        entryType: 'payout_release' as const,
+                        balanceBucket: 'available' as const,
+                        amount: availableAmount,
+                        businessKey: `payout:${execution.payoutRequestId}:wechat:release:available`,
+                        reason: '微信商家转账未到账，释放占用金额',
+                      },
+                    ]
+                  : []),
               ],
         )
         .onConflictDoNothing();
+      if (state !== 'SUCCESS' && recoveryAmount > 0 && recoveredAmount === recoveryAmount) {
+        await tx
+          .update(partnerCommissions)
+          .set({
+            status: sql`case
+              when ${partnerCommissions.reversedAmount} >= ${partnerCommissions.commissionAmount} then 'reversed'
+              when ${partnerCommissions.reversedAmount} > 0 then 'partially_reversed'
+              else ${partnerCommissions.status}
+            end`,
+            version: sql`${partnerCommissions.version} + 1`,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(partnerCommissions.partnerId, execution.partnerId),
+              eq(partnerCommissions.status, 'recovery_due'),
+            ),
+          );
+      }
     }
     const unfinished = await tx
       .select({ id: partnerPayoutRequests.id })
@@ -1042,7 +1340,12 @@ async function applyQueriedTransferState(
     if (!unfinished.length) {
       await tx
         .update(partnerPayoutBatches)
-        .set({ status: 'completed', completedAt: now, version: sql`${partnerPayoutBatches.version} + 1`, updatedAt: now })
+        .set({
+          status: 'completed',
+          completedAt: now,
+          version: sql`${partnerPayoutBatches.version} + 1`,
+          updatedAt: now,
+        })
         .where(eq(partnerPayoutBatches.id, execution.batchId));
     }
   });
@@ -1056,8 +1359,13 @@ export async function queryPendingPartnerPayouts(db: ConferenceDatabase) {
       and(
         eq(partnerPayoutExecutions.channel, 'wechat_transfer'),
         inArray(partnerPayoutExecutions.status, [
-          'prepared', 'ACCEPTED', 'PROCESSING', 'WAIT_USER_CONFIRM', 'TRANSFERING',
-          'CANCELING', 'unknown',
+          'prepared',
+          'ACCEPTED',
+          'PROCESSING',
+          'WAIT_USER_CONFIRM',
+          'TRANSFERING',
+          'CANCELING',
+          'unknown',
         ]),
         or(
           isNull(partnerPayoutExecutions.lastQueriedAt),
@@ -1136,7 +1444,13 @@ export async function activateScheduledPartnerPrograms(db: ConferenceDatabase) {
         .where(eq(eventPartnerProgramVersions.id, candidate.id))
         .for('update')
         .limit(1);
-      if (!program || program.status !== 'scheduled' || !program.effectiveAt || program.effectiveAt > new Date()) return;
+      if (
+        !program ||
+        program.status !== 'scheduled' ||
+        !program.effectiveAt ||
+        program.effectiveAt > new Date()
+      )
+        return;
       await tx
         .update(eventPartnerProgramVersions)
         .set({ status: 'retired', updatedAt: new Date() })
@@ -1175,14 +1489,23 @@ export async function activateScheduledPartnerPrograms(db: ConferenceDatabase) {
 
 export async function reconcileAgedPartnerPayouts(db: ConferenceDatabase) {
   const now = new Date();
-  const dayStart = new Date(now); dayStart.setUTCHours(0, 0, 0, 0);
+  const dayStart = new Date(now);
+  dayStart.setUTCHours(0, 0, 0, 0);
   const aged = await db
     .select()
     .from(partnerPayoutExecutions)
     .where(
       and(
         eq(partnerPayoutExecutions.channel, 'wechat_transfer'),
-        inArray(partnerPayoutExecutions.status, ['prepared', 'ACCEPTED', 'PROCESSING', 'WAIT_USER_CONFIRM', 'TRANSFERING', 'CANCELING', 'unknown']),
+        inArray(partnerPayoutExecutions.status, [
+          'prepared',
+          'ACCEPTED',
+          'PROCESSING',
+          'WAIT_USER_CONFIRM',
+          'TRANSFERING',
+          'CANCELING',
+          'unknown',
+        ]),
         lt(partnerPayoutExecutions.createdAt, new Date(Date.now() - 30 * 24 * 60 * 60_000)),
       ),
     )

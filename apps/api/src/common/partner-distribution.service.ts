@@ -43,9 +43,10 @@ import {
   partnerReferralVisitDays,
   partnerReconciliationRuns,
   publicUserIds,
+  ticketTypes,
 } from '@conference/database';
 import { sealSecret } from '@conference/security';
-import { and, asc, count, desc, eq, inArray, isNull, or, sql, sum } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, or, sql, sum } from 'drizzle-orm';
 import type { AuthenticatedCustomer } from './customer-auth.service.js';
 import { DatabaseService } from './database.service.js';
 import { DomainError } from './domain-error.js';
@@ -75,21 +76,22 @@ function normalizedProgram(input: PartnerProgramDraft) {
 }
 
 function programHash(input: PartnerProgramDraft) {
-  return createHash('sha256').update(JSON.stringify(normalizedProgram(input))).digest('hex');
+  return createHash('sha256')
+    .update(JSON.stringify(normalizedProgram(input)))
+    .digest('hex');
 }
 
-function unresolvedPayoutReconciliation(
-  organizationId: string,
-  eventId: number,
-  batchId?: string,
-) {
+function unresolvedPayoutReconciliation(organizationId: string, eventId: number, batchId?: string) {
   return and(
     eq(partnerReconciliationRuns.organizationId, organizationId),
     eq(partnerReconciliationRuns.kind, 'payouts'),
     inArray(partnerReconciliationRuns.status, ['running', 'difference', 'failed']),
     or(eq(partnerReconciliationRuns.eventId, eventId), isNull(partnerReconciliationRuns.eventId)),
     batchId
-      ? or(eq(partnerReconciliationRuns.batchId, batchId), isNull(partnerReconciliationRuns.batchId))
+      ? or(
+          eq(partnerReconciliationRuns.batchId, batchId),
+          isNull(partnerReconciliationRuns.batchId),
+        )
       : undefined,
   );
 }
@@ -239,7 +241,9 @@ export function readPartnerReferralContext(value: string | undefined) {
   }
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
   try {
-    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as PartnerReferralContext;
+    const parsed = JSON.parse(
+      Buffer.from(encoded, 'base64url').toString('utf8'),
+    ) as PartnerReferralContext;
     if (
       !parsed.referralLinkId ||
       !parsed.partnerId ||
@@ -447,6 +451,21 @@ export class PartnerDistributionService {
         .limit(1);
       const { effectiveAt, ...draft } = input;
       const parsed = PartnerProgramDraftSchema.parse(draft);
+      if (parsed.eligibleTicketTypeIds.length) {
+        const eligibleTickets = await tx
+          .select({ id: ticketTypes.id })
+          .from(ticketTypes)
+          .where(
+            and(
+              eq(ticketTypes.organizationId, organizationId),
+              eq(ticketTypes.eventId, eventId),
+              inArray(ticketTypes.id, parsed.eligibleTicketTypeIds),
+            ),
+          );
+        if (eligibleTickets.length !== new Set(parsed.eligibleTicketTypeIds).size) {
+          fail(API_ERROR_CODES.VALIDATION_ERROR, '佣金票种不属于当前大会', HttpStatus.BAD_REQUEST);
+        }
+      }
       const startsAt = effectiveAt ? new Date(effectiveAt) : new Date();
       const status = startsAt.getTime() > Date.now() ? 'scheduled' : 'active';
       if (status === 'active') {
@@ -479,13 +498,17 @@ export class PartnerDistributionService {
           .update(eventPartners)
           .set({
             currentProgramVersionId: program!.id,
+            acceptedProgramVersionId: null,
             qualificationStatus: 'pending_confirmation',
             attributionEnabled: false,
             version: sql`${eventPartners.version} + 1`,
             updatedAt: new Date(),
           })
           .where(
-            and(eq(eventPartners.organizationId, organizationId), eq(eventPartners.eventId, eventId)),
+            and(
+              eq(eventPartners.organizationId, organizationId),
+              eq(eventPartners.eventId, eventId),
+            ),
           );
       }
       await tx.insert(auditLogs).values({
@@ -526,7 +549,8 @@ export class PartnerDistributionService {
           )
           .limit(1)
       )[0]?.id;
-    if (!customerUserId) fail(API_ERROR_CODES.NOT_FOUND, '用户不存在或不属于当前组织', HttpStatus.NOT_FOUND);
+    if (!customerUserId)
+      fail(API_ERROR_CODES.NOT_FOUND, '用户不存在或不属于当前组织', HttpStatus.NOT_FOUND);
     const program =
       (await this.activeProgram(organizationId, eventId)) ??
       (await this.ensureDefaultProgram(organizationId, eventId, actorId));
@@ -572,7 +596,9 @@ export class PartnerDistributionService {
         })
         .returning();
       const displayName =
-        customer.profile?.nickname || customer.profile?.realName || `合作伙伴 ${publicSlug.slice(0, 5)}`;
+        customer.profile?.nickname ||
+        customer.profile?.realName ||
+        `合作伙伴 ${publicSlug.slice(0, 5)}`;
       await tx.insert(eventPartnerProfileVersions).values({
         partnerId: partner!.id,
         organizationId,
@@ -706,19 +732,22 @@ export class PartnerDistributionService {
         ),
       )
       .returning();
-    if (!updated) fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
-    await this.db().insert(auditLogs).values({
-      organizationId,
-      eventId,
-      actorId,
-      actorType: 'staff',
-      action: 'partner.updated',
-      resourceType: 'event_partner',
-      resourceId: partnerId,
-      before: { expectedVersion: input.expectedVersion },
-      after: input,
-      traceId: randomUUID(),
-    });
+    if (!updated)
+      fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+    await this.db()
+      .insert(auditLogs)
+      .values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.updated',
+        resourceType: 'event_partner',
+        resourceId: partnerId,
+        before: { expectedVersion: input.expectedVersion },
+        after: input,
+        traceId: randomUUID(),
+      });
     return this.relationship(updated.id, updated.customerUserId, organizationId);
   }
 
@@ -756,16 +785,24 @@ export class PartnerDistributionService {
         .select()
         .from(partnerReferralLinks)
         .where(
-          and(eq(partnerReferralLinks.partnerId, partnerId), eq(partnerReferralLinks.status, 'active')),
+          and(
+            eq(partnerReferralLinks.partnerId, partnerId),
+            eq(partnerReferralLinks.status, 'active'),
+          ),
         )
         .limit(1),
       db
-        .select({ bucket: partnerLedgerEntries.balanceBucket, value: sum(partnerLedgerEntries.amount) })
+        .select({
+          bucket: partnerLedgerEntries.balanceBucket,
+          value: sum(partnerLedgerEntries.amount),
+        })
         .from(partnerLedgerEntries)
         .where(eq(partnerLedgerEntries.partnerId, partnerId))
         .groupBy(partnerLedgerEntries.balanceBucket),
     ]);
-    const balances = Object.fromEntries(balanceRows.map((item) => [item.bucket, Number(item.value ?? 0)]));
+    const balances = Object.fromEntries(
+      balanceRows.map((item) => [item.bucket, Number(item.value ?? 0)]),
+    );
     return {
       id: row.partner.id,
       eventId: row.event.id,
@@ -825,15 +862,12 @@ export class PartnerDistributionService {
         ),
       )
       .limit(1);
-    if (!partner) fail(API_ERROR_CODES.NOT_FOUND, '本场大会尚未开通合作伙伴权限', HttpStatus.NOT_FOUND);
+    if (!partner)
+      fail(API_ERROR_CODES.NOT_FOUND, '本场大会尚未开通合作伙伴权限', HttpStatus.NOT_FOUND);
     return this.relationship(partner.id, session.customerUserId, session.organizationId);
   }
 
-  async accountPartnerMediaScope(
-    session: AuthenticatedCustomer,
-    eventId: number,
-    assetId: string,
-  ) {
+  async accountPartnerMediaScope(session: AuthenticatedCustomer, eventId: number, assetId: string) {
     const partner = await this.ownPartner(session, eventId);
     const [profile] = await this.db()
       .select({
@@ -929,18 +963,23 @@ export class PartnerDistributionService {
           and(eq(eventPartners.id, partner.id), eq(eventPartners.version, expectedPartnerVersion)),
         )
         .returning({ id: eventPartners.id });
-      if (!updated) fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴状态已更新，请刷新后重试');
+      if (!updated)
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴状态已更新，请刷新后重试');
     });
     return this.relationship(partner.id, session.customerUserId, session.organizationId);
   }
 
-  async updateOwnProfile(session: AuthenticatedCustomer, eventId: number, input: UpdatePartnerProfile) {
+  async updateOwnProfile(
+    session: AuthenticatedCustomer,
+    eventId: number,
+    input: UpdatePartnerProfile,
+  ) {
     const assetIds = [input.avatarAssetId, ...input.gallery.map((item) => item.assetId)].filter(
       (value): value is string => Boolean(value),
     );
     if (assetIds.length) {
       const ownedAssets = await this.db()
-        .select({ id: customerMediaAssets.id })
+        .select({ id: customerMediaAssets.id, kind: customerMediaAssets.kind })
         .from(customerMediaAssets)
         .where(
           and(
@@ -954,6 +993,13 @@ export class PartnerDistributionService {
       if (new Set(ownedAssets.map((asset) => asset.id)).size !== new Set(assetIds).size) {
         fail(API_ERROR_CODES.VALIDATION_ERROR, '图片不存在或无权使用', HttpStatus.BAD_REQUEST);
       }
+      const assetsById = new Map(ownedAssets.map((asset) => [asset.id, asset.kind]));
+      if (input.avatarAssetId && assetsById.get(input.avatarAssetId) !== 'partner_avatar') {
+        fail(API_ERROR_CODES.VALIDATION_ERROR, '头像图片类型不正确', HttpStatus.BAD_REQUEST);
+      }
+      if (input.gallery.some((item) => assetsById.get(item.assetId) !== 'partner_gallery')) {
+        fail(API_ERROR_CODES.VALIDATION_ERROR, '个人图片类型不正确', HttpStatus.BAD_REQUEST);
+      }
     }
     return this.writeProfile(session, eventId, input.expectedVersion, (profile) => ({
       ...profile,
@@ -966,14 +1012,19 @@ export class PartnerDistributionService {
       contactPhone: input.contactPhone,
       contactEmail: input.contactEmail,
       wechatId: input.wechatId,
-      avatarAssetId: input.avatarAssetId === undefined ? profile.avatarAssetId : input.avatarAssetId,
+      avatarAssetId:
+        input.avatarAssetId === undefined ? profile.avatarAssetId : input.avatarAssetId,
       gallery: input.gallery,
       actorType: 'customer' as const,
       actorId: session.customerUserId,
     }));
   }
 
-  async updateOwnPrivacy(session: AuthenticatedCustomer, eventId: number, input: UpdatePartnerPrivacy) {
+  async updateOwnPrivacy(
+    session: AuthenticatedCustomer,
+    eventId: number,
+    input: UpdatePartnerPrivacy,
+  ) {
     return this.writeProfile(session, eventId, input.expectedVersion, (profile) => ({
       ...profile,
       publicStatus: input.publicStatus,
@@ -1026,7 +1077,8 @@ export class PartnerDistributionService {
           and(eq(eventPartners.id, partner.id), eq(eventPartners.version, expectedPartnerVersion)),
         )
         .returning({ id: eventPartners.id });
-      if (!updated) fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      if (!updated)
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
     });
     return this.relationship(partner.id, session.customerUserId, session.organizationId);
   }
@@ -1116,7 +1168,14 @@ export class PartnerDistributionService {
       .select()
       .from(partnerReferralLinks)
       .where(
-        and(eq(partnerReferralLinks.partnerId, row.partner.id), eq(partnerReferralLinks.status, 'active')),
+        and(
+          eq(partnerReferralLinks.partnerId, row.partner.id),
+          eq(partnerReferralLinks.status, 'active'),
+          or(
+            isNull(partnerReferralLinks.expiresAt),
+            gt(partnerReferralLinks.expiresAt, new Date()),
+          ),
+        ),
       )
       .limit(1);
     return {
@@ -1140,7 +1199,11 @@ export class PartnerDistributionService {
     assetId?: string,
   ) {
     const [row] = await this.db()
-      .select({ partner: eventPartners, profile: eventPartnerProfileVersions, organization: organizations })
+      .select({
+        partner: eventPartners,
+        profile: eventPartnerProfileVersions,
+        organization: organizations,
+      })
       .from(eventPartners)
       .innerJoin(events, eq(events.id, eventPartners.eventId))
       .innerJoin(organizations, eq(organizations.id, events.organizationId))
@@ -1243,7 +1306,8 @@ export class PartnerDistributionService {
         },
       });
     return {
-      destinationPath: row.link.destinationPath || publicEventScopedPath('/register', row.event.slug),
+      destinationPath:
+        row.link.destinationPath || publicEventScopedPath('/register', row.event.slug),
       maxAge: Math.max(1, Math.floor((expiresAt.getTime() - Date.now()) / 1000)),
       cookie: signPartnerReferralContext({
         referralLinkId: row.link.id,
@@ -1336,11 +1400,9 @@ export class PartnerDistributionService {
       documentId,
     };
     try {
-      await this.redis.getClient().setex(
-        `tokems:partner-payout-document:${token}`,
-        600,
-        JSON.stringify(payload),
-      );
+      await this.redis
+        .getClient()
+        .setex(`tokems:partner-payout-document:${token}`, 600, JSON.stringify(payload));
     } catch {
       fail(
         API_ERROR_CODES.INVALID_STATE_TRANSITION,
@@ -1357,9 +1419,7 @@ export class PartnerDistributionService {
   async downloadPayoutDocument(documentId: string, token: string) {
     const payload = await (async () => {
       try {
-        const raw = await this.redis
-          .getClient()
-          .getdel(`tokems:partner-payout-document:${token}`);
+        const raw = await this.redis.getClient().getdel(`tokems:partner-payout-document:${token}`);
         return raw ? (JSON.parse(raw) as PayoutDocumentDownloadToken) : null;
       } catch {
         return null;
@@ -1388,7 +1448,11 @@ export class PartnerDistributionService {
       process.env.S3_ENDPOINT,
     );
     if (!downloadUrl) {
-      fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '对象存储尚未配置', HttpStatus.SERVICE_UNAVAILABLE);
+      fail(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '对象存储尚未配置',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
     const response = await fetch(downloadUrl, { signal: AbortSignal.timeout(20_000) });
     if (!response.ok) fail(API_ERROR_CODES.NOT_FOUND, '结算文件不存在', HttpStatus.NOT_FOUND);
@@ -1399,18 +1463,20 @@ export class PartnerDistributionService {
     ) {
       fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '结算文件完整性校验失败');
     }
-    await this.db().insert(auditLogs).values({
-      organizationId: document.organizationId,
-      eventId: document.eventId,
-      actorId: payload.customerUserId,
-      actorType: 'customer',
-      action: 'partner.payout_document.accessed',
-      resourceType: 'partner_payout_document',
-      resourceId: document.id,
-      before: {},
-      after: { kind: document.kind, contentDigest: document.contentDigest },
-      traceId: randomUUID(),
-    });
+    await this.db()
+      .insert(auditLogs)
+      .values({
+        organizationId: document.organizationId,
+        eventId: document.eventId,
+        actorId: payload.customerUserId,
+        actorType: 'customer',
+        action: 'partner.payout_document.accessed',
+        resourceType: 'partner_payout_document',
+        resourceId: document.id,
+        before: {},
+        after: { kind: document.kind, contentDigest: document.contentDigest },
+        traceId: randomUUID(),
+      });
     return { body, mediaType: document.mediaType, kind: document.kind };
   }
 
@@ -1456,10 +1522,7 @@ export class PartnerDistributionService {
         )
         .limit(1);
       if (unsettled) {
-        fail(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '当前仍有未结清提现，请完成后再更换收款人',
-        );
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前仍有未结清提现，请完成后再更换收款人');
       }
       const [fingerprintOwner] = await tx
         .select({
@@ -1547,7 +1610,8 @@ export class PartnerDistributionService {
     input: { amount: number; recipientId: string; idempotencyKey: string },
   ) {
     const partner = await this.ownPartner(session, eventId);
-    if (partner.settlementHold) fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前收益处于结算暂停状态');
+    if (partner.settlementHold)
+      fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前收益处于结算暂停状态');
     const program = await this.activeProgram(session.organizationId, eventId);
     if (!program || input.amount < program.minimumPayoutAmount) {
       fail(
@@ -1570,14 +1634,22 @@ export class PartnerDistributionService {
           ),
         )
         .limit(1);
-      if (existing) return existing;
+      if (existing) {
+        if (existing.grossAmount !== input.amount || existing.recipientId !== input.recipientId) {
+          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '幂等键已用于另一笔提现申请');
+        }
+        return existing;
+      }
       const [unresolvedReconciliation] = await tx
         .select({ id: partnerReconciliationRuns.id })
         .from(partnerReconciliationRuns)
         .where(unresolvedPayoutReconciliation(session.organizationId, eventId))
         .limit(1);
       if (unresolvedReconciliation) {
-        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前大会存在未关闭的出款对账差异，请联系财务处理');
+        fail(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '当前大会存在未关闭的出款对账差异，请联系财务处理',
+        );
       }
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${partner.id}`}, 0))`,
@@ -1595,7 +1667,10 @@ export class PartnerDistributionService {
         .limit(1);
       if (!recipient) fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '请选择已完成验证的收款人');
       const balanceRows = await tx
-        .select({ bucket: partnerLedgerEntries.balanceBucket, value: sum(partnerLedgerEntries.amount) })
+        .select({
+          bucket: partnerLedgerEntries.balanceBucket,
+          value: sum(partnerLedgerEntries.amount),
+        })
         .from(partnerLedgerEntries)
         .where(
           and(
@@ -1608,7 +1683,10 @@ export class PartnerDistributionService {
         balanceRows.map((row) => [row.bucket, Number(row.value ?? 0)]),
       );
       if ((balances.recovery_due ?? 0) > 0) {
-        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '存在待追偿金额，请联系大会财务核对后再提现');
+        fail(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '存在待追偿金额，请联系大会财务核对后再提现',
+        );
       }
       if ((balances.available ?? 0) < input.amount) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '可提现余额不足');
@@ -1699,23 +1777,25 @@ export class PartnerDistributionService {
         HttpStatus.CONFLICT,
       );
     }
-    await this.db().insert(auditLogs).values({
-      organizationId: session.organizationId,
-      eventId,
-      actorId: session.customerUserId,
-      actorType: 'customer',
-      action: 'partner.payout.settlement_confirmed',
-      resourceType: 'partner_payout_request',
-      resourceId: updated.id,
-      before: { status: 'under_review' },
-      after: {
-        status: 'approved',
-        grossAmount: updated.grossAmount,
-        taxAmount: updated.taxAmount,
-        netAmount: updated.netAmount,
-      },
-      traceId: randomUUID(),
-    });
+    await this.db()
+      .insert(auditLogs)
+      .values({
+        organizationId: session.organizationId,
+        eventId,
+        actorId: session.customerUserId,
+        actorType: 'customer',
+        action: 'partner.payout.settlement_confirmed',
+        resourceType: 'partner_payout_request',
+        resourceId: updated.id,
+        before: { status: 'under_review' },
+        after: {
+          status: 'approved',
+          grossAmount: updated.grossAmount,
+          taxAmount: updated.taxAmount,
+          netAmount: updated.netAmount,
+        },
+        traceId: randomUUID(),
+      });
     return updated;
   }
 
@@ -1774,10 +1854,14 @@ export class PartnerDistributionService {
         .for('update')
         .limit(1);
       if (!inquiry) fail(API_ERROR_CODES.NOT_FOUND, '佣金申诉不存在', HttpStatus.NOT_FOUND);
-      if (inquiry.version !== input.expectedVersion || !['open', 'under_review'].includes(inquiry.status)) {
+      if (
+        inquiry.version !== input.expectedVersion ||
+        !['open', 'under_review'].includes(inquiry.status)
+      ) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '佣金申诉状态已更新，请刷新后重试');
       }
-      const adjusts = input.decision === 'credit_adjustment' || input.decision === 'debit_adjustment';
+      const adjusts =
+        input.decision === 'credit_adjustment' || input.decision === 'debit_adjustment';
       const absoluteAmount = Math.abs(input.adjustmentAmount ?? 0);
       if (adjusts && absoluteAmount <= 0) {
         fail(API_ERROR_CODES.VALIDATION_ERROR, '调整决定需要填写调整金额', HttpStatus.BAD_REQUEST);
@@ -1862,19 +1946,21 @@ export class PartnerDistributionService {
             .insert(partnerLedgerEntries)
             .values([
               ...(availableAmount
-                ? [{
-                    organizationId,
-                    eventId,
-                    partnerId: inquiry.partnerId,
-                    entryType: 'manual_adjustment' as const,
-                    balanceBucket: 'available' as const,
-                    amount: -availableAmount,
-                    businessKey: `inquiry:${inquiry.id}:adjustment:available`,
-                    reason: input.reason,
-                    evidence: { inquiryId: inquiry.id, decision: input.decision },
-                    actorType: 'staff',
-                    actorId,
-                  }]
+                ? [
+                    {
+                      organizationId,
+                      eventId,
+                      partnerId: inquiry.partnerId,
+                      entryType: 'manual_adjustment' as const,
+                      balanceBucket: 'available' as const,
+                      amount: -availableAmount,
+                      businessKey: `inquiry:${inquiry.id}:adjustment:available`,
+                      reason: input.reason,
+                      evidence: { inquiryId: inquiry.id, decision: input.decision },
+                      actorType: 'staff',
+                      actorId,
+                    },
+                  ]
                 : []),
               {
                 organizationId,
@@ -1949,7 +2035,10 @@ export class PartnerDistributionService {
     let expectedVersion = input.expectedVersion;
     if (inquiryId) {
       const [inquiry] = await this.db()
-        .select({ id: partnerCommissionInquiries.id, partnerId: partnerCommissionInquiries.partnerId })
+        .select({
+          id: partnerCommissionInquiries.id,
+          partnerId: partnerCommissionInquiries.partnerId,
+        })
         .from(partnerCommissionInquiries)
         .where(
           and(
@@ -1986,7 +2075,10 @@ export class PartnerDistributionService {
           description: `后台佣金调整：${input.reason}`,
           evidenceAssetIds: [],
         })
-        .returning({ id: partnerCommissionInquiries.id, version: partnerCommissionInquiries.version });
+        .returning({
+          id: partnerCommissionInquiries.id,
+          version: partnerCommissionInquiries.version,
+        });
       inquiryId = created!.id;
       expectedVersion = created!.version;
     }
@@ -2009,17 +2101,29 @@ export class PartnerDistributionService {
         )
         .groupBy(eventPartners.qualificationStatus),
       this.db()
-        .select({ status: partnerCommissions.status, value: sum(partnerCommissions.commissionAmount) })
+        .select({
+          status: partnerCommissions.status,
+          value: sum(partnerCommissions.commissionAmount),
+        })
         .from(partnerCommissions)
         .where(
-          and(eq(partnerCommissions.organizationId, organizationId), eq(partnerCommissions.eventId, eventId)),
+          and(
+            eq(partnerCommissions.organizationId, organizationId),
+            eq(partnerCommissions.eventId, eventId),
+          ),
         )
         .groupBy(partnerCommissions.status),
       this.db()
-        .select({ status: partnerPayoutRequests.status, value: sum(partnerPayoutRequests.grossAmount) })
+        .select({
+          status: partnerPayoutRequests.status,
+          value: sum(partnerPayoutRequests.grossAmount),
+        })
         .from(partnerPayoutRequests)
         .where(
-          and(eq(partnerPayoutRequests.organizationId, organizationId), eq(partnerPayoutRequests.eventId, eventId)),
+          and(
+            eq(partnerPayoutRequests.organizationId, organizationId),
+            eq(partnerPayoutRequests.eventId, eventId),
+          ),
         )
         .groupBy(partnerPayoutRequests.status),
     ]);
@@ -2029,7 +2133,9 @@ export class PartnerDistributionService {
       commissionTotals: Object.fromEntries(
         commissionTotals.map((item) => [item.status, Number(item.value ?? 0)]),
       ),
-      payoutTotals: Object.fromEntries(payoutTotals.map((item) => [item.status, Number(item.value ?? 0)])),
+      payoutTotals: Object.fromEntries(
+        payoutTotals.map((item) => [item.status, Number(item.value ?? 0)]),
+      ),
     };
   }
 
@@ -2070,7 +2176,10 @@ export class PartnerDistributionService {
         .select()
         .from(partnerCommissions)
         .where(
-          and(eq(partnerCommissions.organizationId, organizationId), eq(partnerCommissions.eventId, eventId)),
+          and(
+            eq(partnerCommissions.organizationId, organizationId),
+            eq(partnerCommissions.eventId, eventId),
+          ),
         )
         .orderBy(desc(partnerCommissions.createdAt))
         .limit(200),
@@ -2100,7 +2209,10 @@ export class PartnerDistributionService {
         .select()
         .from(partnerPayoutRequests)
         .where(
-          and(eq(partnerPayoutRequests.organizationId, organizationId), eq(partnerPayoutRequests.eventId, eventId)),
+          and(
+            eq(partnerPayoutRequests.organizationId, organizationId),
+            eq(partnerPayoutRequests.eventId, eventId),
+          ),
         )
         .orderBy(desc(partnerPayoutRequests.createdAt))
         .limit(200),
@@ -2270,7 +2382,11 @@ export class PartnerDistributionService {
       process.env.S3_ENDPOINT,
     );
     if (!internalUrl) {
-      fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '对象存储尚未配置', HttpStatus.SERVICE_UNAVAILABLE);
+      fail(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '对象存储尚未配置',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
     const response = await fetch(internalUrl, { signal: AbortSignal.timeout(20_000) });
     if (!response.ok) {
@@ -2484,7 +2600,7 @@ export class PartnerDistributionService {
     });
   }
 
-  async exportPayouts(organizationId: string, eventId: number) {
+  async exportPayouts(organizationId: string, eventId: number, actorId: string) {
     await this.eventForOrganization(organizationId, eventId);
     const rows = await this.db()
       .select({
@@ -2514,32 +2630,65 @@ export class PartnerDistributionService {
       )
       .orderBy(desc(partnerPayoutRequests.createdAt))
       .limit(5_000);
+    await this.db()
+      .insert(auditLogs)
+      .values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.payout.exported',
+        resourceType: 'event',
+        resourceId: String(eventId),
+        before: {},
+        after: { rowCount: rows.length },
+        traceId: randomUUID(),
+      });
     return rows;
   }
 
-  async verifyRecipient(organizationId: string, recipientId: string, actorId: string) {
+  async verifyRecipient(
+    organizationId: string,
+    eventId: number,
+    recipientId: string,
+    actorId: string,
+  ) {
     const [recipient] = await this.db()
       .update(partnerPayoutRecipients)
-      .set({ status: 'verified', verifiedAt: new Date(), version: sql`${partnerPayoutRecipients.version} + 1`, updatedAt: new Date() })
+      .set({
+        status: 'verified',
+        verifiedAt: new Date(),
+        version: sql`${partnerPayoutRecipients.version} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(partnerPayoutRecipients.id, recipientId),
           eq(partnerPayoutRecipients.organizationId, organizationId),
+          sql`exists (
+            select 1 from event_partners partner
+            where partner.id = ${partnerPayoutRecipients.partnerId}
+              and partner.organization_id = ${organizationId}
+              and partner.event_id = ${eventId}
+          )`,
         ),
       )
       .returning();
     if (!recipient) fail(API_ERROR_CODES.NOT_FOUND, '收款人不存在', HttpStatus.NOT_FOUND);
-    await this.db().insert(auditLogs).values({
-      organizationId,
-      actorId,
-      actorType: 'staff',
-      action: 'partner.payout_recipient.verified',
-      resourceType: 'partner_payout_recipient',
-      resourceId: recipient.id,
-      before: {},
-      after: { status: 'verified' },
-      traceId: randomUUID(),
-    });
+    await this.db()
+      .insert(auditLogs)
+      .values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.payout_recipient.verified',
+        resourceType: 'partner_payout_recipient',
+        resourceId: recipient.id,
+        before: {},
+        after: { status: 'verified' },
+        traceId: randomUUID(),
+      });
     return { id: recipient.id, status: recipient.status, version: recipient.version };
   }
 
@@ -2566,7 +2715,10 @@ export class PartnerDistributionService {
           .where(unresolvedPayoutReconciliation(organizationId, eventId))
           .limit(1);
         if (unresolvedReconciliation) {
-          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前大会存在未关闭的出款对账差异，暂不能通过提现');
+          fail(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '当前大会存在未关闭的出款对账差异，暂不能通过提现',
+          );
         }
       }
       const [request] = await tx
@@ -2582,21 +2734,32 @@ export class PartnerDistributionService {
         .for('update')
         .limit(1);
       if (!request) fail(API_ERROR_CODES.NOT_FOUND, '提现申请不存在', HttpStatus.NOT_FOUND);
-      if (request.version !== input.expectedVersion || request.status !== 'submitted') {
+      const reviewableStatus =
+        input.decision === 'approve'
+          ? request.status === 'submitted'
+          : ['submitted', 'under_review', 'approved'].includes(request.status) && !request.batchId;
+      if (request.version !== input.expectedVersion || !reviewableStatus) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '提现申请状态已更新，请刷新后重试');
       }
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${request.partnerId}`}, 0))`,
+      );
+      const [recovery] = await tx
+        .select({ value: sum(partnerLedgerEntries.amount) })
+        .from(partnerLedgerEntries)
+        .where(
+          and(
+            eq(partnerLedgerEntries.partnerId, request.partnerId),
+            eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
+          ),
+        );
+      const recoveryAmount = Math.max(0, Number(recovery?.value ?? 0));
       if (input.decision === 'approve') {
-        const [recovery] = await tx
-          .select({ value: sum(partnerLedgerEntries.amount) })
-          .from(partnerLedgerEntries)
-          .where(
-            and(
-              eq(partnerLedgerEntries.partnerId, request.partnerId),
-              eq(partnerLedgerEntries.balanceBucket, 'recovery_due'),
-            ),
+        if (recoveryAmount > 0) {
+          fail(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '该合作伙伴存在待追偿金额，请先完成财务核对',
           );
-        if (Number(recovery?.value ?? 0) > 0) {
-          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '该合作伙伴存在待追偿金额，请先完成财务核对');
         }
       }
       const taxAmount = input.decision === 'approve' ? (input.taxAmount ?? 0) : request.taxAmount;
@@ -2622,41 +2785,111 @@ export class PartnerDistributionService {
           reviewedBy: actorId,
           reviewedAt: new Date(),
           reviewReason: input.reason,
+          ...(status === 'rejected' ? { completedAt: new Date() } : {}),
           version: request.version + 1,
           updatedAt: new Date(),
         })
         .where(eq(partnerPayoutRequests.id, request.id))
         .returning();
       if (status === 'rejected') {
-        await tx.insert(partnerLedgerEntries).values([
-          {
-            organizationId,
-            eventId,
-            partnerId: request.partnerId,
-            payoutRequestId: request.id,
-            entryType: 'payout_release',
-            balanceBucket: 'reserved',
-            amount: -request.grossAmount,
-            businessKey: `payout:${request.id}:rejected:reserved`,
-            reason: input.reason,
-            actorType: 'staff',
-            actorId,
-          },
-          {
-            organizationId,
-            eventId,
-            partnerId: request.partnerId,
-            payoutRequestId: request.id,
-            entryType: 'payout_release',
-            balanceBucket: 'available',
-            amount: request.grossAmount,
-            businessKey: `payout:${request.id}:rejected:available`,
-            reason: input.reason,
-            actorType: 'staff',
-            actorId,
-          },
-        ]);
+        const recoveredAmount = Math.min(request.grossAmount, recoveryAmount);
+        const availableAmount = request.grossAmount - recoveredAmount;
+        await tx
+          .insert(partnerLedgerEntries)
+          .values([
+            {
+              organizationId,
+              eventId,
+              partnerId: request.partnerId,
+              payoutRequestId: request.id,
+              entryType: 'payout_release',
+              balanceBucket: 'reserved',
+              amount: -request.grossAmount,
+              businessKey: `payout:${request.id}:rejected:reserved`,
+              reason: input.reason,
+              actorType: 'staff',
+              actorId,
+            },
+            ...(recoveredAmount > 0
+              ? [
+                  {
+                    organizationId,
+                    eventId,
+                    partnerId: request.partnerId,
+                    payoutRequestId: request.id,
+                    entryType: 'recovery' as const,
+                    balanceBucket: 'recovery_due' as const,
+                    amount: -recoveredAmount,
+                    businessKey: `payout:${request.id}:rejected:recovery`,
+                    reason: '释放的提现占用金额优先抵扣待追偿金额',
+                    actorType: 'staff' as const,
+                    actorId,
+                  },
+                ]
+              : []),
+            ...(availableAmount > 0
+              ? [
+                  {
+                    organizationId,
+                    eventId,
+                    partnerId: request.partnerId,
+                    payoutRequestId: request.id,
+                    entryType: 'payout_release' as const,
+                    balanceBucket: 'available' as const,
+                    amount: availableAmount,
+                    businessKey: `payout:${request.id}:rejected:available`,
+                    reason: input.reason,
+                    actorType: 'staff' as const,
+                    actorId,
+                  },
+                ]
+              : []),
+          ])
+          .onConflictDoNothing();
+        if (recoveryAmount > 0 && recoveredAmount === recoveryAmount) {
+          await tx
+            .update(partnerCommissions)
+            .set({
+              status: sql`case
+                when ${partnerCommissions.reversedAmount} >= ${partnerCommissions.commissionAmount} then 'reversed'
+                when ${partnerCommissions.reversedAmount} > 0 then 'partially_reversed'
+                else ${partnerCommissions.status}
+              end`,
+              version: sql`${partnerCommissions.version} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(partnerCommissions.partnerId, request.partnerId),
+                eq(partnerCommissions.status, 'recovery_due'),
+              ),
+            );
+        }
       }
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action:
+          input.decision === 'approve' ? 'partner.payout.reviewed' : 'partner.payout.rejected',
+        resourceType: 'partner_payout_request',
+        resourceId: request.id,
+        before: {
+          status: request.status,
+          taxAmount: request.taxAmount,
+          netAmount: request.netAmount,
+          version: request.version,
+        },
+        after: {
+          status: updated!.status,
+          taxAmount: updated!.taxAmount,
+          netAmount: updated!.netAmount,
+          reviewReason: input.reason,
+          version: updated!.version,
+        },
+        traceId: randomUUID(),
+      });
       return updated!;
     });
   }
@@ -2686,19 +2919,42 @@ export class PartnerDistributionService {
           ),
         )
         .limit(1);
-      if (existing) return existing;
+      if (existing) {
+        const replayRequests = await tx
+          .select({ id: partnerPayoutRequests.id })
+          .from(partnerPayoutRequests)
+          .where(eq(partnerPayoutRequests.batchId, existing.id));
+        const expectedRequestIds = [...new Set(input.requestIds)].sort();
+        const replayRequestIds = replayRequests.map((item) => item.id).sort();
+        if (
+          existing.eventId !== eventId ||
+          existing.channel !== input.channel ||
+          existing.cutoffAt.getTime() !== new Date(input.cutoffAt).getTime() ||
+          replayRequestIds.length !== expectedRequestIds.length ||
+          replayRequestIds.some((id, index) => id !== expectedRequestIds[index])
+        ) {
+          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '幂等键已用于另一笔出款批次');
+        }
+        return existing;
+      }
       const [unresolvedReconciliation] = await tx
         .select({ id: partnerReconciliationRuns.id })
         .from(partnerReconciliationRuns)
         .where(unresolvedPayoutReconciliation(organizationId, eventId))
         .limit(1);
       if (unresolvedReconciliation) {
-        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前大会存在未关闭的出款对账差异，暂不能创建批次');
+        fail(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '当前大会存在未关闭的出款对账差异，暂不能创建批次',
+        );
       }
       const requests = await tx
         .select({ request: partnerPayoutRequests, recipient: partnerPayoutRecipients })
         .from(partnerPayoutRequests)
-        .innerJoin(partnerPayoutRecipients, eq(partnerPayoutRecipients.id, partnerPayoutRequests.recipientId))
+        .innerJoin(
+          partnerPayoutRecipients,
+          eq(partnerPayoutRecipients.id, partnerPayoutRequests.recipientId),
+        )
         .where(
           and(
             eq(partnerPayoutRequests.organizationId, organizationId),
@@ -2745,14 +3001,39 @@ export class PartnerDistributionService {
         .returning();
       await tx
         .update(partnerPayoutRequests)
-        .set({ batchId: batch!.id, status: 'batched', version: sql`${partnerPayoutRequests.version} + 1`, updatedAt: new Date() })
+        .set({
+          batchId: batch!.id,
+          status: 'batched',
+          version: sql`${partnerPayoutRequests.version} + 1`,
+          updatedAt: new Date(),
+        })
         .where(inArray(partnerPayoutRequests.id, input.requestIds));
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.payout_batch.created',
+        resourceType: 'partner_payout_batch',
+        resourceId: batch!.id,
+        before: {},
+        after: {
+          channel: batch!.channel,
+          requestCount: batch!.requestCount,
+          grossAmount: batch!.grossAmount,
+          taxAmount: batch!.taxAmount,
+          netAmount: batch!.netAmount,
+          cutoffAt: batch!.cutoffAt.toISOString(),
+        },
+        traceId: randomUUID(),
+      });
       return batch!;
     });
   }
 
   async approvePayoutBatch(
     organizationId: string,
+    eventId: number,
     batchId: string,
     actorId: string,
     input: { expectedVersion: number; decision: 'approve' | 'hold' | 'cancel'; reason: string },
@@ -2762,7 +3043,11 @@ export class PartnerDistributionService {
         .select()
         .from(partnerPayoutBatches)
         .where(
-          and(eq(partnerPayoutBatches.id, batchId), eq(partnerPayoutBatches.organizationId, organizationId)),
+          and(
+            eq(partnerPayoutBatches.id, batchId),
+            eq(partnerPayoutBatches.organizationId, organizationId),
+            eq(partnerPayoutBatches.eventId, eventId),
+          ),
         )
         .for('update')
         .limit(1);
@@ -2773,8 +3058,24 @@ export class PartnerDistributionService {
       if (batch.createdBy === actorId) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '出款批次需要另一位管理员复核');
       }
-      if (batch.version !== input.expectedVersion || batch.status !== 'draft') {
+      const reviewableStatus =
+        input.decision === 'hold'
+          ? batch.status === 'draft'
+          : input.decision === 'approve'
+            ? ['draft', 'held'].includes(batch.status)
+            : ['draft', 'held', 'approved'].includes(batch.status);
+      if (batch.version !== input.expectedVersion || !reviewableStatus) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '出款批次状态已更新，请刷新后重试');
+      }
+      if (input.decision === 'cancel' && batch.status === 'approved') {
+        const [execution] = await tx
+          .select({ id: partnerPayoutExecutions.id })
+          .from(partnerPayoutExecutions)
+          .where(eq(partnerPayoutExecutions.batchId, batch.id))
+          .limit(1);
+        if (execution) {
+          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '批次已经开始执行，请等待渠道终态');
+        }
       }
       if (input.decision === 'approve') {
         await tx.execute(
@@ -2786,10 +3087,18 @@ export class PartnerDistributionService {
           .where(unresolvedPayoutReconciliation(organizationId, batch.eventId, batch.id))
           .limit(1);
         if (unresolvedReconciliation) {
-          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前批次存在未关闭的出款对账差异，暂不能复核通过');
+          fail(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '当前批次存在未关闭的出款对账差异，暂不能复核通过',
+          );
         }
       }
-      const status = input.decision === 'approve' ? 'approved' : input.decision === 'hold' ? 'held' : 'cancelled';
+      const status =
+        input.decision === 'approve'
+          ? 'approved'
+          : input.decision === 'hold'
+            ? 'held'
+            : 'cancelled';
       const [updated] = await tx
         .update(partnerPayoutBatches)
         .set({
@@ -2801,7 +3110,10 @@ export class PartnerDistributionService {
           updatedAt: new Date(),
         })
         .where(
-          and(eq(partnerPayoutBatches.id, batch.id), eq(partnerPayoutBatches.version, batch.version)),
+          and(
+            eq(partnerPayoutBatches.id, batch.id),
+            eq(partnerPayoutBatches.version, batch.version),
+          ),
         )
         .returning();
       if (status === 'cancelled') {
@@ -2820,6 +3132,18 @@ export class PartnerDistributionService {
             ),
           );
       }
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: `partner.payout_batch.${input.decision === 'approve' ? 'approved' : input.decision === 'hold' ? 'held' : 'cancelled'}`,
+        resourceType: 'partner_payout_batch',
+        resourceId: batch.id,
+        before: { status: batch.status, version: batch.version },
+        after: { status: updated!.status, version: updated!.version, reason: input.reason },
+        traceId: randomUUID(),
+      });
       return updated!;
     });
   }
@@ -2860,7 +3184,10 @@ export class PartnerDistributionService {
         .where(unresolvedPayoutReconciliation(organizationId, eventId, request.batch.id))
         .limit(1);
       if (unresolvedReconciliation) {
-        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前批次存在未关闭的出款对账差异，暂不能登记到账');
+        fail(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '当前批次存在未关闭的出款对账差异，暂不能登记到账',
+        );
       }
       if (
         request.request.status !== 'batched' ||
@@ -2869,6 +3196,9 @@ export class PartnerDistributionService {
       ) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '当前申请不能执行人工结算');
       }
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${request.request.partnerId}`}, 0))`,
+      );
       const [recovery] = await tx
         .select({ value: sum(partnerLedgerEntries.amount) })
         .from(partnerLedgerEntries)
@@ -2879,7 +3209,10 @@ export class PartnerDistributionService {
           ),
         );
       if (Number(recovery?.value ?? 0) > 0) {
-        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '该合作伙伴存在待追偿金额，当前申请暂停执行');
+        fail(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '该合作伙伴存在待追偿金额，当前申请暂停执行',
+        );
       }
       if (
         request.batch.approvedBy === actorId ||
@@ -2972,12 +3305,30 @@ export class PartnerDistributionService {
           payoutExecutionId: execution!.id,
           entryType: 'payout',
           balanceBucket: 'paid',
-          amount: request.request.grossAmount,
+          amount: request.request.netAmount,
           businessKey: `payout:${request.request.id}:manual:paid`,
-          reason: '人工结算完成',
+          reason: '人工结算净额到账',
           actorType: 'staff',
           actorId,
         },
+        ...(request.request.taxAmount > 0
+          ? [
+              {
+                organizationId,
+                eventId,
+                partnerId: request.request.partnerId,
+                payoutRequestId: request.request.id,
+                payoutExecutionId: execution!.id,
+                entryType: 'tax_withholding' as const,
+                balanceBucket: 'paid' as const,
+                amount: request.request.taxAmount,
+                businessKey: `payout:${request.request.id}:manual:tax`,
+                reason: '人工结算代扣税费',
+                actorType: 'staff' as const,
+                actorId,
+              },
+            ]
+          : []),
       ]);
       const [remaining] = await tx
         .select({ value: count(partnerPayoutRequests.id) })
@@ -2994,6 +3345,26 @@ export class PartnerDistributionService {
           .set({ status: 'completed', completedAt: new Date(input.paidAt), updatedAt: new Date() })
           .where(eq(partnerPayoutBatches.id, request.batch.id));
       }
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.payout.manual_completed',
+        resourceType: 'partner_payout_execution',
+        resourceId: execution!.id,
+        before: { requestStatus: request.request.status, batchStatus: request.batch.status },
+        after: {
+          requestStatus: 'succeeded',
+          grossAmount: request.request.grossAmount,
+          taxAmount: request.request.taxAmount,
+          netAmount: request.request.netAmount,
+          externalReference: input.externalReference,
+          paidAt: new Date(input.paidAt).toISOString(),
+          documentAssetId: input.documentAssetId,
+        },
+        traceId: randomUUID(),
+      });
       return execution!;
     });
   }
@@ -3041,11 +3412,15 @@ export class PartnerDistributionService {
         )
         .for('update')
         .limit(1);
-      if (!integration) fail(API_ERROR_CODES.NOT_FOUND, '请先配置微信支付集成', HttpStatus.NOT_FOUND);
+      if (!integration)
+        fail(API_ERROR_CODES.NOT_FOUND, '请先配置微信支付集成', HttpStatus.NOT_FOUND);
       if (integration.revision !== expectedRevision) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '微信支付配置已更新，请刷新后重试');
       }
-      if (configuration.enabled && (!integration.encryptedCredentials || !configuration.verifiedAt)) {
+      if (
+        configuration.enabled &&
+        (!integration.encryptedCredentials || !configuration.verifiedAt)
+      ) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '请完成商户资质和商家转账配置验收后启用');
       }
       const pending =
@@ -3123,8 +3498,8 @@ export class PartnerDistributionService {
             eq(organizationIntegrations.id, integration.id),
             eq(organizationIntegrations.revision, integration.revision),
           ),
-          )
-          .returning();
+        )
+        .returning();
       await tx.insert(auditLogs).values({
         organizationId,
         actorId,
