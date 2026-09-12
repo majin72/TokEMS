@@ -2028,6 +2028,84 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/commission-inquiries",
+      "handler": "AdminPartnerController.inquiries",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/commissions",
+      "handler": "AdminPartnerController.commissions",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/overview",
+      "handler": "AdminPartnerController.overview",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.read",
+        "event.commission.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners",
+      "handler": "AdminPartnerController.list",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts",
+      "handler": "AdminPartnerController.payouts",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts/export",
+      "handler": "AdminPartnerController.exportPayouts",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.export"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/programs",
+      "handler": "AdminPartnerController.programs",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/admin/events/:eventId/experience",
       "handler": "TemplateController.experience",
       "actionId": null,
@@ -2505,6 +2583,17 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/admin/organization/payout-settings",
+      "handler": "OrganizationPayoutSettingsController.get",
+      "actionId": null,
+      "exclusion": "Merchant transfer configuration is reserved for human operators",
+      "requiredAnyGrants": [
+        "org.payout.settings.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/admin/organization/settings",
       "handler": "OrganizationEventsController.organizationSettings",
       "actionId": "organization.settings.get",
@@ -2758,6 +2847,17 @@
     },
     {
       "method": "PATCH",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners/:partnerId",
+      "handler": "AdminPartnerController.update",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "PATCH",
       "path": "/api/v1/admin/events/:eventId/feishu-digest",
       "handler": "OrganizationEventsController.updateFeishuDigestSubscription",
       "actionId": null,
@@ -2897,6 +2997,17 @@
       "exclusion": null,
       "requiredAnyGrants": [
         "org.member.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/admin/organization/payout-settings",
+      "handler": "OrganizationPayoutSettingsController.update",
+      "actionId": null,
+      "exclusion": "Merchant transfer configuration is reserved for human operators",
+      "requiredAnyGrants": [
+        "org.payout.settings.manage"
       ],
       "requiredAllGrants": []
     },
@@ -3062,6 +3173,183 @@
       "exclusion": null,
       "requiredAnyGrants": [
         "event.checkin.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/commission-adjustments",
+      "handler": "AdminPartnerController.adjustCommission",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/inquiries/:inquiryId/resolve",
+      "handler": "AdminPartnerController.resolveInquiry",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners",
+      "handler": "AdminPartnerController.enable",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners/batch",
+      "handler": "AdminPartnerController.batchEnable",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-batches",
+      "handler": "AdminPartnerController.createBatch",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "event.payout.review",
+        "event.payout.execute"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-batches/:batchId/execute",
+      "handler": "AdminPartnerController.executeBatch",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-batches/:batchId/review",
+      "handler": "AdminPartnerController.reviewBatch",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-documents/confirmations",
+      "handler": "AdminPartnerController.confirmPayoutDocument",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-documents/uploads",
+      "handler": "AdminPartnerController.preparePayoutDocument",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-executions/:executionId/query",
+      "handler": "AdminPartnerController.queryExecution",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts/:requestId/manual-completion",
+      "handler": "AdminPartnerController.completeManual",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts/:requestId/review",
+      "handler": "AdminPartnerController.reviewPayout",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/programs",
+      "handler": "AdminPartnerController.publishProgram",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.rules.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/recipients/:recipientId/verify",
+      "handler": "AdminPartnerController.verifyRecipient",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/reconciliations",
+      "handler": "AdminPartnerController.createReconciliation",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/reconciliations/:reconciliationId/resolve",
+      "handler": "AdminPartnerController.resolveReconciliation",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
       ],
       "requiredAllGrants": []
     },

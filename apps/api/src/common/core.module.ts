@@ -36,6 +36,8 @@ import { AgentOperationInterceptor } from './agent-operation.interceptor.js';
 import { EventPublicMetricsService } from './event-public-metrics.service.js';
 import { FeishuDigestService } from './feishu-digest.service.js';
 import { AttendeeServiceHubService } from './attendee-service-hub.service.js';
+import { PartnerDistributionService } from './partner-distribution.service.js';
+import { MerchantTransferService } from './merchant-transfer.service.js';
 
 @Global()
 @Module({
@@ -77,6 +79,8 @@ import { AttendeeServiceHubService } from './attendee-service-hub.service.js';
     EventPublicMetricsService,
     FeishuDigestService,
     AttendeeServiceHubService,
+    PartnerDistributionService,
+    MerchantTransferService,
   ],
   exports: [
     BatchOrderManagementService,
@@ -115,6 +119,8 @@ import { AttendeeServiceHubService } from './attendee-service-hub.service.js';
     EventPublicMetricsService,
     FeishuDigestService,
     AttendeeServiceHubService,
+    PartnerDistributionService,
+    MerchantTransferService,
   ],
 })
 export class CoreModule {}

@@ -193,6 +193,16 @@ export function safeRedirectPath(
 }
 
 export function hasGrant(grants: string[], required: string) {
+  if (
+    [
+      'event.commission.manage',
+      'event.payout.review',
+      'event.payout.execute',
+      'event.payout.export',
+    ].includes(required)
+  ) {
+    return grants.includes('*') || grants.includes(required);
+  }
   return grants.some(
     (grant) =>
       grant === '*' ||

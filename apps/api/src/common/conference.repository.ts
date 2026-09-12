@@ -1,6 +1,8 @@
 import { syncLegacyOrderItemState } from '@conference/database';
 import { registrationOrderJoin } from './customer-order-ownership.js';
 import { guardRefundWrite } from './refund-write-guard.js';
+import type { PartnerReferralContext } from './partner-distribution.service.js';
+import { partnerAttributionForOrder } from './partner-attribution.js';
 import { BatchRegistrationService } from './batch-registration.service.js';
 import { BatchPaymentService } from './batch-payment.service.js';
 import { OrderItemsService } from './order-items.service.js';
@@ -1772,6 +1774,7 @@ export class ConferenceRepository {
     input: CreateRegistration,
     idempotencyKey: string,
     customer?: CustomerRegistrationActor,
+    referralContext: PartnerReferralContext | null = null,
   ): Promise<RegistrationCheckout> {
     if (!customer) {
       throw new DomainError(
@@ -2257,7 +2260,10 @@ export class ConferenceRepository {
       return response;
     }
 
-    return new BatchRegistrationService(this.database, new OrderItemsService(this.database)).createSingle(input, idempotencyKey, customer);
+    return new BatchRegistrationService(
+      this.database,
+      new OrderItemsService(this.database),
+    ).createSingle(input, idempotencyKey, customer, referralContext);
   }
 
   async confirmMockPayment(orderId: string, idempotencyKey: string): Promise<PaymentCompletion> {
@@ -2684,8 +2690,10 @@ export class ConferenceRepository {
             })
             .where(eq(payments.id, preparedPayment.id));
         } else {
+          const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderRow.id);
           const [receivedPayment] = await tx.insert(payments).values({
             orderId: orderRow.id,
+            partnerAttributionRevisionId,
             provider: confirmation.provider,
             externalId: confirmation.externalId,
             status: 'succeeded',
@@ -3242,12 +3250,14 @@ export class ConferenceRepository {
 
         let issuedTicketRow: typeof tickets.$inferSelect | undefined;
         if (approved && freeCheckout) {
+          const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderRow.id);
           await tx
             .update(ticketTypes)
             .set({ sold: sql`${ticketTypes.sold} + 1`, updatedAt: now })
             .where(eq(ticketTypes.id, ticketTypeRow.id));
           const [freePayment] = await tx.insert(payments).values({
             orderId: orderRow.id,
+            partnerAttributionRevisionId,
             provider: 'free',
             externalId: `free:${orderRow.id}`,
             status: 'succeeded',

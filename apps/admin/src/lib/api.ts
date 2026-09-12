@@ -2135,6 +2135,203 @@ export const conferenceApi = {
       `/admin/audit-logs?eventId=${eventScope(eventId)}`,
     );
   },
+  getPartnerDistributionOverview(eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/overview`,
+    );
+  },
+  getEventPartners(eventId?: EventId) {
+    return request<{ items: import('@conference/contracts').PartnerRelationshipView[] }>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners`,
+    );
+  },
+  enableEventPartner(
+    input: import('@conference/contracts').AdminEnablePartner,
+    eventId?: EventId,
+  ) {
+    return request<import('@conference/contracts').PartnerRelationshipView>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  batchEnableEventPartners(
+    input: {
+      customerUserIds?: string[];
+      customerPublicUserIds?: number[];
+      personalRateBps: number | null;
+      sendInvitation: boolean;
+    },
+    eventId?: EventId,
+  ) {
+    return request<{ items: import('@conference/contracts').PartnerRelationshipView[]; count: number }>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners/batch`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  updateEventPartner(
+    partnerId: string,
+    input: import('@conference/contracts').AdminUpdatePartner,
+    eventId?: EventId,
+  ) {
+    return request<import('@conference/contracts').PartnerRelationshipView>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners/${encodeURIComponent(partnerId)}`,
+      { method: 'PATCH', body: JSON.stringify(input) },
+    );
+  },
+  publishPartnerProgram(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/programs`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  getPartnerCommissions(eventId?: EventId) {
+    return request<{ items: Array<Record<string, unknown>> }>(
+      `/admin/events/${eventScope(eventId)}/distribution/commissions`,
+    );
+  },
+  createPartnerCommissionAdjustment(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/commission-adjustments`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  getPartnerCommissionInquiries(eventId?: EventId) {
+    return request<{ items: Array<Record<string, unknown>> }>(
+      `/admin/events/${eventScope(eventId)}/distribution/commission-inquiries`,
+    );
+  },
+  getPartnerPayouts(eventId?: EventId) {
+    return request<{
+      requests: Array<Record<string, unknown>>;
+      batches: Array<Record<string, unknown>>;
+      inquiries: Array<Record<string, unknown>>;
+      recipients: Array<Record<string, unknown>>;
+      documents: Array<Record<string, unknown>>;
+      reconciliations: Array<Record<string, unknown>>;
+    }>(`/admin/events/${eventScope(eventId)}/distribution/payouts`);
+  },
+  async uploadPartnerPayoutDocument(
+    payoutRequestId: string,
+    kind: 'settlement_statement' | 'tax_document' | 'manual_receipt' | 'wechat_receipt',
+    file: File,
+    eventId?: EventId,
+  ) {
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+    const prepared = await request<{
+      uploadToken: string;
+      uploadUrl: string;
+      headers: Record<string, string>;
+    }>(`/admin/events/${eventScope(eventId)}/distribution/payout-documents/uploads`, {
+      method: 'POST',
+      body: JSON.stringify({
+        payoutRequestId,
+        kind,
+        fileName: file.name,
+        mediaType: file.type,
+        size: file.size,
+        contentDigest: digest,
+      }),
+    });
+    const uploaded = await fetch(prepared.uploadUrl, {
+      method: 'PUT',
+      headers: prepared.headers,
+      body: file,
+    });
+    if (!uploaded.ok) throw new Error('结算文件上传失败');
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-documents/confirmations`,
+      { method: 'POST', body: JSON.stringify({ uploadToken: prepared.uploadToken }) },
+    );
+  },
+  resolvePartnerReconciliation(
+    reconciliationId: string,
+    reason: string,
+    eventId?: EventId,
+  ) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/reconciliations/${encodeURIComponent(reconciliationId)}/resolve`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    );
+  },
+  createPartnerReconciliation(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/reconciliations`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  async exportPartnerPayouts(eventId?: EventId) {
+    const scopedEventId = eventScope(eventId);
+    const response = await fetch(
+      `${baseURL}/admin/events/${scopedEventId}/distribution/payouts/export`,
+      { headers: { Authorization: `Bearer ${token.value}` } },
+    );
+    if (!response.ok) throw new Error('提现与对账导出失败');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `partner-payouts-${scopedEventId}-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    return Number(response.headers.get('X-Export-Row-Count') ?? 0);
+  },
+  reviewPartnerPayout(requestId: string, input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payouts/${encodeURIComponent(requestId)}/review`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  createPartnerPayoutBatch(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-batches`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  reviewPartnerPayoutBatch(batchId: string, input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-batches/${encodeURIComponent(batchId)}/review`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  executePartnerPayoutBatch(batchId: string, expectedVersion: number, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-batches/${encodeURIComponent(batchId)}/execute`,
+      { method: 'POST', body: JSON.stringify({ expectedVersion }) },
+    );
+  },
+  completeManualPartnerPayout(
+    requestId: string,
+    input: Record<string, unknown>,
+    eventId?: EventId,
+  ) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payouts/${encodeURIComponent(requestId)}/manual-completion`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  resolvePartnerInquiry(inquiryId: string, input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/inquiries/${encodeURIComponent(inquiryId)}/resolve`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  verifyPartnerRecipient(recipientId: string, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/recipients/${encodeURIComponent(recipientId)}/verify`,
+      { method: 'POST' },
+    );
+  },
+  getPartnerPayoutSettings() {
+    return request<Record<string, unknown>>('/admin/organization/payout-settings');
+  },
+  updatePartnerPayoutSettings(input: Record<string, unknown>) {
+    return request<Record<string, unknown>>('/admin/organization/payout-settings', {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
+  },
   async exportRegistrations(eventId?: EventId) {
     const scopedEventId = eventScope(eventId);
     const response = await fetch(

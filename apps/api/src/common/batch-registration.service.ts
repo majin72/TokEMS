@@ -61,6 +61,8 @@ import { refundPolicy } from './refund-policy.js';
 import { customerPurchaserScopeSql } from './customer-order-ownership.js';
 import { withPostgresTransactionRetry } from './transaction-retry.js';
 import type { CustomerRegistrationActor } from './conference.repository.js';
+import { lockPartnerAttribution } from './partner-attribution.js';
+import type { PartnerReferralContext } from './partner-distribution.service.js';
 
 type Snapshot = {
   event?: { settings?: { registration?: Partial<PublicEvent['registration']> } };
@@ -296,7 +298,12 @@ export class BatchRegistrationService {
     };
   }
 
-  async createSingle(input: CreateRegistration, key: string, customer: CustomerRegistrationActor) {
+  async createSingle(
+    input: CreateRegistration,
+    key: string,
+    customer: CustomerRegistrationActor,
+    referralContext: PartnerReferralContext | null = null,
+  ) {
     const [existing] = await this.items
       .db()
       .select({ snapshot: orders.pricingSnapshot })
@@ -336,6 +343,7 @@ export class BatchRegistrationService {
       },
       key,
       customer,
+      referralContext,
     );
     if (!result.registration) batchConflict('当前订单包含多个名额，请升级页面后查看');
     return { ...result, registration: result.registration };
@@ -345,6 +353,7 @@ export class BatchRegistrationService {
     input: CreateRegistrationBatch,
     key: string,
     customer: CustomerRegistrationActor,
+    referralContext: PartnerReferralContext | null = null,
   ): Promise<RegistrationBatchCheckout> {
     const parsed = CreateRegistrationBatchSchema.safeParse(input);
     if (!parsed.success)
@@ -771,6 +780,7 @@ export class BatchRegistrationService {
             expiresAt,
           })
           .returning();
+        const attributionRevisionId = await lockPartnerAttribution(tx, order!, referralContext);
         const itemRows = await tx
           .insert(orderItems)
           .values(
@@ -812,6 +822,7 @@ export class BatchRegistrationService {
             .insert(payments)
             .values({
               orderId: order!.id,
+              partnerAttributionRevisionId: attributionRevisionId,
               provider: 'free',
               externalId: `free:${order!.id}`,
               status: 'succeeded',

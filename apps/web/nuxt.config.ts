@@ -64,6 +64,12 @@ export default defineNuxtConfig({
     '/ticket/**': { ssr: false },
     '/account/**': { ssr: false },
     '/members/**': { headers: { 'cache-control': 'no-cache, must-revalidate' } },
+    '/partners': { headers: { 'cache-control': 'no-cache, must-revalidate' } },
+    '/partners/**': { headers: { 'cache-control': 'no-cache, must-revalidate' } },
+    '/r/**': {
+      ssr: false,
+      headers: { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' },
+    },
     '/speakers/**': { headers: { 'cache-control': 'no-cache, must-revalidate' } },
     '/s/**': { headers: { 'cache-control': 'no-cache, must-revalidate' } },
   },

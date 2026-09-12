@@ -27,6 +27,7 @@ import {
   customerUsers,
   eventBlueprints,
   eventIdAllocators,
+  eventPartnerProgramVersions,
   eventReleases,
   eventTemplateBindings,
   events,
@@ -65,6 +66,7 @@ const canonicalOrganizationSettings = {
 const canonicalBackend = CANONICAL_HOMEPAGE_SNAPSHOT.backend;
 const canonicalTemplate = CANONICAL_HOMEPAGE_SNAPSHOT.template;
 const canonicalRelease = CANONICAL_HOMEPAGE_SNAPSHOT.release;
+const canonicalPartnerDistribution = CANONICAL_HOMEPAGE_SNAPSHOT.partnerDistribution;
 const CONFERENCE_TEMPLATE_ID = canonicalTemplate.root.id;
 
 function stableCanonicalJson(value: unknown): string {
@@ -537,6 +539,53 @@ try {
             updatedAt: new Date(),
           },
         });
+
+      const [existingPartnerDraft] = await tx
+        .select({ id: eventPartnerProgramVersions.id })
+        .from(eventPartnerProgramVersions)
+        .where(
+          and(
+            eq(eventPartnerProgramVersions.organizationId, DEMO_IDS.organization),
+            eq(eventPartnerProgramVersions.eventId, DEMO_IDS.event),
+            eq(eventPartnerProgramVersions.status, 'draft'),
+          ),
+        )
+        .limit(1);
+      if (!existingPartnerDraft) {
+        const [latestPartnerProgram] = await tx
+          .select({
+            version: sql<number>`coalesce(max(${eventPartnerProgramVersions.version}), 0)::int`,
+          })
+          .from(eventPartnerProgramVersions)
+          .where(
+            and(
+              eq(eventPartnerProgramVersions.organizationId, DEMO_IDS.organization),
+              eq(eventPartnerProgramVersions.eventId, DEMO_IDS.event),
+            ),
+          );
+        const draft = canonicalPartnerDistribution.programDraft;
+        await tx.insert(eventPartnerProgramVersions).values({
+          organizationId: DEMO_IDS.organization,
+          eventId: DEMO_IDS.event,
+          version: (latestPartnerProgram?.version ?? 0) + 1,
+          status: 'draft',
+          mode: draft.mode,
+          fixedRateBps: draft.fixedRateBps,
+          tiers: draft.tiers,
+          eligibleTicketTypeIds: draft.eligibleTicketTypeIds,
+          attributionDays: draft.attributionDays,
+          settlementDelayDays: draft.settlementDelayDays,
+          minimumPayoutAmount: draft.minimumPayoutAmount,
+          payoutCadence: draft.payoutCadence,
+          termsTitle: draft.termsTitle,
+          termsContent: draft.termsContent,
+          promotionPolicy: draft.promotionPolicy,
+          publicDirectoryEnabled: canonicalPartnerDistribution.homepage.enabled,
+          homepageLimit: canonicalPartnerDistribution.homepage.limit,
+          contentHash: createHash('sha256').update(stableCanonicalJson(draft)).digest('hex'),
+          createdBy: adminUserId,
+        });
+      }
 
       const rendererPackagesToSeed = new Map(
         [

@@ -20,6 +20,12 @@ import { staffCredentialRevision, staffCredentialVersion } from './staff-account
 
 const REQUIRED_GRANTS = 'conference.required_grants';
 const REQUIRED_ALL_GRANTS = 'conference.required_all_grants';
+const EXPLICIT_FINANCIAL_GRANTS = new Set([
+  'event.commission.manage',
+  'event.payout.review',
+  'event.payout.execute',
+  'event.payout.export',
+]);
 
 export const RequireGrant = (...grants: string[]) => SetMetadata(REQUIRED_GRANTS, grants);
 export const RequireAllGrants = (...grants: string[]) => SetMetadata(REQUIRED_ALL_GRANTS, grants);
@@ -38,6 +44,9 @@ export interface AuthenticatedUser {
 }
 
 export function grantAllows(grants: string[], required: string) {
+  if (EXPLICIT_FINANCIAL_GRANTS.has(required)) {
+    return grants.includes('*') || grants.includes(required);
+  }
   return grants.some(
     (grant) =>
       grant === '*' ||

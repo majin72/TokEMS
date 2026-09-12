@@ -86,6 +86,13 @@ const navigation = computed(() => [
     grants: ['event.content.manage'],
   },
   {
+    name: 'event-distribution',
+    match: '/distribution',
+    icon: '◈',
+    label: '合作伙伴',
+    grants: ['event.partner.read', 'event.commission.read'],
+  },
+  {
     name: 'event-invoices',
     match: '/invoices',
     icon: '¥',

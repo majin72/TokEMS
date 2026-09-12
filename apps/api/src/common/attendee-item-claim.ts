@@ -269,6 +269,20 @@ export async function claimAttendeeItem(
         .update(registrations)
         .set({ customerUserId: session.customerUserId, updatedAt: now })
         .where(eq(registrations.id, registration.id));
+      if (!registration.customerUserId && observed.item) {
+        await tx.insert(outboxEvents).values({
+          organizationId: order.organizationId,
+          eventId: order.eventId,
+          eventType: 'PartnerAttendeeClaimed',
+          correlationId: `partner-attendee-claimed:${registration.id}:${session.customerUserId}`,
+          payload: {
+            orderId: order.id,
+            orderItemId: observed.item.id,
+            registrationId: registration.id,
+            customerUserId: session.customerUserId,
+          },
+        });
+      }
       if (observed.item) {
         await tx
           .update(orderItems)
