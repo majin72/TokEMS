@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { mkdir, readFile } from 'node:fs/promises';
 import { chromium } from 'playwright-core';
+import jsQR from 'jsqr';
 const base = process.env.PARTNER_ACCOUNT_BASE_URL ?? 'http://localhost:8088';
 const partner = {
   id: 'partner-fixture',
@@ -416,28 +417,13 @@ test('partner poster shares member composition and exports the exact preview wit
   assert.equal(png.readUInt32BE(20), 1440);
   assert.deepEqual(png, Buffer.from(poster.png.split(',')[1], 'base64'));
   await download.saveAs(`${output}/partner-poster.png`);
-  const qr = await canvas.evaluate(async (canvas) => {
-    if (!('BarcodeDetector' in window)) return null;
-    if (!(await BarcodeDetector.getSupportedFormats()).includes('qr_code')) return null;
-    return (await new BarcodeDetector({ formats: ['qr_code'] }).detect(canvas)).map(
-      (result) => result.rawValue,
-    );
+  const qrImage = await canvas.evaluate((canvas) => {
+    const image = canvas.getContext('2d').getImageData(780, 1088, 228, 228);
+    return { data: Array.from(image.data), width: image.width, height: image.height };
   });
-  if (qr) assert.deepEqual(qr, [`${base}/r/fixture`]);
-  else {
-    // Compare the embedded QR with the rendered source on browsers without a barcode reader.
-    const same = await canvas.evaluate((canvas) => {
-      const source = document.querySelector('.poster-qr-source canvas');
-      const scaled = document.createElement('canvas');
-      scaled.width = 192;
-      scaled.height = 192;
-      scaled.getContext('2d').drawImage(source, 0, 0, 192, 192);
-      const expected = scaled.getContext('2d').getImageData(0, 0, 192, 192).data;
-      const actual = canvas.getContext('2d').getImageData(798, 1106, 192, 192).data;
-      return expected.every((value, i) => value === actual[i]);
-    });
-    assert.equal(same, true);
-  }
+  const qr = jsQR(new Uint8ClampedArray(qrImage.data), qrImage.width, qrImage.height);
+  assert.ok(qr, 'the exported poster contains a readable QR code');
+  assert.equal(qr.data, `${base}/r/fixture`);
 });
 
 test('poster uses authorized saved fields and keeps hidden names out of image and filename', async (t) => {
