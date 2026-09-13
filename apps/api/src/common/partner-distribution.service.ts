@@ -1059,12 +1059,16 @@ export class PartnerDistributionService {
         .limit(1);
       if (!profile) fail(API_ERROR_CODES.NOT_FOUND, '合作伙伴资料不存在', HttpStatus.NOT_FOUND);
       const next = mutate(profile);
+      const timestamp = new Date();
       await tx.insert(eventPartnerProfileVersions).values({
         ...next,
+        id: randomUUID(),
         partnerId: partner.id,
         organizationId: session.organizationId,
         eventId,
         version: partner.profileVersion + 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
       });
       const [updated] = await tx
         .update(eventPartners)

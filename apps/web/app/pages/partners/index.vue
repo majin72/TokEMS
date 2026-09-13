@@ -19,7 +19,7 @@ useHead(() => ({
 
 <template>
   <div class="partners-page">
-    <FlowHeader />
+    <EventPublicNav :event-slug="eventSlug" :event-name="api.eventState.value.name" />
     <main id="main-content" class="partners-shell">
       <NuxtLink class="partners-back" :to="publicEventHomePath(eventSlug)">← 返回大会主页</NuxtLink>
       <header class="partners-head">

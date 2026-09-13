@@ -50,7 +50,7 @@ useHead(() => ({
 
 <template>
   <div class="partner-page">
-    <FlowHeader />
+    <EventPublicNav :event-slug="eventSlug" :event-name="partner?.event.name" />
     <main id="main-content" class="profile-shell">
       <p v-if="error" class="profile-state">该合作伙伴资料已停止公开，或链接已失效。</p>
       <template v-else-if="partner">
