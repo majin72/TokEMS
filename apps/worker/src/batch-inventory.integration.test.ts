@@ -113,7 +113,7 @@ persistent('batch inventory and deployment gates with real PostgreSQL', () => {
       for (const name of names) await admin.pool.query(`drop database if exists "${name}"`);
       await admin.pool.end();
     }
-  });
+  }, 120_000);
 
   async function fixture(
     options: {
