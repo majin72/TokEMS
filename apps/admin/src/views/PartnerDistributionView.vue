@@ -1936,6 +1936,7 @@ onMounted(() => void load());
   overflow: auto;
 }
 .partner-tabs button {
+  min-height: 44px;
   border: 0;
   background: transparent;
   padding: 11px 18px;
