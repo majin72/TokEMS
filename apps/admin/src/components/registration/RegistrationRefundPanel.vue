@@ -235,15 +235,17 @@ onBeforeUnmount(() => {
     </div>
     <p v-if="errorMessage" class="refund-error" role="alert">{{ errorMessage }}</p>
     <p v-if="message" class="refund-message" role="status">{{ message }}</p>
-    <label v-if="!orderId" class="filter">处理状态
-      <select v-model="filter">
+    <div v-if="!orderId" class="filter">
+      <label for="refund-status-filter">处理状态</label>
+      <select id="refund-status-filter" v-model="filter">
         <option value="all">全部申请</option>
         <option value="pending_review">待审核</option>
         <option value="waiting_funds">等待资金</option>
         <option value="processing">微信处理中</option>
         <option value="attention">异常与超时</option>
         <option value="completed">已完成</option>
-      </select></label>
+      </select>
+    </div>
     <p v-if="loading && !rows.length">正在读取退款申请…</p>
     <p v-else-if="!rows.length" class="empty">暂无退款申请。用户可从个人中心的购买订单提交申请。</p>
     <article v-for="row in rows" :key="row.id" class="refund-row">
@@ -253,6 +255,34 @@ onBeforeUnmount(() => {
         </div>
         <small>{{ row.orderNo }} · {{ dateTime(row.createdAt) }}</small>
       </div>
+      <section
+        v-if="row.applicantVisible"
+        class="refund-applicant"
+        aria-label="退款申请用户信息"
+      >
+        <div class="refund-applicant-heading">
+          <h3>退款申请用户</h3>
+          <span>用于审核核验</span>
+        </div>
+        <dl class="refund-applicant-grid">
+          <div>
+            <dt>用户 ID</dt>
+            <dd>{{ row.applicant.id ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>手机号</dt>
+            <dd>{{ row.applicant.mobile ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>用户名</dt>
+            <dd>{{ row.applicant.name ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>公司</dt>
+            <dd>{{ row.applicant.company ?? '—' }}</dd>
+          </div>
+        </dl>
+      </section>
       <p>{{ row.reason || '用户未填写退款原因' }}</p>
       <p>
         {{ row.fullRefund ? '全额退还剩余款项，批准后暂停票券' : '部分退款，保留参会资格' }} ·
@@ -419,6 +449,44 @@ small,
   padding: 22px 0;
   border-top: 1px solid #e2e7ec;
 }
+.refund-applicant {
+  margin: 16px 0;
+  padding: 14px 16px 16px;
+  border: 1px solid #dfe7ef;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.refund-applicant-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.refund-applicant h3 {
+  margin: 0;
+  color: #25374a;
+  font-size: 14px;
+}
+.refund-applicant-heading span,
+.refund-applicant dt {
+  color: #667586;
+  font-size: 12px;
+}
+.refund-applicant-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px 24px;
+  margin: 0;
+}
+.refund-applicant-grid > div {
+  min-width: 0;
+}
+.refund-applicant dd {
+  margin: 4px 0 0;
+  color: #25374a;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
 .row-head strong {
   font-size: 23px;
   font-variant-numeric: tabular-nums;
@@ -491,10 +559,15 @@ button:active {
   transform: translateY(1px);
 }
 .filter {
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content minmax(248px, 352px);
   align-items: center;
-  gap: 14px;
+  gap: 16px;
   margin: 16px 0;
+}
+.filter select {
+  width: 100%;
+  min-height: 44px;
 }
 @media (max-width: 640px) {
   .refund-panel {
@@ -508,6 +581,15 @@ button:active {
   }
   .refund-panel-actions .button {
     flex: 1 1 0;
+  }
+  .refund-applicant-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .filter {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    width: 100%;
   }
 }
 </style>

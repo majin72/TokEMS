@@ -7,6 +7,7 @@ import { batchConflict } from './batch-purchase-policy.js';
 import { batchOrderView, OrderItemsService } from './order-items.service.js';
 import { withPostgresTransactionRetry } from './transaction-retry.js';
 import type { PaymentCompletion, PaymentConfirmation } from './conference.repository.js';
+import { partnerAttributionForOrder } from './partner-attribution.js';
 
 @Injectable()
 export class BatchPaymentService {
@@ -83,10 +84,12 @@ export class BatchPaymentService {
         const now = new Date();
         let payment = external ?? prepared;
         if (!payment) {
+          const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderId);
           [payment] = await tx
             .insert(payments)
             .values({
               orderId,
+              partnerAttributionRevisionId,
               provider: confirmation.provider,
               externalId: confirmation.externalId,
               status: 'succeeded',

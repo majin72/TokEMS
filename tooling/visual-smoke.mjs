@@ -10,6 +10,7 @@ const webBase = process.env.WEB_BASE_URL ?? 'http://localhost:8088';
 const adminBase = process.env.ADMIN_BASE_URL ?? 'http://admin.localhost:8088/admin';
 const visualScope = process.env.VISUAL_SCOPE ?? 'all';
 const includeWeb = visualScope !== 'admin';
+const partnerProfileUrl = process.env.VISUAL_PARTNER_PROFILE_URL;
 const adminApiBase =
   process.env.ADMIN_API_BASE_URL ??
   process.env.API_BASE_URL ??
@@ -827,6 +828,18 @@ async function runVisualSmoke() {
     await page.goto(`${webBase}/faq`, { waitUntil: 'networkidle' });
     await page.locator('.faq-page').waitFor();
     await screenshot(page, 'web-faq-desktop.png', 'FAQ 独立页桌面端');
+    await page.goto(`${webBase}/partners?event=${encodeURIComponent(DEMO_EVENT.slug)}`, {
+      waitUntil: 'networkidle',
+    });
+    await page.locator('.partners-page').waitFor();
+    await page.getByRole('navigation', { name: '大会主导航' }).waitFor();
+    await screenshot(page, 'web-partners-directory-desktop.png', '合作伙伴目录桌面端');
+    if (partnerProfileUrl) {
+      await page.goto(partnerProfileUrl, { waitUntil: 'networkidle' });
+      await page.locator('.partner-page').waitFor();
+      await page.getByRole('navigation', { name: '大会主导航' }).waitFor();
+      await screenshot(page, 'web-partner-profile-desktop.png', '合作伙伴详情页桌面端');
+    }
     await page.goto(`${webBase}/register`, { waitUntil: 'networkidle' });
     const visualRunId = Date.now().toString();
     visualCustomerMobile = `139${visualRunId.slice(-8)}`;
@@ -1009,6 +1022,12 @@ async function runVisualSmoke() {
     ],
     [`${eventBase}/registrations`, '报名管理', 'admin-registrations-desktop.png', '报名管理桌面端'],
     [`${eventBase}/invoices`, '发票管理', 'admin-invoices-desktop.png', '发票管理桌面端'],
+    [
+      `${eventBase}/distribution`,
+      '合作伙伴与分销',
+      'admin-partner-distribution-desktop.png',
+      '合作伙伴与分销桌面端',
+    ],
     [`${eventBase}/notifications`, '通知中心', 'admin-notifications-desktop.png', '通知中心桌面端'],
     [`${eventBase}/activity`, '审计日志与数据导出', 'admin-audit-desktop.png', '操作记录桌面端'],
   ];
@@ -1083,6 +1102,18 @@ async function runVisualSmoke() {
     await mobile.goto(`${webBase}/faq`, { waitUntil: 'networkidle' });
     await mobile.locator('.faq-page').waitFor();
     await screenshot(mobile, 'web-faq-mobile.png', 'FAQ 独立页手机端');
+    await mobile.goto(`${webBase}/partners?event=${encodeURIComponent(DEMO_EVENT.slug)}`, {
+      waitUntil: 'networkidle',
+    });
+    await mobile.locator('.partners-page').waitFor();
+    await mobile.getByRole('navigation', { name: '大会主导航' }).waitFor();
+    await screenshot(mobile, 'web-partners-directory-mobile.png', '合作伙伴目录手机端');
+    if (partnerProfileUrl) {
+      await mobile.goto(partnerProfileUrl, { waitUntil: 'networkidle' });
+      await mobile.locator('.partner-page').waitFor();
+      await mobile.getByRole('navigation', { name: '大会主导航' }).waitFor();
+      await screenshot(mobile, 'web-partner-profile-mobile.png', '合作伙伴详情页手机端');
+    }
 
     if (visualCustomerMobile) {
       await captureCustomerLoginMobile(mobile);

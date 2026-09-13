@@ -54,6 +54,10 @@ import { EventPublicMetricsService } from '../common/event-public-metrics.servic
 import { DatabaseService } from '../common/database.service.js';
 import { BatchRegistrationService } from '../common/batch-registration.service.js';
 import { CustomerAuthGuard, type CustomerRequest } from '../common/customer-auth.guard.js';
+import {
+  PARTNER_REFERRAL_COOKIE,
+  readPartnerReferralContext,
+} from '../common/partner-distribution.service.js';
 
 const WeChatSwitchChannelBodySchema = z
   .object({
@@ -686,6 +690,7 @@ class RegistrationsController {
             profile: session.customer.profile,
           }
         : undefined,
+      readPartnerReferralContext(request.cookies[PARTNER_REFERRAL_COOKIE]),
     );
   }
 }
@@ -710,7 +715,17 @@ export class RegistrationBatchesController {
     const parsed = CreateRegistrationBatchSchema.safeParse(body);
     if (!parsed.success) throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, '请检查每位参会人的报名信息', HttpStatus.BAD_REQUEST, { issues: parsed.error.issues });
     const session = request.customerSession;
-    return this.batches.create(parsed.data, idempotencyKey(key), { customerUserId: session.customerUserId, organizationId: session.organizationId, mobile: session.customer.mobile, profile: session.customer.profile });
+    return this.batches.create(
+      parsed.data,
+      idempotencyKey(key),
+      {
+        customerUserId: session.customerUserId,
+        organizationId: session.organizationId,
+        mobile: session.customer.mobile,
+        profile: session.customer.profile,
+      },
+      readPartnerReferralContext(request.cookies[PARTNER_REFERRAL_COOKIE]),
+    );
   }
 }
 

@@ -11,6 +11,7 @@ const templates = {
   invoiceDetailsRequested: { enabled: false, templateCode: '' },
   invoiceReady: { enabled: false, templateCode: '' },
   eventReminder: { enabled: false, templateCode: '' },
+  partnerInvitation: { enabled: false, templateCode: '' },
 };
 
 describe('Aliyun SMS settings contract', () => {

@@ -16,6 +16,8 @@ import {
   type PublicEventMemberDetail,
   type PublicEventMemberList,
   type PublicEventSpeakerDetail,
+  type PublicPartnerDetail,
+  type PublicPartnerSummary,
   type PublicCooperationRequestResult,
   type RegistrationCheckout,
   type SubmitInvoiceDetails,
@@ -168,6 +170,54 @@ export function useConferenceApi() {
       ...result,
       ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
     };
+  }
+
+  async function getEventPartners(
+    slug: string,
+    limit = 24,
+    surface: 'directory' | 'homepage' = 'directory',
+  ) {
+    const result = await $fetch<{ items: PublicPartnerSummary[]; nextCursor: string | null }>(
+      `/events/${encodeURIComponent(slug)}/partners`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+        query: { limit, surface },
+      },
+    );
+    return {
+      ...result,
+      items: result.items.map((item) => ({
+        ...item,
+        ...(item.avatarUrl ? { avatarUrl: publicApiResourceUrl(item.avatarUrl) } : {}),
+      })),
+    };
+  }
+
+  async function getEventPartner(slug: string, publicSlug: string) {
+    const result = await $fetch<PublicPartnerDetail>(
+      `/events/${encodeURIComponent(slug)}/partners/${encodeURIComponent(publicSlug)}`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+      },
+    );
+    return {
+      ...result,
+      ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
+      gallery: result.gallery.map((item) => ({
+        ...item,
+        url: publicApiResourceUrl(item.url) ?? item.url,
+      })),
+    };
+  }
+
+  function resolvePartnerReferral(code: string) {
+    return $fetch<{ destinationPath: string }>(`/r/${encodeURIComponent(code)}`, {
+      baseURL,
+      credentials: 'include',
+      headers: { 'X-Organization-Slug': organizationSlug },
+    });
   }
 
   async function getEventSpeaker(slug: string, speakerId: string) {
@@ -728,6 +778,9 @@ export function useConferenceApi() {
     getEventMembers,
     getEventAttendeeNeeds,
     getEventMember,
+    getEventPartners,
+    getEventPartner,
+    resolvePartnerReferral,
     getEventSpeaker,
     getSpeakerByCode,
     getSiteConfiguration,

@@ -27,6 +27,7 @@ import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { batchConflict, BATCH_PAYMENT_WINDOW_MS } from './batch-purchase-policy.js';
 import { OrderItemsService, type BatchCustomer } from './order-items.service.js';
 import { WeChatPayService } from './wechat-pay.service.js';
+import { partnerAttributionForOrder } from './partner-attribution.js';
 
 @Injectable()
 export class BatchOrderManagementService {
@@ -315,10 +316,12 @@ export class BatchOrderManagementService {
             ),
           );
         if (order.amount === 0) {
+          const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderId);
           const [payment] = await tx
             .insert(payments)
             .values({
               orderId,
+              partnerAttributionRevisionId,
               provider: 'free',
               externalId: `free:${orderId}`,
               status: 'succeeded',

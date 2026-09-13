@@ -75,6 +75,7 @@ export const ALIYUN_SMS_TEMPLATE_KEYS = [
   'invoiceDetailsRequested',
   'invoiceReady',
   'eventReminder',
+  'partnerInvitation',
 ] as const;
 
 export type AliyunSmsTemplateKey = (typeof ALIYUN_SMS_TEMPLATE_KEYS)[number];
@@ -124,6 +125,10 @@ export const ALIYUN_SMS_TEMPLATE_META: Record<
   eventReminder: {
     label: '大会提醒',
     variables: ['eventName', 'startsAt', 'venue'],
+  },
+  partnerInvitation: {
+    label: '合作伙伴资格开通',
+    variables: ['eventName', 'url'],
   },
 };
 

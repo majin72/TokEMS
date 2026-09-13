@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import {
   checkinLists,
   checkinRecords,
+  customerProfiles,
   customerUsers,
   events,
   invoiceRequests,
@@ -16,6 +17,7 @@ import {
   refundNotificationInbox,
   outboxEvents,
   payments,
+  publicUserIds,
   refundMerchantSchedules,
   refundRequests,
   refunds,
@@ -24,7 +26,7 @@ import {
   ticketTypes,
   users,
 } from '@conference/database';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { DatabaseService } from './database.service.js';
 import { ConferenceRepository } from './conference.repository.js';
 import { WeChatPayService } from './wechat-pay.service.js';
@@ -68,6 +70,12 @@ persistent('customer refund workflow with real PostgreSQL', () => {
     await db
       .insert(customerUsers)
       .values({ id: customerUserId, organizationId, mobileE164: '+8613900000099' });
+    await db.insert(customerProfiles).values({
+      customerUserId,
+      nickname: '退款账号名',
+      realName: '退款申请人',
+      company: '退款测试公司',
+    });
     const [event] = await db
       .insert(events)
       .values({
@@ -227,6 +235,71 @@ persistent('customer refund workflow with real PostgreSQL', () => {
       policyVersion: policy.version,
       reason: '',
     });
+  it('includes the customer identity needed for refund review', async () => {
+    const f = await fixture();
+    const application = await apply(f.orderId);
+    const [publicUser] = await db
+      .select({ id: publicUserIds.publicId })
+      .from(publicUserIds)
+      .where(
+        and(
+          eq(publicUserIds.subjectType, 'customer'),
+          eq(publicUserIds.subjectUuid, customerUserId),
+          isNull(publicUserIds.retiredAt),
+        ),
+      );
+    const rows = await workflow.adminList(
+      organizationId,
+      eventId,
+      { status: 'all', limit: 30, offset: 0 },
+      true,
+    );
+    expect(rows.find((row) => row.id === application.id)).toMatchObject({
+      customerSubmitted: true,
+      applicantVisible: true,
+      applicant: {
+        id: publicUser!.id,
+        mobile: '+8613900000099',
+        name: '退款申请人',
+        company: '退款测试公司',
+      },
+    });
+  });
+
+  it('does not label a purchaser as the applicant for an admin-created refund', async () => {
+    const f = await fixture();
+    await workflow.createAdmin(organizationId, f.orderId, actorId, randomUUID(), {
+      amount: 9900,
+      reason: '协商部分退款',
+    });
+    const rows = await workflow.adminList(
+      organizationId,
+      eventId,
+      { status: 'all', limit: 30, offset: 0 },
+      true,
+    );
+    expect(rows.find((row) => row.orderId === f.orderId)).toMatchObject({
+      customerSubmitted: false,
+      applicantVisible: false,
+      applicant: { id: null, mobile: null, name: null, company: null },
+    });
+  });
+
+  it('redacts applicant data for order-read-only reviewers', async () => {
+    const f = await fixture();
+    const application = await apply(f.orderId);
+    const rows = await workflow.adminList(organizationId, eventId, {
+      status: 'all',
+      limit: 30,
+      offset: 0,
+    });
+    expect(rows.find((row) => row.id === application.id)).toMatchObject({
+      customerSubmitted: true,
+      applicantVisible: false,
+      applicant: { id: null, mobile: null, name: null, company: null },
+    });
+  });
+
   async function approved(f: Awaited<ReturnType<typeof fixture>>) {
     const application = await apply(f.orderId);
     const reviewed = await workflow.review(
@@ -328,7 +401,12 @@ persistent('customer refund workflow with real PostgreSQL', () => {
         await db
           .select()
           .from(refundRequests)
-          .where(eq(refundRequests.organizationId, organizationId)),
+          .where(
+            and(
+              eq(refundRequests.organizationId, organizationId),
+              eq(refundRequests.orderId, f.orderId),
+            ),
+          ),
       ).toEqual([]);
       await expect(
         gateway.updateConfiguration(organizationId, actorId, {

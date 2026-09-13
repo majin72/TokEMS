@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "webPages": 19,
-  "adminViews": 40,
-  "migrations": 68,
-  "latestMigration": "0067_majestic_songbird.sql",
-  "databaseTables": 87,
-  "apiControllers": 39,
-  "apiOperations": 307,
-  "testFiles": 215
+  "webPages": 23,
+  "adminViews": 41,
+  "migrations": 71,
+  "latestMigration": "0070_partner_distribution_scope_guards.sql",
+  "databaseTables": 105,
+  "apiControllers": 46,
+  "apiOperations": 361,
+  "testFiles": 226
 }

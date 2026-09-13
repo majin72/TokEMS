@@ -28,7 +28,27 @@ export async function cleanupTestEvents(eventIds, databaseUrl = defaultDatabaseU
           );
           // Clear restrictive child references before the event cascade, in one
           // transaction so deferred order/item invariants see their parent deleted too.
-          const tables = [
+          const partnerTables = [
+            'event_partner_program_versions',
+            'event_partners',
+            'event_partner_profile_versions',
+            'event_partner_rule_acceptances',
+            'partner_referral_links',
+            'partner_referral_visit_days',
+            'partner_attribution_revisions',
+            'partner_financial_event_inbox',
+            'partner_commissions',
+            'partner_commission_items',
+            'partner_payout_batches',
+            'partner_payout_recipients',
+            'partner_payout_requests',
+            'partner_payout_executions',
+            'partner_ledger_entries',
+            'partner_payout_documents',
+            'partner_commission_inquiries',
+            'partner_reconciliation_runs',
+          ];
+          const eventChildTables = [
             'notification_deliveries',
             'invoice_document_access_links',
             'invoice_requests',
@@ -37,6 +57,7 @@ export async function cleanupTestEvents(eventIds, databaseUrl = defaultDatabaseU
             'inventory_reservations',
             'order_items',
           ];
+          const tables = [...partnerTables, ...eventChildTables];
           const { rows } = await client.query(
             `select name from unnest($1::text[]) as requested(name)
              where to_regclass('public.' || name) is not null`,
@@ -54,7 +75,103 @@ export async function cleanupTestEvents(eventIds, databaseUrl = defaultDatabaseU
                and registration.event_id = any($1::integer[])`,
             [uniqueEventIds],
           );
-          for (const table of tables) {
+
+          if (existingTables.has('event_partners')) {
+            const payoutBatchIds = existingTables.has('partner_payout_batches')
+              ? (
+                  await client.query(
+                    `select distinct batch_id::text as id
+                     from (
+                       select id as batch_id from partner_payout_batches
+                       where event_id = any($1::integer[])
+                       union all
+                       select batch_id from partner_payout_requests
+                       where event_id = any($1::integer[]) and batch_id is not null
+                       union all
+                       select batch_id from partner_payout_executions
+                       where event_id = any($1::integer[])
+                       union all
+                       select batch_id from partner_reconciliation_runs
+                       where event_id = any($1::integer[]) and batch_id is not null
+                     ) candidate_batches`,
+                    [uniqueEventIds],
+                  )
+                ).rows.map((row) => row.id)
+              : [];
+
+            // A payment keeps its attribution revision for settlement. Clear that
+            // pointer before deleting the event's append-only partner records.
+            await client.query(
+              `update payments payment
+               set partner_attribution_revision_id = null
+               from orders scoped_order
+               where payment.order_id = scoped_order.id
+                 and scoped_order.event_id = any($1::integer[])
+                 and payment.partner_attribution_revision_id is not null`,
+              [uniqueEventIds],
+            );
+
+            const partnerEventTables = [
+              'partner_payout_documents',
+              'partner_commission_inquiries',
+              'partner_ledger_entries',
+              'partner_payout_executions',
+              'partner_reconciliation_runs',
+              'partner_payout_requests',
+              'partner_commission_items',
+              'partner_commissions',
+              'partner_attribution_revisions',
+              'partner_financial_event_inbox',
+              'partner_referral_visit_days',
+              'event_partner_rule_acceptances',
+              'event_partner_profile_versions',
+              'partner_referral_links',
+            ];
+            for (const table of partnerEventTables) {
+              if (!existingTables.has(table)) continue;
+              await client.query(
+                `delete from public.${table} where event_id = any($1::integer[])`,
+                [uniqueEventIds],
+              );
+            }
+
+            if (existingTables.has('partner_payout_recipients')) {
+              await client.query(
+                `delete from partner_payout_recipients recipient
+                 using event_partners partner
+                 where recipient.partner_id = partner.id
+                   and partner.event_id = any($1::integer[])`,
+                [uniqueEventIds],
+              );
+            }
+            await client.query('delete from event_partners where event_id = any($1::integer[])', [
+              uniqueEventIds,
+            ]);
+            if (existingTables.has('event_partner_program_versions')) {
+              await client.query(
+                'delete from event_partner_program_versions where event_id = any($1::integer[])',
+                [uniqueEventIds],
+              );
+            }
+            if (payoutBatchIds.length > 0) {
+              await client.query(
+                `delete from partner_payout_batches batch
+                 where batch.id = any($1::uuid[])
+                   and not exists (
+                     select 1 from partner_payout_requests request where request.batch_id = batch.id
+                   )
+                   and not exists (
+                     select 1 from partner_payout_executions execution where execution.batch_id = batch.id
+                   )
+                   and not exists (
+                     select 1 from partner_reconciliation_runs run where run.batch_id = batch.id
+                   )`,
+                [payoutBatchIds],
+              );
+            }
+          }
+
+          for (const table of eventChildTables) {
             if (!existingTables.has(table)) continue;
             await client.query(`delete from public.${table} where event_id = any($1::integer[])`, [
               uniqueEventIds,

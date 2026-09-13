@@ -39,7 +39,7 @@ persistent('administrative batch expiry with real PostgreSQL', () => {
           new URL('../../../../packages/database/drizzle', import.meta.url),
         ),
       });
-      for (const migration of migrations.slice(0, 66)) {
+      for (const migration of migrations) {
         await client.query('begin');
         for (const statement of migration.sql) await client.query(statement);
         await client.query('commit');

@@ -22,6 +22,7 @@ import {
   DEFAULT_ATTENDEE_SHOWCASE_VISIBLE_FIELDS,
   PublicEventMemberDetailSchema,
   PublicEventMemberListSchema,
+  PartnerMediaUploadSchema,
 } from '@conference/contracts';
 import {
   attendeeShowcaseProfiles,
@@ -592,6 +593,156 @@ export class AttendeeShowcaseService {
     };
   }
 
+  async preparePartnerMediaUpload(
+    session: AuthenticatedCustomer,
+    eventId: number,
+    input: unknown,
+  ): Promise<AttendeeAvatarUploadResult> {
+    const parsed = PartnerMediaUploadSchema.parse(input);
+    const uploadToken = randomUUID();
+    const kind = parsed.kind === 'avatar' ? 'partner_avatar' : 'partner_gallery';
+    const storageKey = `customers/${session.organizationId}/${session.customerUserId}/avatars/${uploadToken}/original`;
+    const uploadUrl = this.s3Presigned(
+      storageKey,
+      'PUT',
+      parsed.mediaType,
+      undefined,
+      parsed.size,
+    );
+    if (!uploadUrl) {
+      throw new DomainError(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '对象存储尚未配置，暂时无法上传合作伙伴图片',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    await this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${session.organizationId}), hashtext(${session.customerUserId}))`,
+      );
+      const [recentUploads] = await tx
+        .select({ value: count(customerMediaAssets.id) })
+        .from(customerMediaAssets)
+        .where(
+          and(
+            eq(customerMediaAssets.organizationId, session.organizationId),
+            eq(customerMediaAssets.customerUserId, session.customerUserId),
+            gte(customerMediaAssets.createdAt, new Date(Date.now() - 60 * 60_000)),
+          ),
+        );
+      if (Number(recentUploads?.value ?? 0) >= 20) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '图片上传过于频繁，请一小时后再试',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      await tx.insert(customerMediaAssets).values({
+        id: uploadToken,
+        organizationId: session.organizationId,
+        customerUserId: session.customerUserId,
+        kind,
+        sourceStorageKey: storageKey,
+        mediaType: parsed.mediaType,
+        size: parsed.size,
+        contentDigest: parsed.contentDigest.toLowerCase(),
+        status: 'processing',
+      });
+    });
+    return {
+      uploadToken,
+      uploadUrl,
+      headers: {
+        'Content-Type': parsed.mediaType,
+        'Content-Length': String(parsed.size),
+        'If-None-Match': '*',
+      },
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    };
+  }
+
+  async confirmPartnerMedia(
+    session: AuthenticatedCustomer,
+    eventId: number,
+    input: AttendeeAvatarConfirm,
+  ) {
+    const [asset] = await this.db()
+      .select()
+      .from(customerMediaAssets)
+      .where(
+        and(
+          eq(customerMediaAssets.id, input.uploadToken),
+          eq(customerMediaAssets.organizationId, session.organizationId),
+          eq(customerMediaAssets.customerUserId, session.customerUserId),
+          inArray(customerMediaAssets.kind, ['partner_avatar', 'partner_gallery']),
+        ),
+      )
+      .limit(1);
+    if (!asset || asset.contentDigest !== input.contentDigest.toLowerCase()) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '图片上传登记信息不一致',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    if (asset.confirmedAt || asset.sourceDeletedAt || asset.createdAt.getTime() < Date.now() - 10 * 60_000) {
+      throw new DomainError(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '图片上传确认已过期或已完成',
+        HttpStatus.CONFLICT,
+      );
+    }
+    const internalUrl = this.s3Presigned(asset.sourceStorageKey, 'GET', undefined, process.env.S3_ENDPOINT);
+    if (!internalUrl) {
+      throw new DomainError(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '对象存储尚未配置',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    const response = await fetch(internalUrl, { signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) {
+      throw new DomainError(API_ERROR_CODES.VALIDATION_ERROR, '图片尚未上传成功', HttpStatus.BAD_REQUEST);
+    }
+    const file = await readUploadWithinLimit(response, asset.size);
+    const digest = createHash('sha256').update(file).digest('hex');
+    if (digest !== asset.contentDigest || !matchesDeclaredMediaType(file, asset.mediaType)) {
+      throw new DomainError(
+        API_ERROR_CODES.VALIDATION_ERROR,
+        '图片文件内容校验失败',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    await this.db().transaction(async (tx) => {
+      const [confirmed] = await tx
+        .update(customerMediaAssets)
+        .set({ confirmedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(customerMediaAssets.id, asset.id),
+            isNull(customerMediaAssets.confirmedAt),
+            isNull(customerMediaAssets.sourceDeletedAt),
+          ),
+        )
+        .returning({ id: customerMediaAssets.id });
+      if (!confirmed) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '图片上传状态已更新，请重新上传',
+          HttpStatus.CONFLICT,
+        );
+      }
+      await tx.insert(outboxEvents).values({
+        organizationId: session.organizationId,
+        eventId,
+        eventType: 'CustomerAvatarProcessingRequested',
+        correlationId: `partner-media:${asset.id}`,
+        payload: { assetId: asset.id },
+      });
+    });
+    return { assetId: asset.id, status: 'processing' as const };
+  }
+
   async confirmAvatar(
     session: AuthenticatedCustomer,
     registrationId: string,
@@ -873,6 +1024,25 @@ export class AttendeeShowcaseService {
       throw new DomainError(API_ERROR_CODES.NOT_FOUND, '头像不存在', HttpStatus.NOT_FOUND);
     }
     return this.avatarContent(row.avatar.outputStorageKey);
+  }
+
+  async partnerMediaContent(organizationId: string, customerUserId: string, assetId: string) {
+    const [asset] = await this.db()
+      .select()
+      .from(customerMediaAssets)
+      .where(
+        and(
+          eq(customerMediaAssets.id, assetId),
+          eq(customerMediaAssets.organizationId, organizationId),
+          eq(customerMediaAssets.customerUserId, customerUserId),
+          eq(customerMediaAssets.status, 'ready'),
+        ),
+      )
+      .limit(1);
+    if (!asset?.outputStorageKey) {
+      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '图片不存在', HttpStatus.NOT_FOUND);
+    }
+    return this.avatarContent(asset.outputStorageKey);
   }
 
   private async publicEvent(eventSlug: string, organizationSlug: string) {

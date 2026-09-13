@@ -15,6 +15,8 @@ import {
 import {
   ACTIVE_WECHAT_PAYMENT_STATUSES,
   auditLogs,
+  customerProfiles,
+  customerUsers,
   events,
   idempotencyKeys,
   invoiceRequests,
@@ -27,6 +29,7 @@ import {
   orderStateLogs,
   outboxEvents,
   payments,
+  publicUserIds,
   refundRequests,
   refundNotificationInbox,
   refunds,
@@ -951,7 +954,12 @@ export class RefundWorkflowService {
       .limit(100);
   }
 
-  async adminList(organizationId: string, eventId: number, query: RefundApplicationQuery) {
+  async adminList(
+    organizationId: string,
+    eventId: number,
+    query: RefundApplicationQuery,
+    canReadApplicant = false,
+  ) {
     const conditions = [
       eq(refundRequests.organizationId, organizationId),
       eq(refundRequests.eventId, eventId),
@@ -969,9 +977,22 @@ export class RefundWorkflowService {
         request: refundRequests,
         orderNo: orders.orderNo,
         executionMode: orders.refundExecutionMode,
+        customer: customerUsers,
+        customerProfile: customerProfiles,
+        customerPublicId: publicUserIds.publicId,
       })
       .from(refundRequests)
       .innerJoin(orders, eq(orders.id, refundRequests.orderId))
+      .leftJoin(customerUsers, eq(customerUsers.id, refundRequests.customerUserId))
+      .leftJoin(customerProfiles, eq(customerProfiles.customerUserId, customerUsers.id))
+      .leftJoin(
+        publicUserIds,
+        and(
+          eq(publicUserIds.subjectType, 'customer'),
+          eq(publicUserIds.subjectUuid, customerUsers.id),
+          isNull(publicUserIds.retiredAt),
+        ),
+      )
       .where(and(...conditions))
       .orderBy(desc(refundRequests.createdAt))
       .limit(query.limit)
@@ -983,11 +1004,25 @@ export class RefundWorkflowService {
           .from(refunds)
           .where(eq(refunds.requestId, row.request.id))
           .orderBy(desc(refunds.createdAt));
+        const customerSubmitted = row.request.source === 'customer';
+        const applicantVisible = customerSubmitted && canReadApplicant;
         return {
           ...this.view(row.request, executions),
           orderNo: row.orderNo,
           executionMode: row.executionMode,
           attentionReason: row.request.attentionReason,
+          customerSubmitted,
+          applicantVisible,
+          applicant: {
+            id: applicantVisible ? row.customerPublicId : null,
+            mobile: applicantVisible ? row.customer?.mobileE164 ?? null : null,
+            name: applicantVisible
+              ? row.customerProfile?.realName?.trim() ||
+                row.customerProfile?.nickname?.trim() ||
+                null
+              : null,
+            company: applicantVisible ? row.customerProfile?.company?.trim() || null : null,
+          },
           executions: executions.map((execution) => ({
             id: execution.id,
             refundNo: execution.outRefundNo ?? execution.refundNo,

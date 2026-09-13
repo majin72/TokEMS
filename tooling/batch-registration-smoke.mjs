@@ -8,7 +8,7 @@ import {
 } from '../packages/contracts/dist/index.js';
 
 // All API traffic is intercepted. This suite never creates real orders or payments.
-const base = process.env.WEB_BASE_URL ?? 'http://localhost:3095';
+const base = process.env.WEB_BASE_URL ?? 'http://localhost:8088';
 const paymentBase = process.env.PAYMENT_WEB_BASE_URL;
 if (
   [base, paymentBase]

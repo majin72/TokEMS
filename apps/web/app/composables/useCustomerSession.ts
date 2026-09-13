@@ -27,6 +27,9 @@ import type {
   UpdatePurchasedOrderAttendee,
   UpdateAttendeeShowcase,
   UpdateAttendeeNeeds,
+  PartnerRelationshipView,
+  UpdatePartnerPrivacy,
+  UpdatePartnerProfile,
 } from '@conference/contracts';
 import { nextTick } from 'vue';
 import { browserLocalStorage, browserSessionStorage } from '../utils/browser-storage';
@@ -168,6 +171,181 @@ export function useCustomerSession() {
       headers: headers(),
       query: { ...(cursor ? { cursor } : {}), limit },
     });
+  }
+
+  function partnerships() {
+    return $fetch<{ items: PartnerRelationshipView[] }>('/customer/partnerships', {
+      baseURL,
+      credentials: 'include',
+      headers: headers(),
+    });
+  }
+
+  function partnership(eventId: number) {
+    return $fetch<PartnerRelationshipView>(`/customer/partnerships/${eventId}`, {
+      baseURL,
+      credentials: 'include',
+      headers: headers(),
+    });
+  }
+
+  function acceptPartnerProgram(
+    eventId: number,
+    input: { programVersionId: string; expectedPartnerVersion: number },
+  ) {
+    return $fetch<PartnerRelationshipView>(
+      `/customer/partnerships/${eventId}/rule-acceptances`,
+      { method: 'POST', baseURL, credentials: 'include', headers: headers(true), body: input },
+    );
+  }
+
+  function updatePartnerProfile(eventId: number, input: UpdatePartnerProfile) {
+    return $fetch<PartnerRelationshipView>(`/customer/partnerships/${eventId}/profile`, {
+      method: 'PATCH', baseURL, credentials: 'include', headers: headers(true), body: input,
+    });
+  }
+
+  function updatePartnerPrivacy(eventId: number, input: UpdatePartnerPrivacy) {
+    return $fetch<PartnerRelationshipView>(`/customer/partnerships/${eventId}/privacy`, {
+      method: 'PATCH', baseURL, credentials: 'include', headers: headers(true), body: input,
+    });
+  }
+
+  function partnerCommissions(eventId: number) {
+    return $fetch<{ items: Array<Record<string, unknown>> }>(
+      `/customer/partnerships/${eventId}/commissions`,
+      { baseURL, credentials: 'include', headers: headers() },
+    );
+  }
+
+  function partnerPayouts(eventId: number) {
+    return $fetch<{
+      requests: Array<Record<string, unknown>>;
+      recipients: Array<Record<string, unknown>>;
+      documents: Array<Record<string, unknown>>;
+    }>(
+      `/customer/partnerships/${eventId}/payouts`,
+      { baseURL, credentials: 'include', headers: headers() },
+    );
+  }
+
+  async function downloadPartnerPayoutDocument(eventId: number, documentId: string) {
+    const result = await $fetch<{ downloadPath: string }>(
+      `/customer/partnerships/${eventId}/payout-documents/${encodeURIComponent(documentId)}/access-token`,
+      { method: 'POST', baseURL, credentials: 'include', headers: headers(true) },
+    );
+    if (!import.meta.client) return;
+    const apiOrigin = new URL(baseURL, window.location.origin).origin;
+    window.location.assign(new URL(result.downloadPath, apiOrigin).toString());
+  }
+
+  function bindPartnerRecipient(eventId: number, input: Record<string, unknown>) {
+    return $fetch<Record<string, unknown>>(`/customer/partnerships/${eventId}/recipients`, {
+      method: 'POST', baseURL, credentials: 'include', headers: headers(true), body: input,
+    });
+  }
+
+  function startPartnerWechatRecipientBinding(eventId: number, displayName: string) {
+    return $fetch<{ authorizeUrl: string; expiresAt: string }>(
+      `/customer/partnerships/${eventId}/recipients/wechat/oauth/start`,
+      {
+        method: 'POST',
+        baseURL,
+        credentials: 'include',
+        headers: headers(true),
+        body: { displayName },
+      },
+    );
+  }
+
+  function completePartnerWechatRecipientBinding(eventId: number, handoffCode: string) {
+    return $fetch<Record<string, unknown>>(
+      `/customer/partnerships/${eventId}/recipients/wechat/oauth/complete`,
+      {
+        method: 'POST',
+        baseURL,
+        credentials: 'include',
+        headers: headers(true),
+        body: { handoffCode },
+      },
+    );
+  }
+
+  function createPartnerPayout(eventId: number, input: Record<string, unknown>) {
+    return $fetch<Record<string, unknown>>(`/customer/partnerships/${eventId}/payouts`, {
+      method: 'POST', baseURL, credentials: 'include', headers: headers(true), body: input,
+    });
+  }
+
+  function confirmPartnerPayoutSettlement(
+    eventId: number,
+    requestId: string,
+    expectedVersion: number,
+  ) {
+    return $fetch<Record<string, unknown>>(
+      `/customer/partnerships/${eventId}/payouts/${requestId}/settlement-confirmation`,
+      {
+        method: 'POST',
+        baseURL,
+        credentials: 'include',
+        headers: headers(true),
+        body: { expectedVersion },
+      },
+    );
+  }
+
+  function createPartnerInquiry(eventId: number, input: Record<string, unknown>) {
+    return $fetch<Record<string, unknown>>(`/customer/partnerships/${eventId}/inquiries`, {
+      method: 'POST', baseURL, credentials: 'include', headers: headers(true), body: input,
+    });
+  }
+
+  function partnerPayoutConfirmation(eventId: number, requestId: string) {
+    return $fetch<{
+      mchId: string;
+      appId: string;
+      package: string;
+      expiresAt: string | null;
+      executionVersion: number;
+      requestVersion: number;
+    }>(`/customer/partnerships/${eventId}/payouts/${requestId}/wechat-confirmation`, {
+      baseURL,
+      credentials: 'include',
+      headers: headers(),
+    });
+  }
+
+  function markPartnerPayoutConfirmed(eventId: number, requestId: string, expectedVersion: number) {
+    return $fetch<Record<string, unknown>>(
+      `/customer/partnerships/${eventId}/payouts/${requestId}/user-confirmed`,
+      {
+        method: 'POST',
+        baseURL,
+        credentials: 'include',
+        headers: headers(true),
+        body: { expectedVersion },
+      },
+    );
+  }
+
+  async function uploadPartnerMedia(eventId: number, kind: 'avatar' | 'gallery', file: File) {
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+    const prepared = await $fetch<{
+      uploadToken: string;
+      uploadUrl: string;
+      headers: Record<string, string>;
+    }>(`/customer/partnerships/${eventId}/media-uploads`, {
+      method: 'POST', baseURL, credentials: 'include', headers: headers(true),
+      body: { kind, fileName: file.name, mediaType: file.type, size: file.size, contentDigest: digest },
+    });
+    const uploaded = await fetch(prepared.uploadUrl, { method: 'PUT', headers: prepared.headers, body: file });
+    if (!uploaded.ok) throw new Error('图片上传失败，请重试');
+    return $fetch<{ assetId: string; status: 'processing' }>(
+      `/customer/partnerships/${eventId}/media-confirmations`,
+      { method: 'POST', baseURL, credentials: 'include', headers: headers(true), body: { uploadToken: prepared.uploadToken, contentDigest: digest } },
+    );
   }
 
   function purchaseContext(eventId: number) {
@@ -545,6 +723,23 @@ export function useCustomerSession() {
     logout,
     updateProfile,
     registrations,
+    partnerships,
+    partnership,
+    acceptPartnerProgram,
+    updatePartnerProfile,
+    updatePartnerPrivacy,
+    partnerCommissions,
+    partnerPayouts,
+    downloadPartnerPayoutDocument,
+    bindPartnerRecipient,
+    startPartnerWechatRecipientBinding,
+    completePartnerWechatRecipientBinding,
+    createPartnerPayout,
+    confirmPartnerPayoutSettlement,
+    createPartnerInquiry,
+    partnerPayoutConfirmation,
+    markPartnerPayoutConfirmed,
+    uploadPartnerMedia,
     purchaseContext,
     purchasedOrders,
     createOrderPaymentAccess,

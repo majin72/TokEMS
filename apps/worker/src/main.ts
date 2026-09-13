@@ -140,6 +140,15 @@ import {
   shouldDeliverRefundWorkflowNotification,
   type LifecycleNotificationDependencies,
 } from './registration-lifecycle-notification.worker.js';
+import {
+  activateScheduledPartnerPrograms,
+  enqueuePartnerFinancialEvent,
+  processPartnerFinancialInbox,
+  queryPendingPartnerPayouts,
+  reconcileAgedPartnerPayouts,
+  reconcilePartnerFinancialFacts,
+  releasePartnerCommissions,
+} from './partner-financial.worker.js';
 
 const queueName = 'conference-domain-events';
 const htmlImportQueueName = 'conference-html-template-imports';
@@ -155,6 +164,9 @@ const durableSideEffectEvents = new Set([
   'CustomerAvatarDeletionRequested',
   'EventPublished',
   'FeishuDigestDeliveryRequested',
+  'PaymentSucceeded',
+  'RefundSucceeded',
+  'PartnerAttendeeClaimed',
 ]);
 const OUTBOX_DISPATCH_LEASE_MS = 30_000;
 const OUTBOX_DISPATCH_TIMEOUT_MS = 5_000;
@@ -3140,6 +3152,12 @@ async function processDomainEvent(
       });
       break;
     case 'PaymentSucceeded':
+      await enqueuePartnerFinancialEvent(db, {
+        sourceEventId: String(job.data.eventId),
+        organizationId: String(job.data.organizationId),
+        eventType: 'PaymentSucceeded',
+        payload: eventPayload,
+      });
       await deliverPaymentSucceededNotification(db, eventPayload, String(correlationId), job.id);
       console.info(`[analytics] payment succeeded correlation=${String(correlationId)}`);
       break;
@@ -3176,6 +3194,7 @@ async function processDomainEvent(
         const [scope] = await db
           .select({
             channel: notificationDeliveries.channel,
+            purpose: notificationDeliveries.purpose,
             templateCode: notificationTemplates.code,
             eventName: events.name,
             startsAt: events.startsAt,
@@ -3190,24 +3209,38 @@ async function processDomainEvent(
           .leftJoin(events, eq(events.id, notificationDeliveries.eventId))
           .where(eq(notificationDeliveries.id, deliveryId))
           .limit(1);
-        const smsContext: SmsDeliveryContext | undefined =
+        let smsContext: SmsDeliveryContext | undefined;
+        if (
           scope?.channel === 'sms' &&
           scope.templateCode === 'event-reminder' &&
           scope.eventName &&
           scope.startsAt &&
           scope.venue &&
           scope.timezone
-            ? {
-                templateKey: 'eventReminder',
-                parameters: {
-                  eventName: scope.eventName,
-                  startsAt: scope.startsAt.toLocaleString('zh-CN', {
-                    timeZone: scope.timezone,
-                  }),
-                  venue: scope.venue,
-                },
-              }
-            : undefined;
+        ) {
+          smsContext = {
+            templateKey: 'eventReminder',
+            parameters: {
+              eventName: scope.eventName,
+              startsAt: scope.startsAt.toLocaleString('zh-CN', {
+                timeZone: scope.timezone,
+              }),
+              venue: scope.venue,
+            },
+          };
+        } else if (
+          scope?.channel === 'sms' &&
+          scope.purpose === 'partner-invitation' &&
+          scope.eventName
+        ) {
+          smsContext = {
+            templateKey: 'partnerInvitation',
+            parameters: {
+              eventName: scope.eventName,
+              url: `${conferenceSiteUrl()}/account`,
+            },
+          };
+        }
         await deliverNotification(db, deliveryId, job.id, undefined, smsContext);
       }
       console.info(`[notification] delivery completed id=${deliveryId}`);
@@ -3324,11 +3357,25 @@ async function processDomainEvent(
       );
       break;
     case 'RefundSucceeded':
+      await enqueuePartnerFinancialEvent(db, {
+        sourceEventId: String(job.data.eventId),
+        organizationId: String(job.data.organizationId),
+        eventType: 'RefundSucceeded',
+        payload: eventPayload,
+      });
       await handleReleasedInventory(db, eventPayload, true);
       await consumeRefundSucceededNotification(
         { payload: eventPayload, correlationId: String(correlationId) },
         lifecycleNotificationDependencies(db, job.id),
       );
+      break;
+    case 'PartnerAttendeeClaimed':
+      await enqueuePartnerFinancialEvent(db, {
+        sourceEventId: String(job.data.eventId),
+        organizationId: String(job.data.organizationId),
+        eventType: 'PartnerAttendeeClaimed',
+        payload: eventPayload,
+      });
       break;
     default:
       console.info(`[event] ${String(eventType)} correlation=${String(correlationId)}`);
@@ -4413,6 +4460,12 @@ async function start() {
   await maintainAgentAccessData(db);
   await cleanupExpiredCustomerAvatarSources(db);
   await reconcileAliyunSmsDeliveries(db);
+  await processPartnerFinancialInbox(db);
+  await releasePartnerCommissions(db);
+  await reconcilePartnerFinancialFacts(db);
+  await activateScheduledPartnerPrograms(db);
+  await queryPendingPartnerPayouts(db);
+  await reconcileAgedPartnerPayouts(db);
   let maintainingFeishuDigests = false;
   const maintainFeishuDigests = async () => {
     if (maintainingFeishuDigests) return;
@@ -4472,6 +4525,48 @@ async function start() {
     smsReceiptInterval,
   );
   const feishuDigestTimer = setInterval(() => void maintainFeishuDigests(), 60_000);
+  const partnerFinancialTimer = setInterval(
+    () =>
+      void processPartnerFinancialInbox(db).catch((error) =>
+        console.error('[partner-financial] inbox processing failed', error),
+      ),
+    5_000,
+  );
+  const partnerCommissionReleaseTimer = setInterval(
+    () =>
+      void releasePartnerCommissions(db).catch((error) =>
+        console.error('[partner-financial] commission release failed', error),
+      ),
+    60_000,
+  );
+  const partnerReconciliationTimer = setInterval(
+    () =>
+      void reconcilePartnerFinancialFacts(db).catch((error) =>
+        console.error('[partner-financial] reconciliation failed', error),
+      ),
+    15 * 60_000,
+  );
+  const partnerProgramTimer = setInterval(
+    () =>
+      void activateScheduledPartnerPrograms(db).catch((error) =>
+        console.error('[partner-financial] scheduled program activation failed', error),
+      ),
+    60_000,
+  );
+  const partnerPayoutQueryTimer = setInterval(
+    () =>
+      void queryPendingPartnerPayouts(db).catch((error) =>
+        console.error('[partner-financial] payout query failed', error),
+      ),
+    60_000,
+  );
+  const partnerPayoutReconciliationTimer = setInterval(
+    () =>
+      void reconcileAgedPartnerPayouts(db).catch((error) =>
+        console.error('[partner-financial] aged payout reconciliation failed', error),
+      ),
+    6 * 60 * 60_000,
+  );
   const workerRun = worker.run();
   const htmlImportWorkerRun = htmlImportWorker.run();
   void workerRun.catch((error) => {
@@ -4512,6 +4607,12 @@ async function start() {
     clearInterval(agentAccessMaintenanceTimer);
     clearInterval(smsReceiptTimer);
     clearInterval(feishuDigestTimer);
+    clearInterval(partnerFinancialTimer);
+    clearInterval(partnerCommissionReleaseTimer);
+    clearInterval(partnerReconciliationTimer);
+    clearInterval(partnerProgramTimer);
+    clearInterval(partnerPayoutQueryTimer);
+    clearInterval(partnerPayoutReconciliationTimer);
     await worker.close();
     await htmlImportWorker.close();
     await queue.close();

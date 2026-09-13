@@ -402,6 +402,16 @@ export const router = createRouter({
           },
         },
         {
+          path: 'distribution',
+          name: 'event-distribution',
+          component: () => import('./views/PartnerDistributionView.vue'),
+          meta: {
+            title: '合作伙伴与分销',
+            code: 'PARTNER DISTRIBUTION',
+            requiredGrants: ['event.partner.read', 'event.commission.read'],
+          },
+        },
+        {
           path: 'speakers/new',
           name: 'event-speaker-create',
           component: () => import('./views/SpeakerEditorView.vue'),

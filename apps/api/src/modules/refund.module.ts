@@ -30,7 +30,7 @@ import {
 } from '@conference/contracts';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { AuthGuard, RequireGrant, type AuthenticatedUser } from '../common/auth.guard.js';
+import { AuthGuard, grantAllows, RequireGrant, type AuthenticatedUser } from '../common/auth.guard.js';
 import { AgentSurface } from '../common/agent-operation-catalog.js';
 import { CustomerAuthGuard, type CustomerRequest } from '../common/customer-auth.guard.js';
 import { DomainError } from '../common/domain-error.js';
@@ -151,6 +151,8 @@ export class AdminRefundController {
       request.user.organizationId,
       eventId,
       parse(RefundApplicationQuerySchema, query),
+      grantAllows(request.user.grants, 'event.order.refund') ||
+        grantAllows(request.user.grants, 'customer.read'),
     );
   }
   @Post('events/:eventId/refund-requests/:requestId/approve')

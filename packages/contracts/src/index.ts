@@ -1,5 +1,7 @@
 import { InvoiceSmsPolicySchema, InvoiceSmsNotificationSchema } from './invoice-sms.js';
 export * from './invoice-sms.js';
+import { MainlandMobileSchema } from './mobile.js';
+export * from './mobile.js';
 import { z } from 'zod';
 import { EventRefundPolicySchema } from './refunds.js';
 export * from './refunds.js';
@@ -14,6 +16,8 @@ import canonicalHomepagePublicData from './canonical-homepage.public.json' with 
 export * from './agent.js';
 export * from './analytics.js';
 export * from './feishu.js';
+export * from './partner-distribution.js';
+export * from './partner-distribution-policy.js';
 
 export const BuildInfoSchema = z.object({
   service: z.string().regex(/^[a-z0-9-]+$/u),
@@ -91,6 +95,9 @@ export const RESERVED_PUBLIC_EVENT_SLUGS = [
   'invoice',
   'order',
   'pay',
+  'partners',
+  'payout',
+  'r',
   'register',
   'ticket',
 ] as const;
@@ -1846,11 +1853,6 @@ export const AuthMeSchema = z.object({
   adminPreferences: AdminPreferencesSchema.default({ lastEventId: null }),
 });
 
-export const MainlandMobileSchema = z
-  .string()
-  .trim()
-  .regex(/^(?:\+?86)?1[3-9]\d{9}$/, '请输入有效的中国大陆手机号');
-
 export const COOPERATION_TYPE_OPTIONS = [
   { value: 'brand_sponsorship', label: '品牌赞助' },
   { value: 'exhibition', label: '展位 / 产品展示' },
@@ -3589,6 +3591,7 @@ export const AliyunSmsTemplateKeySchema = z.enum([
   'invoiceDetailsRequested',
   'invoiceReady',
   'eventReminder',
+  'partnerInvitation',
 ]);
 
 const AliyunSmsTemplateConfigurationSchema = z.object({
@@ -3630,6 +3633,13 @@ const AliyunSmsTemplatesSchema = z.object({
   invoiceDetailsRequested: AliyunSmsTemplateConfigurationSchema,
   invoiceReady: AliyunSmsTemplateConfigurationSchema,
   eventReminder: AliyunSmsTemplateConfigurationSchema,
+  partnerInvitation: AliyunSmsTemplateConfigurationSchema.default({
+    enabled: false,
+    templateCode: '',
+    status: 'unverified',
+    lastVerifiedAt: null,
+    lastError: null,
+  }),
 });
 
 export const AliyunSmsConfigurationSchema = z.object({
@@ -3682,6 +3692,7 @@ export const UpdateAliyunSmsConfigurationSchema = z
       invoiceDetailsRequested: UpdateAliyunSmsTemplateConfigurationSchema,
       invoiceReady: UpdateAliyunSmsTemplateConfigurationSchema,
       eventReminder: UpdateAliyunSmsTemplateConfigurationSchema,
+      partnerInvitation: UpdateAliyunSmsTemplateConfigurationSchema.optional(),
     }),
   })
   .strict()

@@ -12,6 +12,7 @@ import {
   type UpdateAttendeeShowcase,
 } from '@conference/contracts';
 import QRCode from 'qrcode.vue';
+import { renderPersonalEventPoster } from '~/utils/personal-event-poster';
 import { useAttendeePosterRefresh } from '~/composables/useAttendeePosterRefresh';
 import { useCustomerSession } from '~/composables/useCustomerSession';
 import { resolveAttendeeNeedsAccountState } from '~/utils/attendee-needs';
@@ -346,232 +347,24 @@ async function removeAvatar() {
   await syncPrivateAvatar();
 }
 
-function roundedRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-) {
-  context.beginPath();
-  context.roundRect(x, y, width, height, radius);
-  context.closePath();
-}
-
-function drawPosterGrid(context: CanvasRenderingContext2D) {
-  context.save();
-  context.strokeStyle = 'rgba(138, 162, 210, 0.09)';
-  context.lineWidth = 1;
-  for (let x = 72; x <= 1008; x += 156) {
-    context.beginPath();
-    context.moveTo(x, 64);
-    context.lineTo(x, 1376);
-    context.stroke();
-  }
-  for (let y = 96; y <= 1368; y += 112) {
-    context.beginPath();
-    context.moveTo(64, y);
-    context.lineTo(1016, y);
-    context.stroke();
-  }
-  context.restore();
-}
-
-function drawPill(
-  context: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  options: { background: string; color: string; font?: string },
-) {
-  context.font = options.font ?? '700 20px "Arial Narrow", "PingFang SC", sans-serif';
-  const width = Math.ceil(context.measureText(text).width) + 44;
-  context.fillStyle = options.background;
-  roundedRect(context, x, y, width, 48, 24);
-  context.fill();
-  context.fillStyle = options.color;
-  context.fillText(text, x + 22, y + 31);
-  return width;
-}
-
-function wrapText(
-  context: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  lineHeight: number,
-  maxLines: number,
-) {
-  const characters = Array.from(text);
-  let line = '';
-  let truncated = false;
-  const lines: string[] = [];
-  for (const character of characters) {
-    const candidate = `${line}${character}`;
-    if (context.measureText(candidate).width > maxWidth && line) {
-      lines.push(line);
-      line = character;
-      if (lines.length === maxLines) {
-        truncated = true;
-        break;
-      }
-    } else {
-      line = candidate;
-    }
-  }
-  if (lines.length < maxLines && line) lines.push(line);
-  lines.slice(0, maxLines).forEach((value, index) => {
-    const finalValue = truncated && index === maxLines - 1 ? `${value.slice(0, -1)}…` : value;
-    context.fillText(finalValue, x, y + index * lineHeight);
-  });
-}
-
-async function drawAvatar(context: CanvasRenderingContext2D, x: number, y: number, size: number) {
-  const avatarUrl = posterContent.value.avatarUrl;
-  if (avatarUrl) {
-    try {
-      const image = new Image();
-      image.crossOrigin = 'anonymous';
-      await new Promise<void>((resolve, reject) => {
-        image.onload = () => resolve();
-        image.onerror = () => reject(new Error('avatar load failed'));
-        image.src = avatarUrl;
-      });
-      context.save();
-      roundedRect(context, x, y, size, size, 26);
-      context.clip();
-      context.drawImage(image, x, y, size, size);
-      context.restore();
-      context.strokeStyle = 'rgba(245, 247, 250, 0.22)';
-      context.lineWidth = 2;
-      roundedRect(context, x, y, size, size, 26);
-      context.stroke();
-      return;
-    } catch {
-      // The initials treatment keeps poster export available when image CORS is unavailable.
-    }
-  }
-  context.fillStyle = '#142443';
-  roundedRect(context, x, y, size, size, 26);
-  context.fill();
-  context.strokeStyle = 'rgba(76, 121, 255, 0.62)';
-  context.lineWidth = 2;
-  roundedRect(context, x, y, size, size, 26);
-  context.stroke();
-  context.fillStyle = '#f3f5f8';
-  context.font = '800 82px "Arial Narrow", "PingFang SC", sans-serif';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.fillText(
-    attendeeAvatarInitial(posterContent.value.displayName),
-    x + size / 2,
-    y + size / 2,
-  );
-  context.textAlign = 'left';
-  context.textBaseline = 'alphabetic';
-}
-
 async function renderPoster() {
   const canvas = posterCanvas.value;
   const qrCanvas = qrHolder.value?.querySelector('canvas');
   if (!canvas || !qrCanvas || !profile.value) return;
-  const context = canvas.getContext('2d');
-  if (!context) return;
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#07111f';
-  context.fillRect(0, 0, 1080, 1440);
-  drawPosterGrid(context);
-
-  context.fillStyle = '#c9ff5a';
-  context.fillRect(72, 72, 14, 14);
-  context.fillStyle = '#9eabc0';
-  context.font = '700 20px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText('CONFIRMED ATTENDEE', 104, 86);
-  context.textAlign = 'right';
-  context.fillText(
-    `NO.${String(profile.value.sequence ?? 1).padStart(3, '0')}  /  ${posterLocation.value}`,
-    1008,
-    86,
-  );
-  context.textAlign = 'left';
-
-  context.fillStyle = '#f3f5f8';
-  context.font = '800 54px "Arial Narrow", "PingFang SC", sans-serif';
-  wrapText(context, profile.value.eventName, 72, 174, 760, 64, 2);
-  context.fillStyle = '#8fa1bf';
-  context.font = '600 22px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText(`${posterEventMark.value}  /  ${posterEventLine.value}`, 72, 258);
-
-  context.fillStyle = '#c9ff5a';
-  context.font = '800 20px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText('I AM ATTENDING  /  已确认参会', 72, 430);
-  const displayName = posterContent.value.displayName || '大会报名会员';
-  const displayNameLength = Array.from(displayName).length;
-  const displayNameSize =
-    displayNameLength <= 4 ? 92 : displayNameLength <= 6 ? 76 : displayNameLength <= 9 ? 62 : 54;
-  context.fillStyle = '#f3f5f8';
-  context.font = `900 ${displayNameSize}px "Arial Narrow", "PingFang SC", sans-serif`;
-  wrapText(context, displayName, 72, 548, 610, displayNameSize + 14, 2);
-  context.fillStyle = '#b8c2d3';
-  context.font = '600 29px "Arial Narrow", "PingFang SC", sans-serif';
-  const identity =
-    [posterContent.value.company, posterContent.value.title].filter(Boolean).join('  /  ') ||
-    '期待在大会现场与你见面';
-  wrapText(context, identity, 72, 750, 610, 44, 2);
-  await drawAvatar(context, 736, 412, 272);
-
-  const industry = ATTENDEE_INDUSTRY_OPTIONS.find(
-    (item) => item.code === posterContent.value.industryCode,
-  )?.label;
-  if (industry) {
-    drawPill(context, industry, 72, 824, {
-      background: '#173266',
-      color: '#dbe5ff',
-    });
-  }
-
-  context.strokeStyle = 'rgba(158, 171, 192, 0.3)';
-  context.lineWidth = 1;
-  context.beginPath();
-  context.moveTo(72, 922);
-  context.lineTo(1008, 922);
-  context.stroke();
-  context.fillStyle = '#4c79ff';
-  context.font = '800 18px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText('LOOKING TO CONNECT  /  我在做的事', 72, 980);
-  context.fillStyle = '#eef2f8';
-  context.font = '650 33px "Arial Narrow", "PingFang SC", sans-serif';
-  wrapText(
-    context,
-    posterContent.value.businessIntro || '正在寻找行业伙伴、业务交流与新的合作机会。',
-    72,
-    1040,
-    650,
-    50,
-    3,
-  );
-
-  context.fillStyle = '#f3f5f8';
-  roundedRect(context, 780, 1088, 228, 228, 18);
-  context.fill();
-  context.drawImage(qrCanvas, 798, 1106, 192, 192);
-  context.fillStyle = '#c9ff5a';
-  context.font = '800 19px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText('SCAN TO CONNECT', 72, 1236);
-  context.fillStyle = '#f3f5f8';
-  context.font = '700 28px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText('现场见，一起聊聊', 72, 1282);
-  context.fillStyle = '#8fa1bf';
-  context.font = '500 19px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText('扫码查看大会信息与我的参会名片', 72, 1321);
-
-  context.fillStyle = '#4c79ff';
-  context.fillRect(72, 1362, 72, 6);
-  context.fillStyle = '#7e8da6';
-  context.font = '600 17px "Arial Narrow", "PingFang SC", sans-serif';
-  context.fillText(`${posterEventMark.value}  ·  MEMBER PASS`, 168, 1370);
+  await renderPersonalEventPoster(canvas, qrCanvas, {
+    variant: 'attendee',
+    eventName: profile.value.eventName,
+    eventMark: posterEventMark.value,
+    eventLine: posterEventLine.value,
+    location: posterLocation.value,
+    sequence: profile.value.sequence,
+    content: {
+      ...posterContent.value,
+      industryLabel:
+        ATTENDEE_INDUSTRY_OPTIONS.find((item) => item.code === posterContent.value.industryCode)
+          ?.label ?? null,
+    },
+  });
 }
 
 async function downloadPoster() {

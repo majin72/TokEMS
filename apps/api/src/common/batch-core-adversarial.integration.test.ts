@@ -9,11 +9,15 @@ import {
   customerProfiles,
   customerSessions,
   customerUsers,
+  eventPartnerProgramVersions,
+  eventPartners,
   eventReleases,
   events,
   inventoryReservations,
   idempotencyKeys,
   orders,
+  partnerAttributionRevisions,
+  partnerReferralLinks,
   payments,
   organizations,
   registrations,
@@ -43,6 +47,7 @@ import { sha256 } from '@conference/security';
 import type { FastifyRequest } from 'fastify';
 import type { AuthenticatedUser } from './auth.guard.js';
 import type { CustomerRegistrationActor } from './conference.repository.js';
+import type { PartnerReferralContext } from './partner-distribution.service.js';
 
 const persistent = process.env.BATCH_TEST_DATABASE_URL ? describe : describe.skip;
 persistent('batch adversarial recovery invariants', () => {
@@ -69,7 +74,7 @@ persistent('batch adversarial recovery invariants', () => {
           new URL('../../../../packages/database/drizzle', import.meta.url),
         ),
       });
-      for (const migration of migrations.slice(0, 66)) {
+      for (const migration of migrations) {
         const client = await connection.connect();
         try {
           await client.query('begin');
@@ -436,49 +441,131 @@ persistent('batch adversarial recovery invariants', () => {
     expect(response.json().items[1].registration.attendee.company).toBe('公司');
   });
 
-  it('rechecks purchaser ownership after a concurrent account deletion before generating an invitation', async () => {
-    const scope = await fixture(0);
-    const actor = await customer(scope.organizationId);
-    const checkout = await batch.create(await input(scope, actor, 2), randomUUID(), actor);
-    const { session } = await login(actor);
-    const selected = checkout.items[1]!;
-    let authorizeReached!: () => void;
-    let resume!: () => void;
-    const reached = new Promise<void>((resolve) => {
-      authorizeReached = resolve;
-    });
-    const waiting = new Promise<void>((resolve) => {
-      resume = resolve;
-    });
-    const original = items.requireOrder.bind(items);
-    const authorization = vi
-      .spyOn(items, 'requireOrder')
-      .mockImplementationOnce(async (...args) => {
-        const result = await original(...args);
-        authorizeReached();
-        await waiting;
-        return result;
-      });
-    const creating = new BatchClaimInvitationService(items).generate(
-      checkout.order.id,
-      selected.id,
-      { expectedVersion: selected.version, notify: false },
-      randomUUID(),
-      actor,
-    );
-    await reached;
-    try {
-      await new CustomerAccountService(database).adminDelete(
-        scope.organizationId,
+  it.each(['no_source', 'attributed'] as const)(
+    'rechecks purchaser ownership after a concurrent account deletion before generating an invitation (%s)',
+    async (decision) => {
+      const scope = await fixture(0);
+      const actor = await customer(scope.organizationId);
+      let referral: PartnerReferralContext | null = null;
+      if (decision === 'attributed') {
+        const promoter = await customer(scope.organizationId);
+        const [program] = await database
+          .db!.insert(eventPartnerProgramVersions)
+          .values({
+            organizationId: scope.organizationId,
+            eventId: scope.eventId,
+            version: 1,
+            status: 'active',
+            termsTitle: '删除账号归因保留测试',
+            termsContent: '已完成订单保留原始分销规则。',
+            promotionPolicy: '测试推广规范。',
+            contentHash: 'a'.repeat(64),
+          })
+          .returning();
+        const [partner] = await database
+          .db!.insert(eventPartners)
+          .values({
+            organizationId: scope.organizationId,
+            eventId: scope.eventId,
+            customerUserId: promoter.customerUserId,
+            publicSlug: randomUUID().slice(0, 12),
+            qualificationStatus: 'active',
+            attributionEnabled: true,
+            currentProgramVersionId: program!.id,
+            acceptedProgramVersionId: program!.id,
+            personalRateBps: 1500,
+          })
+          .returning();
+        const [link] = await database
+          .db!.insert(partnerReferralLinks)
+          .values({
+            organizationId: scope.organizationId,
+            eventId: scope.eventId,
+            partnerId: partner!.id,
+            code: randomUUID(),
+            destinationPath: '/register',
+          })
+          .returning();
+        referral = {
+          organizationId: scope.organizationId,
+          eventId: scope.eventId,
+          partnerId: partner!.id,
+          referralLinkId: link!.id,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+        };
+      }
+      const checkout = await batch.create(
+        await input(scope, actor, 2),
         randomUUID(),
-        session.customer.id,
+        actor,
+        referral,
       );
-    } finally {
-      resume();
-    }
-    await expect(creating).rejects.toThrow();
-    authorization.mockRestore();
-  });
+      const before = await database
+        .db!.select()
+        .from(partnerAttributionRevisions)
+        .where(eq(partnerAttributionRevisions.orderId, checkout.order.id));
+      expect(before).toHaveLength(1);
+      expect(before[0]).toMatchObject({
+        purchaserCustomerUserId: actor.customerUserId,
+        decision,
+        ...(referral ? { partnerId: referral.partnerId, personalRateBps: 1500 } : {}),
+      });
+      const { session } = await login(actor);
+      const selected = checkout.items[1]!;
+      let authorizeReached!: () => void;
+      let resume!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        authorizeReached = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const original = items.requireOrder.bind(items);
+      const authorization = vi
+        .spyOn(items, 'requireOrder')
+        .mockImplementationOnce(async (...args) => {
+          const result = await original(...args);
+          authorizeReached();
+          await waiting;
+          return result;
+        });
+      const creating = new BatchClaimInvitationService(items).generate(
+        checkout.order.id,
+        selected.id,
+        { expectedVersion: selected.version, notify: false },
+        randomUUID(),
+        actor,
+      );
+      await reached;
+      try {
+        await new CustomerAccountService(database).adminDelete(
+          scope.organizationId,
+          randomUUID(),
+          session.customer.id,
+        );
+      } finally {
+        resume();
+      }
+      await expect(creating).rejects.toThrow();
+      authorization.mockRestore();
+      const after = await database
+        .db!.select()
+        .from(partnerAttributionRevisions)
+        .where(eq(partnerAttributionRevisions.orderId, checkout.order.id));
+      expect(after).toHaveLength(1);
+      expect(after[0]).toEqual({
+        ...before[0],
+        purchaserCustomerUserId: null,
+        updatedAt: expect.any(Date),
+      });
+      const preservedPayments = await database
+        .db!.select()
+        .from(payments)
+        .where(eq(payments.orderId, checkout.order.id));
+      expect(preservedPayments).toHaveLength(1);
+      expect(preservedPayments[0]?.partnerAttributionRevisionId).toBe(before[0]!.id);
+    },
+  );
 
   it('erases expired invitation replay ciphertext while retaining the completed operation', async () => {
     const scope = await fixture(0);
