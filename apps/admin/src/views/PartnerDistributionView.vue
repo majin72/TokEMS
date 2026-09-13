@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import type { PartnerRelationshipView } from '@conference/contracts';
+import AdminConfirmDialog from '../components/AdminConfirmDialog.vue';
 import { conferenceApi, session } from '../lib/api';
 
 type Tab = 'overview' | 'partners' | 'commissions' | 'payouts' | 'settings';
@@ -11,6 +12,7 @@ const loading = ref(true);
 const pending = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
+const enableDialogOpen = ref(false);
 const overview = ref<Record<string, unknown>>({});
 const partners = ref<PartnerRelationshipView[]>([]);
 const commissions = ref<MoneyRow[]>([]);
@@ -143,6 +145,43 @@ function parseTiers() {
       const [count, rate] = line.split(':').map(Number);
       return { minimumOrderCount: count ?? 0, rateBps: Math.round((rate ?? 0) * 100) };
     });
+}
+
+function programPayload() {
+  return {
+    mode: programForm.mode,
+    fixedRateBps: numberValue(programForm.ratePercent, 100),
+    tiers: programForm.mode === 'order_count_tiered' ? parseTiers() : [],
+    eligibleTicketTypeIds: [],
+    attributionDays: numberValue(programForm.attributionDays),
+    settlementDelayDays: numberValue(programForm.settlementDelayDays),
+    minimumPayoutAmount: numberValue(programForm.minimumPayoutYuan, 100),
+    payoutCadence: 'weekly' as const,
+    termsTitle: programForm.termsTitle,
+    termsContent: programForm.termsContent,
+    promotionPolicy: programForm.promotionPolicy,
+    publicDirectoryEnabled: programForm.publicDirectoryEnabled,
+    homepageLimit: numberValue(programForm.homepageLimit),
+  };
+}
+
+function defaultProgramPayload() {
+  return {
+    mode: 'fixed' as const,
+    fixedRateBps: 1000,
+    tiers: [],
+    eligibleTicketTypeIds: [],
+    attributionDays: 30,
+    settlementDelayDays: 7,
+    minimumPayoutAmount: 1000,
+    payoutCadence: 'weekly' as const,
+    termsTitle: '大会合作伙伴推广规则',
+    termsContent:
+      '合作伙伴应使用本人专属链接开展真实推广。佣金按成功付款且符合资格的订单明细计算，退款与自购会按规则冲正。',
+    promotionPolicy: '推广内容应真实、清晰，不得承诺大会未公开的权益。',
+    publicDirectoryEnabled: false,
+    homepageLimit: 12,
+  };
 }
 
 function hydrateProgram() {
@@ -283,24 +322,28 @@ function updatePartner(item: PartnerRelationshipView, status: 'active' | 'paused
 
 function publishProgram() {
   return run(
-    () =>
-      conferenceApi.publishPartnerProgram({
-        mode: programForm.mode,
-        fixedRateBps: numberValue(programForm.ratePercent, 100),
-        tiers: programForm.mode === 'order_count_tiered' ? parseTiers() : [],
-        eligibleTicketTypeIds: [],
-        attributionDays: numberValue(programForm.attributionDays),
-        settlementDelayDays: numberValue(programForm.settlementDelayDays),
-        minimumPayoutAmount: numberValue(programForm.minimumPayoutYuan, 100),
-        payoutCadence: 'weekly',
-        termsTitle: programForm.termsTitle,
-        termsContent: programForm.termsContent,
-        promotionPolicy: programForm.promotionPolicy,
-        publicDirectoryEnabled: programForm.publicDirectoryEnabled,
-        homepageLimit: numberValue(programForm.homepageLimit),
-      }),
+    () => conferenceApi.publishPartnerProgram(programPayload()),
     '新版分销规则已发布，现有合作伙伴需重新确认。',
   );
+}
+
+function requestEnableDistribution() {
+  errorMessage.value = '';
+  successMessage.value = '';
+  enableDialogOpen.value = true;
+}
+
+async function enableDistribution() {
+  let published = false;
+  await run(async () => {
+    await conferenceApi.publishPartnerProgram(defaultProgramPayload());
+    published = true;
+  }, '分销功能已开启。合作伙伴确认规则后即可开始推广归因。');
+  if (published) enableDialogOpen.value = false;
+}
+
+function openDistributionSettings() {
+  activeTab.value = 'settings';
 }
 
 function reviewPayout(item: MoneyRow, decision: 'approve' | 'reject') {
@@ -573,13 +616,38 @@ onMounted(() => void load());
       </article>
     </section>
     <section class="partner-panel">
-      <div class="panel-heading">
+      <div class="panel-heading program-heading">
         <div>
           <p class="eyebrow">CONTROL BOARD</p>
           <h2>当前运行规则</h2>
         </div>
-        <span class="state-dot">{{ program ? '已配置' : '功能关闭' }}</span>
+        <div class="program-state-actions">
+          <span class="state-dot" :class="{ active: program }">
+            {{ program ? '已开启' : '功能关闭' }}
+          </span>
+          <button
+            v-if="!program && canManageRules"
+            class="button compact"
+            type="button"
+            :disabled="pending"
+            @click="requestEnableDistribution"
+          >
+            一键开启
+          </button>
+          <button
+            v-if="canManageRules"
+            class="button secondary compact"
+            type="button"
+            @click="openDistributionSettings"
+          >
+            分销设置
+          </button>
+        </div>
       </div>
+      <p v-if="!program" class="program-closed-note">
+        一键开启将采用固定佣金 10%、30 天归因有效期和 7
+        天结算等待期。公开目录保持关闭，可在分销设置中单独开启。
+      </p>
       <dl class="rule-grid">
         <div>
           <dt>佣金方式</dt>
@@ -1226,6 +1294,24 @@ onMounted(() => void load());
       </form>
     </section>
   </template>
+
+  <AdminConfirmDialog
+    :open="enableDialogOpen"
+    title="确认开启合作伙伴分销？"
+    description="确认后将立即发布默认分销规则。新的推广点击可建立归因，合作伙伴需先确认规则。"
+    confirm-label="确认开启"
+    :busy="pending"
+    :error="errorMessage"
+    :event-name="session.activeEvent.value?.name"
+    :details="[
+      { label: '佣金方式', value: '固定比例 10%' },
+      { label: '归因有效期', value: '30 天' },
+      { label: '结算等待', value: '支付满 7 天与退款窗口结束后 24 小时取较晚值' },
+      { label: '公开目录', value: '保持关闭，可在分销设置中开启' },
+    ]"
+    @confirm="enableDistribution"
+    @cancel="enableDialogOpen = false"
+  />
 </template>
 
 <style scoped>
@@ -1305,6 +1391,33 @@ onMounted(() => void load());
 .state-dot {
   color: #64748b;
   font-size: 13px;
+}
+.program-state-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.state-dot {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  font-weight: 650;
+}
+.state-dot.active {
+  color: #166534;
+  background: #ecfdf3;
+}
+.program-closed-note {
+  margin: -3px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #dbe5f0;
+  border-radius: 10px;
+  color: #526176;
+  background: #f7f9fc;
+  font-size: 13px;
+  line-height: 1.7;
 }
 .rule-grid {
   display: grid;
@@ -1448,6 +1561,13 @@ onMounted(() => void load());
   }
   .panel-heading {
     display: block;
+  }
+  .panel-heading.program-heading {
+    display: flex;
+    flex-direction: column;
+  }
+  .program-state-actions {
+    justify-content: flex-start;
   }
   .partner-tabs {
     margin-inline: -4px;
