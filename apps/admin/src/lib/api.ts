@@ -1952,7 +1952,7 @@ export const conferenceApi = {
     );
   },
   sendInvoice(invoiceId: string, eventId?: EventId, input:{forceAfterUncertain?:boolean;reason?:string}={}) {
-    return request<{ queued: boolean;alreadyQueued:boolean;maskedRecipient:string }>(
+    return request<{ queued: boolean; alreadyQueued: boolean; maskedRecipient: string }>(
       `/admin/events/${eventScope(eventId)}/invoices/${invoiceId}/send`,
       {
         method: 'POST',
@@ -2141,15 +2141,12 @@ export const conferenceApi = {
     );
   },
   getEventPartners(eventId?: EventId) {
-    return request<{ items: import('@conference/contracts').PartnerRelationshipView[] }>(
+    return request<{ items: import('@conference/contracts').AdminPartnerRelationshipView[] }>(
       `/admin/events/${eventScope(eventId)}/distribution/partners`,
     );
   },
-  enableEventPartner(
-    input: import('@conference/contracts').AdminEnablePartner,
-    eventId?: EventId,
-  ) {
-    return request<import('@conference/contracts').PartnerRelationshipView>(
+  enableEventPartner(input: import('@conference/contracts').AdminEnablePartner, eventId?: EventId) {
+    return request<import('@conference/contracts').AdminEnablePartnerResult>(
       `/admin/events/${eventScope(eventId)}/distribution/partners`,
       { method: 'POST', body: JSON.stringify(input) },
     );
@@ -2175,6 +2172,16 @@ export const conferenceApi = {
   ) {
     return request<import('@conference/contracts').PartnerRelationshipView>(
       `/admin/events/${eventScope(eventId)}/distribution/partners/${encodeURIComponent(partnerId)}`,
+      { method: 'PATCH', body: JSON.stringify(input) },
+    );
+  },
+  updateEventPartnerDetails(
+    partnerId: string,
+    input: import('@conference/contracts').AdminEditPartnerDetails,
+    eventId?: EventId,
+  ) {
+    return request<import('@conference/contracts').PartnerRelationshipView>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners/${encodeURIComponent(partnerId)}/details`,
       { method: 'PATCH', body: JSON.stringify(input) },
     );
   },

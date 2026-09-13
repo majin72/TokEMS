@@ -55,7 +55,7 @@ persistent('batch checkout with real PostgreSQL transactions', () => {
           new URL('../../../../packages/database/drizzle', import.meta.url),
         ),
       });
-      for (const migration of migrations.slice(0, 66)) {
+      for (const migration of migrations) {
         const client = await connection.connect();
         try {
           await client.query('begin');

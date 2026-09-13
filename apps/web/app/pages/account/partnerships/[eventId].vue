@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import type { PartnerRelationshipView, PartnerVisibleFields } from '@conference/contracts';
+import type {
+  PartnerRelationshipView,
+  PartnerVisibleFields,
+  PublicEvent,
+} from '@conference/contracts';
 import QRCode from 'qrcode.vue';
-import { watch } from 'vue';
+import { renderPersonalEventPoster } from '~/utils/personal-event-poster';
+import { partnerPosterFilename, resolvePartnerPosterContent } from '~/utils/partner-poster';
+import { nextTick, watch } from 'vue';
 import { useCustomerSession } from '~/composables/useCustomerSession';
 import { copyPlainText } from '~/utils/copy-text';
 
@@ -10,6 +16,14 @@ type FinanceRow = Record<string, unknown> & { id?: string; status?: string; vers
 
 const route = useRoute();
 const customer = useCustomerSession();
+const conferenceApi = useConferenceApi();
+const posterEvent = ref<PublicEvent | null>(null);
+const posterCanvas = ref<HTMLCanvasElement | null>(null);
+const posterQrHolder = ref<HTMLElement | null>(null);
+const posterReady = ref(false);
+const posterRendering = ref(false);
+const posterError = ref('');
+let posterRenderVersion = 0;
 const eventId = computed(() => Number(route.params.eventId));
 const partner = ref<PartnerRelationshipView | null>(null);
 const commissions = ref<FinanceRow[]>([]);
@@ -17,6 +31,10 @@ const payouts = ref<FinanceRow[]>([]);
 const recipients = ref<FinanceRow[]>([]);
 const payoutDocuments = ref<FinanceRow[]>([]);
 const activeTab = ref<Tab>('profile');
+const mobileNavOpen = ref(false);
+const mobileNav = ref<HTMLElement | null>(null);
+const mobileNavTrigger = ref<HTMLButtonElement | null>(null);
+const moduleSection = ref<HTMLElement | null>(null);
 const loading = ref(true);
 const pending = ref(false);
 const errorMessage = ref('');
@@ -24,46 +42,145 @@ const successMessage = ref('');
 const pendingAvatarAssetId = ref<string | undefined>();
 const avatarPreview = ref('');
 const profileForm = reactive({
-  displayName: '', company: '', title: '', industry: '', businessIntro: '', businessUrl: '',
-  contactPhone: '', contactEmail: '', wechatId: '',
+  displayName: '',
+  company: '',
+  title: '',
+  industry: '',
+  businessIntro: '',
+  businessUrl: '',
+  contactPhone: '',
+  contactEmail: '',
+  wechatId: '',
 });
 const visibility = reactive<PartnerVisibleFields>({
-  avatar: true, displayName: true, company: true, title: true, industry: true,
-  businessIntro: true, businessUrl: false, contactPhone: false, contactEmail: false,
-  wechatId: false, gallery: false,
+  avatar: true,
+  displayName: true,
+  company: true,
+  title: true,
+  industry: true,
+  businessIntro: true,
+  businessUrl: false,
+  contactPhone: false,
+  contactEmail: false,
+  wechatId: false,
+  gallery: false,
 });
 const posterVisibility = reactive<PartnerVisibleFields>({
-  avatar: true, displayName: true, company: true, title: true, industry: false,
-  businessIntro: false, businessUrl: false, contactPhone: false, contactEmail: false,
-  wechatId: false, gallery: false,
+  avatar: true,
+  displayName: true,
+  company: true,
+  title: true,
+  industry: false,
+  businessIntro: false,
+  businessUrl: false,
+  contactPhone: false,
+  contactEmail: false,
+  wechatId: false,
+  gallery: false,
 });
-const privacyForm = reactive({ publicStatus: 'draft' as 'draft' | 'published' | 'hidden', searchIndexingEnabled: true });
+const privacyForm = reactive({
+  publicStatus: 'draft' as 'draft' | 'published' | 'hidden',
+  searchIndexingEnabled: true,
+});
 const gallery = ref<Array<{ assetId: string; url: string; alt: string }>>([]);
-const recipientForm = reactive({ type: 'individual', channel: 'wechat_transfer', displayName: '', accountReference: '' });
+const recipientForm = reactive({
+  type: 'individual',
+  channel: 'wechat_transfer',
+  displayName: '',
+  accountReference: '',
+});
 const payoutForm = reactive({ recipientId: '', amountYuan: '10' });
 const inquiryForm = reactive({ type: 'missing_order', orderReference: '', description: '' });
 
-const tabs: Array<{ id: Tab; label: string }> = [
-  { id: 'profile', label: '资料与公开设置' },
-  { id: 'promotion', label: '推广素材' },
-  { id: 'earnings', label: '收益明细' },
-  { id: 'payouts', label: '提现与结算' },
-  { id: 'inquiries', label: '佣金申诉' },
+const tabs: Array<{ id: Tab; label: string; caption: string; description: string }> = [
+  {
+    id: 'profile',
+    label: '资料与公开设置',
+    caption: 'PROFILE & PRIVACY',
+    description: '完善大会名片，选择你愿意公开的信息。',
+  },
+  {
+    id: 'promotion',
+    label: '推广素材',
+    caption: 'PROMOTION',
+    description: '分享专属链接与海报，邀请朋友通过你报名。',
+  },
+  {
+    id: 'earnings',
+    label: '收益明细',
+    caption: 'EARNINGS',
+    description: '查看每笔订单的佣金和结算进度。',
+  },
+  {
+    id: 'payouts',
+    label: '提现与结算',
+    caption: 'PAYOUTS',
+    description: '管理收款信息、申请提现并查看结算记录。',
+  },
+  {
+    id: 'inquiries',
+    label: '佣金申诉',
+    caption: 'INQUIRIES',
+    description: '提供订单信息，申请核对佣金。',
+  },
 ];
+const currentTab = computed(() => tabs.find((tab) => tab.id === activeTab.value)!);
+const currentTabNumber = computed(() =>
+  String(tabs.findIndex((tab) => tab.id === activeTab.value) + 1).padStart(2, '0'),
+);
+const partnerInitial = computed(() => partner.value?.profile.displayName.slice(0, 1) || 'P');
+function closeMobileNav(event: PointerEvent) {
+  if (event.target instanceof Node && !mobileNav.value?.contains(event.target))
+    mobileNavOpen.value = false;
+}
+function escapeMobileNav() {
+  if (!mobileNavOpen.value) return;
+  mobileNavOpen.value = false;
+  mobileNavTrigger.value?.focus();
+}
+watch(activeTab, async () => {
+  mobileNavOpen.value = false;
+  await nextTick();
+  if (moduleSection.value && moduleSection.value.getBoundingClientRect().top < 80) {
+    moduleSection.value.scrollIntoView({ block: 'start' });
+  }
+});
 const statusText: Record<string, string> = {
-  pending_confirmation: '待确认合作规则', active: '合作中', paused: '已暂停', closed: '已关闭',
-  provisional: '预计', pending: '结算等待中', available: '可提现', reserved: '提现处理中',
-  paid: '已结算', recovery_due: '待追偿', submitted: '待审核', approved: '审核通过',
+  pending_confirmation: '待确认合作规则',
+  active: '合作中',
+  paused: '已暂停',
+  closed: '已关闭',
+  provisional: '预计',
+  pending: '结算等待中',
+  available: '可提现',
+  reserved: '提现处理中',
+  paid: '已结算',
+  recovery_due: '待追偿',
+  submitted: '待审核',
+  approved: '审核通过',
   under_review: '待确认结算金额',
-  batched: '已组批', executing: '出款中', succeeded: '已到账', rejected: '已驳回',
-  failed: '失败', unknown: '渠道待确认', verified: '已验证', hidden: '已隐藏', published: '已公开', draft: '草稿',
+  batched: '已组批',
+  executing: '出款中',
+  succeeded: '已到账',
+  rejected: '已驳回',
+  failed: '失败',
+  unknown: '渠道待确认',
+  verified: '已验证',
+  hidden: '已隐藏',
+  published: '已公开',
+  draft: '草稿',
 };
 const visibleChoices: Array<{ key: keyof PartnerVisibleFields; label: string }> = [
-  { key: 'avatar', label: '头像' }, { key: 'displayName', label: '姓名' },
-  { key: 'company', label: '公司' }, { key: 'title', label: '职位' },
-  { key: 'industry', label: '行业' }, { key: 'businessIntro', label: '介绍' },
-  { key: 'businessUrl', label: '项目网址' }, { key: 'contactPhone', label: '联系电话' },
-  { key: 'contactEmail', label: '联系邮箱' }, { key: 'wechatId', label: '微信号' },
+  { key: 'avatar', label: '头像' },
+  { key: 'displayName', label: '姓名' },
+  { key: 'company', label: '公司' },
+  { key: 'title', label: '职位' },
+  { key: 'industry', label: '行业' },
+  { key: 'businessIntro', label: '介绍' },
+  { key: 'businessUrl', label: '项目网址' },
+  { key: 'contactPhone', label: '联系电话' },
+  { key: 'contactEmail', label: '联系邮箱' },
+  { key: 'wechatId', label: '微信号' },
   { key: 'gallery', label: '图片资料' },
 ];
 const referralUrl = computed(() => {
@@ -71,15 +188,40 @@ const referralUrl = computed(() => {
   return import.meta.client && path ? new URL(path, window.location.origin).toString() : path;
 });
 const confirmed = computed(() =>
-  Boolean(partner.value?.currentProgram?.id && partner.value.acceptedProgramVersionId === partner.value.currentProgram.id),
+  Boolean(
+    partner.value?.currentProgram?.id &&
+    partner.value.acceptedProgramVersionId === partner.value.currentProgram.id,
+  ),
 );
-const verifiedRecipients = computed(() => recipients.value.filter((item) => item.status === 'verified'));
-const posterIdentity = computed(() =>
-  [
-    posterVisibility.company ? profileForm.company : '',
-    posterVisibility.title ? profileForm.title : '',
-  ].filter(Boolean).join(' · '),
+const verifiedRecipients = computed(() =>
+  recipients.value.filter((item) => item.status === 'verified'),
 );
+const posterContent = computed(() =>
+  partner.value ? resolvePartnerPosterContent(partner.value.profile) : null,
+);
+const posterEventLine = computed(() => {
+  const value = posterEvent.value;
+  if (!value?.startsAt) return value?.city || '大会现场';
+  const date = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: value.timezone,
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(new Date(value.startsAt));
+  return [date, value.city].filter(Boolean).join(' · ');
+});
+async function loadPosterEvent() {
+  const slug = partner.value?.eventSlug;
+  posterEvent.value = null;
+  if (!slug) return;
+  try {
+    const value = await conferenceApi.getEvent(slug);
+    if (value.slug === slug) posterEvent.value = value;
+  } catch {
+    // The partner's event name still identifies the poster when public details are unavailable.
+  }
+}
+
 watch(
   () => recipientForm.type,
   (type) => {
@@ -88,7 +230,9 @@ watch(
 );
 
 function money(value: unknown) {
-  return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(Number(value ?? 0) / 100);
+  return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(
+    Number(value ?? 0) / 100,
+  );
 }
 function dateTime(value: unknown) {
   return typeof value === 'string' && value ? new Date(value).toLocaleString('zh-CN') : '暂无';
@@ -106,16 +250,19 @@ function hydrate(value: PartnerRelationshipView) {
 }
 async function refreshFinance() {
   const [commissionResult, payoutResult] = await Promise.all([
-    customer.partnerCommissions(eventId.value), customer.partnerPayouts(eventId.value),
+    customer.partnerCommissions(eventId.value),
+    customer.partnerPayouts(eventId.value),
   ]);
   commissions.value = commissionResult.items;
   payouts.value = payoutResult.requests;
   recipients.value = payoutResult.recipients;
   payoutDocuments.value = payoutResult.documents;
-  if (!payoutForm.recipientId && verifiedRecipients.value[0]?.id) payoutForm.recipientId = String(verifiedRecipients.value[0].id);
+  if (!payoutForm.recipientId && verifiedRecipients.value[0]?.id)
+    payoutForm.recipientId = String(verifiedRecipients.value[0].id);
 }
 async function load() {
-  loading.value = true; errorMessage.value = '';
+  loading.value = true;
+  errorMessage.value = '';
   try {
     await customer.refresh();
     if (!customer.session.value) return customer.openLogin();
@@ -129,44 +276,77 @@ async function load() {
         successMessage.value = '微信收款人已完成身份授权和绑定';
       }
     }
-    await refreshFinance();
+    await Promise.all([refreshFinance(), loadPosterEvent()]);
   } catch (error) {
-    errorMessage.value = (error as { data?: { message?: string } }).data?.message ?? '合作伙伴中心暂时无法加载';
-  } finally { loading.value = false; }
+    errorMessage.value =
+      (error as { data?: { message?: string } }).data?.message ?? '合作伙伴中心暂时无法加载';
+  } finally {
+    loading.value = false;
+  }
 }
 async function run(action: () => Promise<void>, message: string) {
-  pending.value = true; errorMessage.value = ''; successMessage.value = '';
-  try { await action(); successMessage.value = message; }
-  catch (error) { errorMessage.value = (error as { data?: { message?: string }; message?: string }).data?.message ?? (error as Error).message ?? '操作失败，请稍后重试'; }
-  finally { pending.value = false; }
+  if (pending.value) return;
+  pending.value = true;
+  errorMessage.value = '';
+  successMessage.value = '';
+  try {
+    await action();
+    successMessage.value = message;
+  } catch (error) {
+    errorMessage.value =
+      (error as { data?: { message?: string }; message?: string }).data?.message ??
+      (error as Error).message ??
+      '操作失败，请稍后重试';
+  } finally {
+    pending.value = false;
+  }
 }
 function acceptRules() {
   const current = partner.value?.currentProgram;
   if (!partner.value || !current) return;
-  return run(async () => hydrate(await customer.acceptPartnerProgram(eventId.value, { programVersionId: current.id, expectedPartnerVersion: partner.value!.version })), '合作规则已确认，专属推广链接已经生效');
+  return run(
+    async () =>
+      hydrate(
+        await customer.acceptPartnerProgram(eventId.value, {
+          programVersionId: current.id,
+          expectedPartnerVersion: partner.value!.version,
+        }),
+      ),
+    '合作规则已确认，专属推广链接已经生效',
+  );
 }
 function saveProfile() {
   if (!partner.value) return;
   return run(async () => {
-    hydrate(await customer.updatePartnerProfile(eventId.value, {
-      expectedVersion: partner.value!.version, ...profileForm,
-      ...(pendingAvatarAssetId.value ? { avatarAssetId: pendingAvatarAssetId.value } : {}),
-      gallery: gallery.value.map(({ assetId, alt }) => ({ assetId, alt })),
-    }));
+    hydrate(
+      await customer.updatePartnerProfile(eventId.value, {
+        expectedVersion: partner.value!.version,
+        ...profileForm,
+        ...(pendingAvatarAssetId.value ? { avatarAssetId: pendingAvatarAssetId.value } : {}),
+        gallery: gallery.value.map(({ assetId, alt }) => ({ assetId, alt })),
+      }),
+    );
   }, '合作伙伴资料已保存');
 }
 function savePrivacy() {
   if (!partner.value) return;
-  return run(async () => hydrate(await customer.updatePartnerPrivacy(eventId.value, {
-    expectedVersion: partner.value!.version,
-    publicStatus: privacyForm.publicStatus,
-    visibleFields: { ...visibility },
-    posterFields: { ...posterVisibility },
-    searchIndexingEnabled: privacyForm.searchIndexingEnabled,
-  })), '公开范围已更新');
+  return run(
+    async () =>
+      hydrate(
+        await customer.updatePartnerPrivacy(eventId.value, {
+          expectedVersion: partner.value!.version,
+          publicStatus: privacyForm.publicStatus,
+          visibleFields: { ...visibility },
+          posterFields: { ...posterVisibility },
+          searchIndexingEnabled: privacyForm.searchIndexingEnabled,
+        }),
+      ),
+    '公开范围已更新',
+  );
 }
 async function uploadAvatar(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return;
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
   await run(async () => {
     const uploaded = await customer.uploadPartnerMedia(eventId.value, 'avatar', file);
     pendingAvatarAssetId.value = uploaded.assetId;
@@ -174,30 +354,82 @@ async function uploadAvatar(event: Event) {
   }, '头像已上传，请保存资料');
 }
 async function uploadGallery(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]; if (!file || gallery.value.length >= 4) return;
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file || gallery.value.length >= 4) return;
   await run(async () => {
     const uploaded = await customer.uploadPartnerMedia(eventId.value, 'gallery', file);
-    gallery.value.push({ assetId: uploaded.assetId, url: URL.createObjectURL(file), alt: file.name.replace(/\.[^.]+$/u, '') });
+    gallery.value.push({
+      assetId: uploaded.assetId,
+      url: URL.createObjectURL(file),
+      alt: file.name.replace(/\.[^.]+$/u, ''),
+    });
   }, '图片已加入，请保存资料');
 }
 async function copyLink() {
   if (await copyPlainText(referralUrl.value)) successMessage.value = '推广链接已复制';
 }
-function downloadPoster() {
-  if (!import.meta.client || !partner.value) return;
-  const canvas = document.createElement('canvas'); canvas.width = 1080; canvas.height = 1440;
-  const context = canvas.getContext('2d'); if (!context) return;
-  const gradient = context.createLinearGradient(0, 0, 1080, 1440); gradient.addColorStop(0, '#122f55'); gradient.addColorStop(.7, '#1f5fe8'); gradient.addColorStop(1, '#8bbaff');
-  context.fillStyle = gradient; context.fillRect(0, 0, 1080, 1440); context.fillStyle = '#b9d4ff'; context.font = 'bold 34px sans-serif'; context.fillText('TOKEMS EVENT PARTNER', 90, 110);
-  context.fillStyle = '#fff'; context.font = 'bold 92px sans-serif'; context.fillText(posterVisibility.displayName ? partner.value.profile.displayName : '大会合作伙伴', 90, 410);
-  context.font = '40px sans-serif'; context.fillStyle = '#dceaff'; context.fillText(posterIdentity.value, 90, 475);
-  context.font = 'bold 48px sans-serif'; context.fillStyle = '#fff'; context.fillText(partner.value.eventName, 90, 890);
-  const svg = document.querySelector('.promotion-poster svg');
-  const finish = () => { const link = document.createElement('a'); link.download = `${partner.value!.profile.displayName}-${partner.value!.eventName}-推广海报.png`; link.href = canvas.toDataURL('image/png'); link.click(); };
-  if (!svg) return finish();
-  const image = new Image(); image.onload = () => { context.fillStyle = '#fff'; context.fillRect(90, 1010, 270, 270); context.drawImage(image, 105, 1025, 240, 240); context.fillStyle = '#fff'; context.font = '32px sans-serif'; context.fillText('扫码通过我报名', 400, 1150); finish(); };
-  image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(svg))}`;
+async function renderPoster() {
+  const version = ++posterRenderVersion;
+  const canvas = posterCanvas.value;
+  const qrCanvas = posterQrHolder.value?.querySelector('canvas');
+  const value = partner.value;
+  const content = posterContent.value;
+  if (!canvas || !qrCanvas || !value || !content || !referralUrl.value) return;
+  posterRendering.value = true;
+  posterError.value = '';
+  try {
+    const rendered = await renderPersonalEventPoster(canvas, qrCanvas, {
+      variant: 'partner',
+      eventName: value.eventName,
+      eventMark: posterEvent.value?.shortName?.trim() || value.eventName,
+      eventLine: posterEventLine.value,
+      location: posterEvent.value?.city?.trim() || '大会现场',
+      content,
+    });
+    if (version === posterRenderVersion && canvas === posterCanvas.value)
+      posterReady.value = rendered;
+  } catch (error) {
+    if (version === posterRenderVersion)
+      posterError.value = error instanceof Error ? error.message : '海报生成失败，请重试';
+  } finally {
+    if (version === posterRenderVersion) posterRendering.value = false;
+  }
 }
+function downloadPoster() {
+  const canvas = posterCanvas.value;
+  if (!canvas || !partner.value || !posterReady.value || posterRendering.value) return;
+  return run(async () => {
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (value) => (value ? resolve(value) : reject(new Error('海报生成失败，请重试'))),
+        'image/png',
+      );
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = partnerPosterFilename(
+      posterContent.value?.displayName ?? null,
+      partner.value!.eventName,
+    );
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, '推广海报下载已开始');
+}
+watch(
+  [activeTab, partner, posterEvent, referralUrl],
+  async () => {
+    ++posterRenderVersion;
+    posterReady.value = false;
+    posterRendering.value = false;
+    posterError.value = '';
+    if (activeTab.value !== 'promotion') return;
+    await nextTick();
+    await renderPoster();
+  },
+  { flush: 'post' },
+);
+
 function bindRecipient() {
   if (recipientForm.channel === 'wechat_transfer') {
     return run(async () => {
@@ -208,10 +440,24 @@ function bindRecipient() {
       window.location.assign(result.authorizeUrl);
     }, '正在进入微信身份授权');
   }
-  return run(async () => { await customer.bindPartnerRecipient(eventId.value, { ...recipientForm, idempotencyKey: crypto.randomUUID() }); await refreshFinance(); }, '收款信息已提交，验证完成后可用于提现');
+  return run(async () => {
+    await customer.bindPartnerRecipient(eventId.value, {
+      ...recipientForm,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await refreshFinance();
+  }, '收款信息已提交，验证完成后可用于提现');
 }
 function requestPayout() {
-  return run(async () => { await customer.createPartnerPayout(eventId.value, { amount: Math.round(Number(payoutForm.amountYuan) * 100), recipientId: payoutForm.recipientId, idempotencyKey: crypto.randomUUID() }); await refreshFinance(); if (partner.value) hydrate(await customer.partnership(eventId.value)); }, '提现申请已提交');
+  return run(async () => {
+    await customer.createPartnerPayout(eventId.value, {
+      amount: Math.round(Number(payoutForm.amountYuan) * 100),
+      recipientId: payoutForm.recipientId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await refreshFinance();
+    if (partner.value) hydrate(await customer.partnership(eventId.value));
+  }, '提现申请已提交');
 }
 function confirmSettlement(request: FinanceRow) {
   if (!request.id || !request.version) return;
@@ -221,15 +467,36 @@ function confirmSettlement(request: FinanceRow) {
   }, '结算金额已确认，提现进入待组批状态');
 }
 function submitInquiry() {
-  return run(async () => { await customer.createPartnerInquiry(eventId.value, { ...inquiryForm, evidenceAssetIds: [] }); inquiryForm.orderReference = ''; inquiryForm.description = ''; }, '佣金申诉已提交');
+  return run(async () => {
+    await customer.createPartnerInquiry(eventId.value, { ...inquiryForm, evidenceAssetIds: [] });
+    inquiryForm.orderReference = '';
+    inquiryForm.description = '';
+  }, '佣金申诉已提交');
 }
 async function confirmWechat(request: FinanceRow) {
   if (!request.id) return;
   await run(async () => {
     const payload = await customer.partnerPayoutConfirmation(eventId.value, request.id!);
-    const bridge = (window as unknown as { WeixinJSBridge?: { invoke: (name: string, input: Record<string, string>, callback: (result: { err_msg?: string }) => void) => void } }).WeixinJSBridge;
+    const bridge = (
+      window as unknown as {
+        WeixinJSBridge?: {
+          invoke: (
+            name: string,
+            input: Record<string, string>,
+            callback: (result: { err_msg?: string }) => void,
+          ) => void;
+        };
+      }
+    ).WeixinJSBridge;
     if (!bridge) throw new Error('请在微信中打开本页面完成确认');
-    await new Promise<void>((resolve, reject) => bridge.invoke('requestMerchantTransfer', { mchId: payload.mchId, appId: payload.appId, package: payload.package }, (result) => result.err_msg?.includes(':ok') ? resolve() : reject(new Error('微信确认未完成'))));
+    await new Promise<void>((resolve, reject) =>
+      bridge.invoke(
+        'requestMerchantTransfer',
+        { mchId: payload.mchId, appId: payload.appId, package: payload.package },
+        (result) =>
+          result.err_msg?.includes(':ok') ? resolve() : reject(new Error('微信确认未完成')),
+      ),
+    );
     await customer.markPartnerPayoutConfirmed(eventId.value, request.id!, payload.requestVersion);
     await refreshFinance();
   }, '微信确认已提交，请等待到账结果');
@@ -245,7 +512,18 @@ function downloadPayoutDocument(document: FinanceRow) {
   );
 }
 
-onMounted(load);
+onMounted(() => {
+  void load();
+  document.addEventListener('pointerdown', closeMobileNav);
+});
+onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMobileNav));
+watch(
+  () => customer.session.value?.customer.id,
+  (id, previous) => {
+    if (id && id !== previous && !loading.value) void load();
+    if (!id) partner.value = null;
+  },
+);
 watch(
   visibility,
   (current) => {
@@ -259,79 +537,1823 @@ useHead({ title: '合作伙伴中心' });
 </script>
 
 <template>
-  <div class="partner-account-page">
+  <div class="flow-page account-page partner-account-page">
     <FlowHeader />
-    <main id="main-content" class="partner-account-shell">
-      <p v-if="loading" class="page-state">正在加载合作伙伴中心...</p>
-      <p v-else-if="!partner" class="page-state">{{ errorMessage || '当前大会尚未开通合作伙伴权限' }}</p>
+    <main id="main-content" class="account-shell">
+      <div v-if="loading" class="account-loading" role="status">
+        <span aria-hidden="true"></span>
+        <p>正在加载合作伙伴中心…</p>
+      </div>
       <template v-else>
-        <NuxtLink class="back-link" to="/account">← 返回个人中心</NuxtLink>
-        <header class="account-hero">
-          <div><p>PARTNER CENTER</p><h1>{{ partner.eventName }}</h1><span>合作伙伴工作台</span></div>
-          <div class="hero-balance"><small>可提现收益</small><strong>{{ money(partner.balances.available) }}</strong><em>{{ statusText[partner.qualificationStatus] }}</em></div>
+        <header class="account-heading">
+          <div>
+            <p class="flow-eyebrow">PARTNER ACCOUNT</p>
+            <h1>合作伙伴中心</h1>
+            <p>
+              {{ partner?.eventName || '在这里管理你的大会合作资料与推广收益。' }}
+              <span
+                v-if="partner"
+                class="mobile-partner-status status-badge"
+                :class="{ 'is-success': partner.qualificationStatus === 'active' }"
+              >{{ statusText[partner.qualificationStatus] }}</span>
+            </p>
+          </div>
+          <NuxtLink class="account-back-link" to="/account">
+            返回个人中心 <span aria-hidden="true">↗</span>
+          </NuxtLink>
         </header>
-        <div v-if="errorMessage" class="notice error">{{ errorMessage }}</div>
-        <div v-if="successMessage" class="notice success">{{ successMessage }}</div>
-        <section v-if="!confirmed && partner.currentProgram" class="rules-card">
-          <div><p>开始推广前请确认</p><h2>{{ partner.currentProgram.termsTitle }}</h2><div class="rules-copy">{{ partner.currentProgram.termsContent }}</div><small>{{ partner.currentProgram.promotionPolicy }}</small></div>
-          <button :disabled="pending" @click="acceptRules">确认规则并开通推广</button>
+        <section v-if="!customer.session.value" class="account-surface account-empty">
+          <span class="section-index">YOUR PARTNERSHIP</span>
+          <h2>登录后查看合作伙伴中心</h2>
+          <p>使用开通合作伙伴资格的手机号登录，即可管理资料与收益。</p>
+          <button type="button" class="account-primary" @click="customer.openLogin()">
+            验证码登录 <span aria-hidden="true">→</span>
+          </button>
         </section>
-        <nav class="tab-nav" aria-label="合作伙伴中心模块"><button v-for="tab in tabs" :key="tab.id" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id">{{ tab.label }}</button></nav>
-
-        <section v-if="activeTab === 'profile'" class="content-grid">
-          <form class="panel" @submit.prevent="saveProfile">
-            <div class="panel-title"><div><p>PROFILE</p><h2>合作伙伴资料</h2></div><button :disabled="pending">保存资料</button></div>
-            <div class="avatar-editor"><div class="avatar"><img v-if="avatarPreview" :src="avatarPreview" alt="合作伙伴头像预览"><span v-else>{{ profileForm.displayName.slice(0,1) }}</span></div><label>上传头像<input type="file" accept="image/jpeg,image/png,image/webp" @change="uploadAvatar"></label></div>
-            <div class="form-grid"><label>公开姓名<input v-model="profileForm.displayName" required maxlength="80"></label><label>公司<input v-model="profileForm.company" maxlength="160"></label><label>职位<input v-model="profileForm.title" maxlength="100"></label><label>行业<input v-model="profileForm.industry" maxlength="80"></label><label class="wide">个人或业务介绍<textarea v-model="profileForm.businessIntro" rows="6" maxlength="2000"></textarea></label><label class="wide">项目网址<input v-model="profileForm.businessUrl" type="url" placeholder="https://"></label><label>联系电话<input v-model="profileForm.contactPhone" maxlength="32"></label><label>联系邮箱<input v-model="profileForm.contactEmail" type="email"></label><label>微信号<input v-model="profileForm.wechatId" maxlength="80"></label></div>
-            <div class="gallery-editor"><div class="section-row"><h3>图片资料</h3><label v-if="gallery.length < 4">添加图片<input type="file" accept="image/jpeg,image/png,image/webp" @change="uploadGallery"></label></div><div class="gallery-list"><div v-for="(item,index) in gallery" :key="item.assetId"><img :src="item.url" :alt="item.alt"><input v-model="item.alt" maxlength="120"><button type="button" @click="gallery.splice(index,1)">移除</button></div></div></div>
-          </form>
-          <form class="panel compact" @submit.prevent="savePrivacy"><div class="panel-title"><div><p>PRIVACY</p><h2>公开授权</h2></div><button :disabled="pending">保存设置</button></div><label>资料状态<select v-model="privacyForm.publicStatus"><option value="draft">草稿</option><option value="published">公开展示</option><option value="hidden">暂时隐藏</option></select></label><h3>详情页公开字段</h3><div class="toggle-list"><label v-for="item in visibleChoices" :key="`public-${item.key}`"><input v-model="visibility[item.key]" type="checkbox"><span>{{ item.label }}</span></label></div><h3>海报展示字段</h3><div class="toggle-list"><label v-for="item in visibleChoices" :key="`poster-${item.key}`"><input v-model="posterVisibility[item.key]" type="checkbox" :disabled="!visibility[item.key]"><span>{{ item.label }}</span></label></div><label class="switch-line"><input v-model="privacyForm.searchIndexingEnabled" type="checkbox">允许搜索引擎收录公开详情页</label><small>海报只能选择已经授权公开的字段；关闭详情页字段时，海报会同步关闭该字段。</small></form>
+        <section v-else-if="!partner" class="account-surface account-empty" role="status">
+          <span class="section-index">YOUR PARTNERSHIP</span>
+          <h2>暂时无法查看合作信息</h2>
+          <p>{{ errorMessage || '当前大会尚未开通合作伙伴权限，请联系大会运营人员。' }}</p>
+          <button type="button" class="account-secondary" @click="load">重新加载</button>
         </section>
-
-        <section v-else-if="activeTab === 'promotion'" class="promotion-layout"><article class="panel"><div class="panel-title"><div><p>PROMOTION</p><h2>专属推广链接</h2></div></div><p class="hint">访客主动点击后建立来源，有效期 {{ partner.currentProgram?.attributionDays ?? 30 }} 天。</p><div class="link-box"><code>{{ referralUrl || '确认合作规则后生成' }}</code><button :disabled="!referralUrl" @click="copyLink">复制链接</button></div><div class="promotion-actions"><a v-if="referralUrl" :href="referralUrl" target="_blank">测试推广入口</a><NuxtLink :to="`/partners/${partner.publicSlug}?event=${partner.eventSlug}`">预览公开详情</NuxtLink><button :disabled="!referralUrl" @click="downloadPoster">下载海报</button></div></article><aside class="promotion-poster"><p>TOKEMS PARTNER</p><div><small>{{ posterVisibility.industry ? (partner.profile.industry || '大会合作伙伴') : '大会合作伙伴' }}</small><h2>{{ posterVisibility.displayName ? partner.profile.displayName : '大会合作伙伴' }}</h2><span v-if="posterIdentity">{{ posterIdentity }}</span></div><footer><strong>{{ partner.eventName }}</strong><div v-if="referralUrl"><QRCode :value="referralUrl" :size="116" level="M" render-as="svg" /><small>扫码通过我报名</small></div></footer></aside></section>
-
-        <section v-else-if="activeTab === 'earnings'" class="panel"><div class="panel-title"><div><p>EARNINGS</p><h2>收益明细</h2></div><div class="balance-pills"><span>待结算 {{ money(partner.balances.pending) }}</span><span>已结算 {{ money(partner.balances.paid) }}</span></div></div><div class="data-list"><article v-for="item in commissions" :key="String(item.id)"><div><strong>订单 {{ String(item.orderId ?? '').slice(-8) }}</strong><small>{{ dateTime(item.createdAt) }}</small></div><div><b>{{ money(item.commissionAmount) }}</b><em>{{ statusText[String(item.status)] ?? item.status }}</em></div></article><p v-if="!commissions.length" class="empty">暂无佣金记录</p></div></section>
-
-        <section v-else-if="activeTab === 'payouts'" class="content-grid">
-          <article class="panel">
-            <div class="panel-title"><div><p>PAYOUT</p><h2>申请提现</h2></div></div>
-            <form class="stack-form" @submit.prevent="requestPayout">
-              <label>已验证收款人<select v-model="payoutForm.recipientId" required><option value="">请选择</option><option v-for="item in verifiedRecipients" :key="String(item.id)" :value="String(item.id)">{{ item.channel === 'wechat_transfer' ? '微信商家转账' : '人工对公结算' }}</option></select></label>
-              <label>税前提现金额<input v-model="payoutForm.amountYuan" type="number" min="10" step="0.01" required></label>
-              <button :disabled="pending || !payoutForm.recipientId">提交提现申请</button>
-            </form>
-            <div class="data-list">
-              <article v-for="item in payouts" :key="String(item.id)">
-                <div>
-                  <strong>{{ money(item.grossAmount) }}</strong>
-                  <small v-if="Number(item.taxAmount ?? 0) > 0">代扣税费 {{ money(item.taxAmount) }}，预计到账 {{ money(item.netAmount) }}</small>
-                  <small>{{ dateTime(item.createdAt) }}</small>
-                  <span class="document-links"><button v-for="document in documentsForPayout(item.id)" :key="String(document.id)" type="button" @click="downloadPayoutDocument(document)">{{ document.kind === 'manual_receipt' ? '下载结算回单' : document.kind === 'wechat_receipt' ? '下载微信回单' : document.kind === 'tax_document' ? '下载税务材料' : '下载结算单' }}</button></span>
-                </div>
-                <div><em>{{ statusText[String(item.status)] ?? item.status }}</em><button v-if="item.status === 'under_review'" @click="confirmSettlement(item)">确认结算金额</button><button v-if="item.status === 'executing'" @click="confirmWechat(item)">微信确认</button></div>
-              </article>
-              <p v-if="!payouts.length" class="empty">暂无提现记录</p>
+        <div v-else class="account-workspace">
+          <aside class="account-rail" aria-label="合作伙伴导航">
+            <div class="account-rail__identity">
+              <div class="account-avatar">
+                <img
+                  v-if="partner.profile.avatarUrl"
+                  :src="partner.profile.avatarUrl"
+                  alt=""
+                /><span v-else>{{ partnerInitial }}</span>
+              </div>
+              <div>
+                <strong>{{ partner.profile.displayName }}</strong><span
+                  class="partner-status"
+                  :class="{ 'is-active': partner.qualificationStatus === 'active' }"
+                ><i aria-hidden="true"></i>{{ statusText[partner.qualificationStatus] }}</span>
+              </div>
             </div>
-          </article>
-          <form class="panel compact" @submit.prevent="bindRecipient">
-            <div class="panel-title"><div><p>RECIPIENT</p><h2>收款信息</h2></div></div>
-            <label>收款主体<select v-model="recipientForm.type"><option value="individual">自然人</option><option value="organization">企业</option></select></label>
-            <label>结算渠道<select v-model="recipientForm.channel"><option v-if="recipientForm.type === 'individual'" value="wechat_transfer">微信商家转账</option><option value="manual_bank">人工结算</option></select></label>
-            <label>收款人名称<input v-model="recipientForm.displayName" required maxlength="120"></label>
-            <label v-if="recipientForm.channel === 'manual_bank'">收款账户信息<input v-model="recipientForm.accountReference" required autocomplete="off"></label>
-            <p v-else class="hint">微信收款身份通过公众号 OAuth 绑定，系统不会把 OpenID 返回到页面。</p>
-            <button :disabled="pending">{{ recipientForm.channel === 'wechat_transfer' ? '在微信中授权绑定' : '提交验证' }}</button>
-            <small>收款信息加密保存。微信授权后直接完成身份验证；企业收款统一走人工结算。</small>
-          </form>
-        </section>
+            <p class="account-rail__company">{{ partner.profile.company || '大会合作伙伴' }}</p>
+            <nav class="account-nav account-nav--desktop" aria-label="合作伙伴中心模块">
+              <button
+                v-for="(tab, index) in tabs"
+                :key="tab.id"
+                type="button"
+                :aria-current="activeTab === tab.id ? 'page' : undefined"
+                aria-controls="partner-module"
+                @click="activeTab = tab.id"
+              >
+                <span>{{ String(index + 1).padStart(2, '0') }}</span>{{ tab.label }}
+              </button>
+            </nav>
+            <div class="account-rail__footer">
+              <span>当前合作大会</span>
+              <p>{{ partner.eventName }}</p>
+              <small>合作资料与收益按大会独立管理。</small>
+            </div>
+            <div
+              ref="mobileNav"
+              class="account-mobile-nav"
+              @keydown.esc.stop.prevent="escapeMobileNav"
+            >
+              <button
+                ref="mobileNavTrigger"
+                type="button"
+                class="account-mobile-trigger"
+                :aria-expanded="mobileNavOpen"
+                aria-controls="partner-mobile-menu"
+                @click="mobileNavOpen = !mobileNavOpen"
+              >
+                <span>合作伙伴导航</span><strong>{{ currentTab.label }}</strong><i aria-hidden="true">{{ mobileNavOpen ? '−' : '+' }}</i>
+              </button>
+              <nav
+                v-if="mobileNavOpen"
+                id="partner-mobile-menu"
+                class="account-mobile-panel"
+                aria-label="切换合作伙伴模块"
+              >
+                <button
+                  v-for="(tab, index) in tabs"
+                  :key="tab.id"
+                  type="button"
+                  :aria-current="activeTab === tab.id ? 'page' : undefined"
+                  @click="
+                    activeTab = tab.id;
+                    mobileNavOpen = false;
+                    mobileNavTrigger?.focus();
+                  "
+                >
+                  <span>{{ String(index + 1).padStart(2, '0') }}</span>{{ tab.label }}
+                </button>
+              </nav>
+            </div>
+          </aside>
+          <div class="account-content">
+            <div
+              v-if="errorMessage || successMessage"
+              class="account-message"
+              :class="errorMessage ? 'is-error' : 'is-success'"
+              :role="errorMessage ? 'alert' : 'status'"
+            >
+              <span aria-hidden="true">{{ errorMessage ? '!' : '✓' }}</span>
+              <p>{{ errorMessage || successMessage }}</p>
+            </div>
+            <section
+              v-if="!confirmed && partner.currentProgram"
+              class="account-surface rules-card"
+              aria-labelledby="rules-title"
+            >
+              <span class="section-index">BEFORE YOU START</span>
+              <h2 id="rules-title">{{ partner.currentProgram.termsTitle }}</h2>
+              <p class="hint">确认本期合作规则后，即可开始推广。</p>
+              <div class="rules-copy" tabindex="0" aria-label="合作规则正文">
+                {{ partner.currentProgram.termsContent }}
+              </div>
+              <p class="hint">{{ partner.currentProgram.promotionPolicy }}</p>
+              <button
+                type="button"
+                class="account-primary"
+                :disabled="pending"
+                @click="acceptRules"
+              >
+                确认规则并开通推广 <span aria-hidden="true">→</span>
+              </button>
+            </section>
+            <section class="balance-strip" aria-label="合作收益概览">
+              <div>
+                <span>可提现收益</span><strong>{{ money(partner.balances.available) }}</strong><small>税前可提现金额</small>
+              </div>
+              <div>
+                <span>待结算</span><strong>{{ money(partner.balances.pending) }}</strong><small>等待结算期结束</small>
+              </div>
+              <div>
+                <span>提现处理中</span><strong>{{ money(partner.balances.reserved) }}</strong><small>已申请的提现金额</small>
+              </div>
+              <div>
+                <span>已结算</span><strong>{{ money(partner.balances.paid) }}</strong><small>累计完成结算</small>
+              </div>
+            </section>
+            <section
+              id="partner-module"
+              ref="moduleSection"
+              class="account-section"
+              aria-labelledby="partner-module-title"
+            >
+              <header class="account-section__heading">
+                <div>
+                  <span class="section-index">{{ currentTabNumber }} / {{ currentTab.caption }}</span>
+                  <h2 id="partner-module-title">{{ currentTab.label }}</h2>
+                </div>
+                <p>{{ currentTab.description }}</p>
+              </header>
 
-        <section v-else class="content-grid"><form class="panel" @submit.prevent="submitInquiry"><div class="panel-title"><div><p>INQUIRY</p><h2>提交佣金申诉</h2></div></div><div class="stack-form"><label>问题类型<select v-model="inquiryForm.type"><option value="missing_order">订单未计佣</option><option value="amount_dispute">佣金金额有疑问</option></select></label><label>订单编号<input v-model="inquiryForm.orderReference" required maxlength="80"></label><label>问题说明<textarea v-model="inquiryForm.description" required rows="7" minlength="10" maxlength="4000"></textarea></label><button :disabled="pending">提交申诉</button></div></form><aside class="panel compact"><h2>处理说明</h2><p class="hint">请填写可核对的订单编号和情况说明。大会运营人员会核对归因、订单明细、退款及结算记录；大额账务调整由两位管理员复核。</p></aside></section>
+              <div v-if="activeTab === 'profile'" class="section-stack">
+                <form class="account-surface" @submit.prevent="saveProfile">
+                  <div class="surface-heading">
+                    <h3>合作伙伴资料</h3>
+                    <p>用于当前大会的合作伙伴名片与介绍页。</p>
+                  </div>
+                  <div class="account-form">
+                    <div class="avatar-editor wide">
+                      <div class="profile-avatar">
+                        <img
+                          v-if="avatarPreview"
+                          :src="avatarPreview"
+                          alt="合作伙伴头像预览"
+                        /><span v-else>{{ partnerInitial }}</span>
+                      </div>
+                      <div>
+                        <label class="account-secondary file-control">上传头像<input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          :disabled="pending"
+                          @change="uploadAvatar"
+                        /></label>
+                        <p class="field-hint">支持 JPG、PNG、WebP，上传后请保存资料。</p>
+                      </div>
+                    </div>
+                    <label>公开姓名 <span class="required">必填</span><input
+                      v-model="profileForm.displayName"
+                      required
+                      maxlength="80"
+                      autocomplete="name"
+                    /></label>
+                    <label>公司<input
+                      v-model="profileForm.company"
+                      maxlength="160"
+                      autocomplete="organization"
+                      placeholder="填写公司或机构名称"
+                    /></label>
+                    <label>职位<input
+                      v-model="profileForm.title"
+                      maxlength="100"
+                      autocomplete="organization-title"
+                      placeholder="填写你的职位"
+                    /></label>
+                    <label>行业<input
+                      v-model="profileForm.industry"
+                      maxlength="80"
+                      placeholder="例如：企业服务"
+                    /></label>
+                    <label class="wide">个人或业务介绍<textarea
+                      v-model="profileForm.businessIntro"
+                      rows="5"
+                      maxlength="2000"
+                      placeholder="介绍你的专业领域、业务或合作方向"
+                    ></textarea><span class="field-hint">最多 2,000 字。</span></label>
+                    <label class="wide">项目网址<input
+                      v-model="profileForm.businessUrl"
+                      type="url"
+                      placeholder="https://"
+                      inputmode="url"
+                    /></label>
+                    <label>联系电话<input
+                      v-model="profileForm.contactPhone"
+                      type="tel"
+                      maxlength="32"
+                      autocomplete="tel"
+                      placeholder="选填，公开范围由你决定"
+                    /></label>
+                    <label>联系邮箱<input
+                      v-model="profileForm.contactEmail"
+                      type="email"
+                      autocomplete="email"
+                      placeholder="选填，公开范围由你决定"
+                    /></label>
+                    <label>微信号<input
+                      v-model="profileForm.wechatId"
+                      maxlength="80"
+                      placeholder="填写微信号"
+                    /></label>
+                    <div class="gallery-editor wide">
+                      <div class="section-row">
+                        <div>
+                          <h3>图片资料</h3>
+                          <p class="field-hint">最多 4 张，可展示个人形象或业务内容。</p>
+                        </div>
+                        <label v-if="gallery.length < 4" class="account-secondary file-control">添加图片<input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          :disabled="pending"
+                          @change="uploadGallery"
+                        /></label>
+                      </div>
+                      <div v-if="gallery.length" class="gallery-list">
+                        <div v-for="(item, index) in gallery" :key="item.assetId">
+                          <img :src="item.url" :alt="item.alt" /><label>图片 {{ index + 1 }} 说明<input
+                            v-model="item.alt"
+                            maxlength="120"
+                          /></label><button
+                            type="button"
+                            class="text-button"
+                            :disabled="pending"
+                            @click="gallery.splice(index, 1)"
+                          >
+                            移除图片
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="form-actions wide">
+                      <button class="account-primary" :disabled="pending">
+                        {{ pending ? '处理中…' : '保存资料' }}
+                        <span aria-hidden="true">→</span>
+                      </button><small>修改仅用于当前大会。</small>
+                    </div>
+                  </div>
+                </form>
+                <form class="account-surface" @submit.prevent="savePrivacy">
+                  <div class="surface-heading">
+                    <h3>公开授权</h3>
+                    <p>选择可公开的信息，海报只使用已授权公开的字段。</p>
+                  </div>
+                  <div class="privacy-content">
+                    <label class="privacy-status">资料状态<select v-model="privacyForm.publicStatus">
+                      <option value="draft">草稿，暂不展示</option>
+                      <option value="published">公开展示</option>
+                      <option value="hidden">暂时隐藏</option>
+                    </select></label>
+                    <table class="privacy-table">
+                      <caption class="sr-only">
+                        详情页与海报的公开字段设置
+                      </caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">资料字段</th>
+                          <th scope="col">详情页公开</th>
+                          <th scope="col">允许海报使用</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="item in visibleChoices" :key="item.key">
+                          <th scope="row">{{ item.label }}</th>
+                          <td>
+                            <label class="check-control"><input
+                              v-model="visibility[item.key]"
+                              type="checkbox"
+                              :aria-label="`详情页公开${item.label}`"
+                            /></label>
+                          </td>
+                          <td>
+                            <label class="check-control"><input
+                              v-model="posterVisibility[item.key]"
+                              type="checkbox"
+                              :disabled="!visibility[item.key]"
+                              :aria-label="`允许海报使用${item.label}`"
+                            /></label>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <label class="switch-line"><input
+                      v-model="privacyForm.searchIndexingEnabled"
+                      type="checkbox"
+                    />允许搜索引擎收录公开详情页</label>
+                    <p class="field-hint">关闭详情页中的某个字段后，海报的对应授权会同步关闭。</p>
+                    <div class="form-actions">
+                      <button class="account-primary" :disabled="pending">
+                        保存公开设置 <span aria-hidden="true">→</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+
+              <div v-else-if="activeTab === 'promotion'" class="promotion-layout">
+                <article class="account-surface promotion-content">
+                  <span class="section-index">YOUR REFERRAL LINK</span>
+                  <h3>专属推广链接</h3>
+                  <p class="hint">
+                    朋友通过此链接进入报名页面后，推广来源将保留
+                    {{ partner.currentProgram?.attributionDays ?? 30 }} 天。
+                  </p>
+                  <div class="link-box">
+                    <code>{{ referralUrl || '确认合作规则后生成' }}</code>
+                  </div>
+                  <button
+                    type="button"
+                    class="account-primary"
+                    :disabled="!referralUrl"
+                    @click="copyLink"
+                  >
+                    复制推广链接 <span aria-hidden="true">→</span>
+                  </button>
+                  <div class="promotion-actions">
+                    <a
+                      v-if="referralUrl"
+                      :href="referralUrl"
+                      target="_blank"
+                      rel="noopener"
+                      class="account-secondary"
+                    >测试推广入口 ↗</a><a
+                      :href="`/partners/${partner.publicSlug}?event=${partner.eventSlug}`"
+                      class="account-secondary"
+                    >预览公开详情 ↗</a>
+                  </div>
+                  <div class="promotion-tip">
+                    <h3>分享你的大会名片</h3>
+                    <p class="hint">
+                      完善个人资料并保存公开设置，再下载专属海报，方便朋友扫码报名。
+                    </p>
+                    <button
+                      type="button"
+                      class="account-secondary"
+                      :disabled="!posterReady || posterRendering || pending"
+                      @click="downloadPoster"
+                    >
+                      下载 1080 × 1440 海报 ↓
+                    </button>
+                  </div>
+                </article>
+                <figure class="poster-preview account-surface">
+                  <div class="poster-heading">
+                    <div>
+                      <span class="section-index">PERSONAL POSTER</span>
+                      <h3>我的推广海报</h3>
+                    </div>
+                    <span class="poster-ratio">社交分享版 · 3:4</span>
+                  </div>
+                  <canvas
+                    v-show="posterReady"
+                    ref="posterCanvas"
+                    class="promotion-poster"
+                    width="1080"
+                    height="1440"
+                    aria-label="合作伙伴推广海报预览"
+                    :aria-busy="posterRendering"
+                  />
+                  <div
+                    v-if="!posterReady"
+                    class="poster-placeholder"
+                    :role="posterError ? 'alert' : 'status'"
+                  >
+                    <p>
+                      {{
+                        posterError ||
+                          (referralUrl ? '正在生成推广海报…' : '确认合作规则后生成专属海报')
+                      }}
+                    </p>
+                    <button
+                      v-if="posterError"
+                      type="button"
+                      class="account-secondary"
+                      @click="renderPoster"
+                    >
+                      重新生成
+                    </button>
+                  </div>
+                  <figcaption>每次保存后，预览与下载都会使用最新资料及海报公开授权。</figcaption>
+                  <div ref="posterQrHolder" class="poster-qr-source" aria-hidden="true">
+                    <QRCode
+                      v-if="referralUrl"
+                      :value="referralUrl"
+                      :size="360"
+                      level="M"
+                      render-as="canvas"
+                    />
+                  </div>
+                </figure>
+              </div>
+
+              <article v-else-if="activeTab === 'earnings'" class="account-surface">
+                <div class="surface-heading section-row">
+                  <div>
+                    <h3>佣金记录</h3>
+                    <p>订单金额、退款和结算状态更新后，收益会同步调整。</p>
+                  </div>
+                  <span class="record-count">{{ commissions.length }} 条记录</span>
+                </div>
+                <div v-if="commissions.length" class="data-list">
+                  <article v-for="item in commissions" :key="String(item.id)">
+                    <div>
+                      <strong>订单 {{ String(item.orderId ?? '').slice(-8) }}</strong><small>{{ dateTime(item.createdAt) }}</small>
+                    </div>
+                    <div>
+                      <b>{{ money(item.commissionAmount) }}</b><span
+                        class="status-badge"
+                        :class="{
+                          'is-success': item.status === 'available' || item.status === 'paid',
+                        }"
+                      >{{ statusText[String(item.status)] ?? item.status }}</span>
+                    </div>
+                  </article>
+                </div>
+                <div v-else class="account-empty">
+                  <span class="section-index">YOUR EARNINGS</span>
+                  <h3>还没有佣金记录</h3>
+                  <p>分享专属推广链接，有效订单产生后可在这里查看收益。</p>
+                  <button type="button" class="account-secondary" @click="activeTab = 'promotion'">
+                    查看推广素材 <span aria-hidden="true">→</span>
+                  </button>
+                </div>
+              </article>
+
+              <div v-else-if="activeTab === 'payouts'" class="section-stack">
+                <div class="payout-layout">
+                  <article class="account-surface">
+                    <div class="surface-heading">
+                      <h3>申请提现</h3>
+                      <p>税前金额满 10 元可申请。</p>
+                    </div>
+                    <form class="stack-form" @submit.prevent="requestPayout">
+                      <label>已验证收款人<select v-model="payoutForm.recipientId" required>
+                        <option value="">请选择收款人</option>
+                        <option
+                          v-for="item in verifiedRecipients"
+                          :key="String(item.id)"
+                          :value="String(item.id)"
+                        >
+                          {{ item.channel === 'wechat_transfer' ? '微信商家转账' : '人工结算' }}
+                        </option>
+                      </select></label>
+                      <p v-if="!verifiedRecipients.length" class="field-note">
+                        请先填写收款信息，验证完成后即可申请提现。
+                      </p>
+                      <label>税前提现金额（元）<input
+                        v-model="payoutForm.amountYuan"
+                        type="number"
+                        min="10"
+                        step="0.01"
+                        required
+                        inputmode="decimal"
+                      /></label>
+                      <p class="field-hint">
+                        当前可提现
+                        {{ money(partner.balances.available) }}，实际到账金额以结算结果为准。
+                      </p>
+                      <button
+                        class="account-primary"
+                        :disabled="pending || !payoutForm.recipientId"
+                      >
+                        提交提现申请 <span aria-hidden="true">→</span>
+                      </button>
+                    </form>
+                  </article>
+                  <form class="account-surface" @submit.prevent="bindRecipient">
+                    <div class="surface-heading">
+                      <h3>收款信息</h3>
+                      <p>选择与你实际收款身份一致的信息。</p>
+                    </div>
+                    <div class="stack-form">
+                      <label>收款主体<select v-model="recipientForm.type">
+                        <option value="individual">个人</option>
+                        <option value="organization">企业</option>
+                      </select></label><label>结算渠道<select v-model="recipientForm.channel">
+                        <option
+                          v-if="recipientForm.type === 'individual'"
+                          value="wechat_transfer"
+                        >
+                          微信商家转账
+                        </option>
+                        <option value="manual_bank">人工结算</option>
+                      </select></label><label>收款人名称<input
+                        v-model="recipientForm.displayName"
+                        required
+                        maxlength="120"
+                        autocomplete="name"
+                      /></label><label v-if="recipientForm.channel === 'manual_bank'">收款账户信息<input
+                        v-model="recipientForm.accountReference"
+                        required
+                        autocomplete="off"
+                      /></label>
+                      <p v-else class="field-hint">
+                        请在微信中完成身份授权，绑定后可用于接收推广收益。
+                      </p>
+                      <button class="account-primary" :disabled="pending">
+                        {{
+                          recipientForm.channel === 'wechat_transfer'
+                            ? '在微信中授权绑定'
+                            : '提交验证'
+                        }}
+                        <span aria-hidden="true">→</span>
+                      </button><small class="field-hint">收款信息加密保存。企业收款通过人工结算。</small>
+                    </div>
+                  </form>
+                </div>
+                <article class="account-surface">
+                  <div class="surface-heading section-row">
+                    <div>
+                      <h3>提现与结算记录</h3>
+                      <p>查看处理进度，下载结算单与回单。</p>
+                    </div>
+                    <span class="record-count">{{ payouts.length }} 条记录</span>
+                  </div>
+                  <div v-if="payouts.length" class="data-list">
+                    <article v-for="item in payouts" :key="String(item.id)">
+                      <div>
+                        <strong>{{ money(item.grossAmount) }}</strong><small v-if="Number(item.taxAmount ?? 0) > 0">代扣税费 {{ money(item.taxAmount) }}，预计到账
+                          {{ money(item.netAmount) }}</small><small>{{ dateTime(item.createdAt) }}</small><span class="document-links"><button
+                          v-for="document in documentsForPayout(item.id)"
+                          :key="String(document.id)"
+                          type="button"
+                          class="text-button"
+                          :disabled="pending"
+                          @click="downloadPayoutDocument(document)"
+                        >
+                          {{
+                            document.kind === 'manual_receipt'
+                              ? '下载结算回单'
+                              : document.kind === 'wechat_receipt'
+                                ? '下载微信回单'
+                                : document.kind === 'tax_document'
+                                  ? '下载税务材料'
+                                  : '下载结算单'
+                          }}
+                        </button></span>
+                      </div>
+                      <div>
+                        <span
+                          class="status-badge"
+                          :class="{ 'is-success': item.status === 'succeeded' }"
+                        >{{ statusText[String(item.status)] ?? item.status }}</span><button
+                          v-if="item.status === 'under_review'"
+                          type="button"
+                          class="account-secondary"
+                          :disabled="pending"
+                          @click="confirmSettlement(item)"
+                        >
+                          确认结算金额
+                        </button><button
+                          v-if="item.status === 'executing'"
+                          type="button"
+                          class="account-secondary"
+                          :disabled="pending"
+                          @click="confirmWechat(item)"
+                        >
+                          微信确认
+                        </button>
+                      </div>
+                    </article>
+                  </div>
+                  <div v-else class="account-empty">
+                    <span class="section-index">PAYOUT HISTORY</span>
+                    <h3>还没有提现记录</h3>
+                    <p>提交申请后，可在这里跟进结算与到账情况。</p>
+                  </div>
+                </article>
+              </div>
+
+              <div v-else class="account-surface inquiry-layout">
+                <div class="inquiry-intro">
+                  <span class="section-index">HOW IT WORKS</span>
+                  <h3>我们会核对每一笔收益</h3>
+                  <p>请填写订单编号和具体情况，方便大会运营人员核对。</p>
+                  <ol>
+                    <li>选择问题类型</li>
+                    <li>填写订单与情况说明</li>
+                    <li>提交后等待运营人员核查</li>
+                  </ol>
+                  <p>核查内容包括订单、推广来源、退款和结算记录。</p>
+                </div>
+                <form class="stack-form" @submit.prevent="submitInquiry">
+                  <label>问题类型<select v-model="inquiryForm.type">
+                    <option value="missing_order">订单未计佣</option>
+                    <option value="amount_dispute">佣金金额有疑问</option>
+                  </select></label><label>订单编号<input
+                    v-model="inquiryForm.orderReference"
+                    required
+                    maxlength="80"
+                    placeholder="填写需要核对的订单编号"
+                  /></label><label>问题说明<textarea
+                    v-model="inquiryForm.description"
+                    required
+                    rows="7"
+                    minlength="10"
+                    maxlength="4000"
+                    placeholder="请描述遇到的问题及相关情况，至少 10 个字"
+                  ></textarea><span class="field-hint">请填写 10 至 4,000 个字。</span></label><button class="account-primary" :disabled="pending">
+                    提交佣金申诉 <span aria-hidden="true">→</span>
+                  </button>
+                </form>
+              </div>
+            </section>
+          </div>
+        </div>
       </template>
     </main>
   </div>
 </template>
 
 <style scoped>
-.partner-account-page{min-height:100vh;background:#f3f6fa;color:#192338}.partner-account-shell{width:min(100% - 40px,1120px);margin:auto;padding:26px 0 72px}.back-link{display:inline-flex;margin-bottom:14px;color:#68758a;font-size:13px}.account-hero{display:flex;align-items:flex-end;justify-content:space-between;padding:32px 36px;border-radius:18px;background:linear-gradient(125deg,#102c50,#1e5de4);color:#fff;box-shadow:0 20px 44px rgb(21 55 110/16%)}.account-hero p,.panel-title p,.promotion-poster>p{margin:0;color:#b9d4ff;font:750 10px var(--conference-font-mono);letter-spacing:.12em}.account-hero h1{margin:8px 0 4px;font-size:clamp(28px,5vw,46px);letter-spacing:-.04em}.account-hero span{color:#dbe7ff}.hero-balance{text-align:right}.hero-balance small,.hero-balance em{display:block;color:#c9dcff;font-style:normal}.hero-balance strong{display:block;margin:5px 0;font-size:30px}.tab-nav{display:flex;gap:4px;margin:18px 0;padding:5px;overflow:auto;border:1px solid #dfe5ed;border-radius:12px;background:#fff}.tab-nav button{min-width:max-content;padding:11px 17px;border:0;border-radius:8px;background:transparent;color:#627086;font-weight:700}.tab-nav button.active{background:#eaf1ff;color:#1758d8}.rules-card,.panel{border:1px solid #dfe5ed;border-radius:14px;background:#fff;box-shadow:0 10px 30px rgb(25 43 71/5%)}.rules-card{display:flex;align-items:center;justify-content:space-between;gap:28px;margin-top:18px;padding:24px}.rules-card p{margin:0;color:#1e5de4;font-size:11px;font-weight:800;letter-spacing:.08em}.rules-card h2{margin:5px 0 8px}.rules-copy{max-height:110px;overflow:auto;color:#435168;line-height:1.7;white-space:pre-wrap}.rules-card small{display:block;margin-top:8px;color:#7b8798}.rules-card button,.panel button,.promotion-actions a,.promotion-actions .router-link-active{min-height:40px;padding:0 16px;border:1px solid #1e5de4;border-radius:8px;background:#1e5de4;color:#fff;font-weight:750}.content-grid,.promotion-layout{display:grid;grid-template-columns:minmax(0,1fr)330px;align-items:start;gap:16px}.panel{padding:24px}.panel.compact{display:grid;gap:16px}.panel-title{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:22px}.panel-title p{color:#1e5de4}.panel-title h2,.panel h2{margin:5px 0 0;font-size:21px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .wide{grid-column:1/-1}label{display:grid;gap:7px;color:#5f6c80;font-size:12px;font-weight:700}input,textarea,select{width:100%;border:1px solid #d8e0ea;border-radius:8px;background:#fbfcfe;padding:11px 12px;color:#243149;font:inherit;box-sizing:border-box}textarea{resize:vertical}.avatar-editor{display:flex;align-items:center;gap:18px;margin-bottom:22px}.avatar{display:grid;width:90px;height:90px;place-items:center;overflow:hidden;border-radius:14px;background:#e8f0ff;color:#1e5de4;font-size:30px;font-weight:800}.avatar img{width:100%;height:100%;object-fit:cover}.avatar-editor label,.gallery-editor label{display:inline-flex;padding:9px 13px;border:1px solid #d5deeb;border-radius:8px;cursor:pointer}.avatar-editor input,.gallery-editor label input{display:none}.section-row{display:flex;align-items:center;justify-content:space-between;margin-top:22px}.gallery-list{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.gallery-list>div{padding:9px;border:1px solid #e2e7ef;border-radius:10px}.gallery-list img{width:100%;aspect-ratio:4/3;border-radius:6px;object-fit:cover}.gallery-list input{margin-top:7px}.gallery-list button{min-height:30px;margin-top:6px;border-color:#d7deea;background:#fff;color:#536177}.toggle-list{display:grid;grid-template-columns:repeat(2,1fr);gap:2px}.toggle-list label,.switch-line{display:flex;grid-template-columns:none;align-items:center;gap:8px;padding:9px 0}.toggle-list input,.switch-line input{width:auto}.panel>small{color:#7b8798;line-height:1.6}.promotion-poster{display:flex;min-height:510px;flex-direction:column;padding:26px;border-radius:16px;background:linear-gradient(150deg,#102c50,#1f5fe8 70%,#8bbaff);color:#fff;box-shadow:0 18px 40px rgb(20 52 104/18%)}.promotion-poster>div{margin-top:80px}.promotion-poster h2{margin:8px 0;font:700 40px Georgia,"Songti SC",serif}.promotion-poster span{color:#dce8ff}.promotion-poster footer{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-top:auto}.promotion-poster footer strong{max-width:150px;font-size:18px}.promotion-poster footer div{display:grid;gap:6px;text-align:center}.promotion-poster :deep(svg){padding:6px;background:#fff}.link-box{display:flex;gap:10px;margin:24px 0}.link-box code{flex:1;padding:13px;overflow:auto;border-radius:8px;background:#f2f5fa;color:#334159;white-space:nowrap}.promotion-actions{display:flex;flex-wrap:wrap;gap:8px}.promotion-actions a{display:inline-flex;align-items:center;border-color:#d5deeb;background:#fff;color:#3f4d63}.stack-form{display:grid;gap:14px}.data-list{display:grid;margin-top:24px}.data-list article{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 0;border-top:1px solid #e8edf3}.data-list article>div{display:grid;gap:4px}.data-list article>div:last-child{justify-items:end}.data-list small{color:#7b8798}.data-list em{color:#1e5de4;font-size:12px;font-style:normal}.data-list button{min-height:30px;margin-top:3px}.balance-pills{display:flex;gap:6px}.balance-pills span{padding:6px 9px;border-radius:999px;background:#edf3ff;color:#285ab8;font-size:11px}.hint{color:#5f6d81;line-height:1.8}.notice{margin:14px 0;padding:12px 16px;border-radius:9px}.notice.error{background:#fff0f0;color:#ad3030}.notice.success{background:#ecf8f0;color:#257344}.page-state,.empty{padding:80px 20px;text-align:center;color:#778397}.empty{padding:38px 0}@media(max-width:820px){.content-grid,.promotion-layout{grid-template-columns:1fr}.account-hero{align-items:flex-start}.promotion-poster{min-height:460px}}@media(max-width:560px){.partner-account-shell{width:min(100% - 24px,680px);padding-top:16px}.account-hero{display:grid;gap:22px;padding:24px}.hero-balance{text-align:left}.form-grid{grid-template-columns:1fr}.gallery-list{grid-template-columns:1fr}.rules-card{align-items:stretch;flex-direction:column}.panel{padding:19px}.panel-title{align-items:flex-start}.balance-pills{display:grid}.promotion-poster{min-height:420px}}
-.document-links{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}.document-links button{min-height:28px;margin:0;padding:3px 8px;border-color:#d7deea;background:#fff;color:#285ab8;font-size:11px}
+/* Account tokens and dimensions follow /account. Keep this scoped to the partner workspace. */
+.account-page {
+  --account-canvas: #f4f5f7;
+  --account-surface: #fff;
+  --account-ink: #15171b;
+  --account-muted: #6f737c;
+  --account-line: #dfe2e7;
+  --account-line-soft: #eceef1;
+  --account-title-page: clamp(32px, 3.2vw, 40px);
+  --account-title-section: 23px;
+  min-height: 100vh;
+  background: var(--account-canvas);
+  color: var(--account-ink);
+  font-size: 13px;
+}
+.account-shell {
+  width: min(100% - 40px, 1180px);
+  margin-inline: auto;
+  padding: 52px 0 104px;
+}
+.account-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  margin-bottom: 42px;
+}
+.account-heading h1 {
+  margin: 0;
+  color: var(--account-ink);
+  font-size: var(--account-title-page);
+  font-weight: 850;
+  line-height: 1.12;
+  letter-spacing: -0.025em;
+}
+.account-heading > div > p:last-child {
+  margin: 18px 0 0;
+  color: var(--account-muted);
+  font-size: 15px;
+  line-height: 1.75;
+  text-wrap: pretty;
+}
+.account-back-link {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 10px;
+  color: var(--account-muted);
+  font-size: 13px;
+  font-weight: 680;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.account-workspace {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  align-items: start;
+  gap: 34px;
+}
+.account-rail {
+  position: sticky;
+  top: 24px;
+  overflow: hidden;
+  border: 1px solid var(--account-line);
+  border-radius: 10px;
+  background: var(--account-surface);
+}
+.account-rail__identity {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 22px 20px 12px;
+}
+.account-rail__identity > div:last-child {
+  min-width: 0;
+}
+.account-rail__identity strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 780;
+  overflow-wrap: anywhere;
+}
+.account-avatar {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #cddcf6;
+  border-radius: 8px;
+  background: #edf3fd;
+  color: var(--conference-primary);
+  font-size: 16px;
+  font-weight: 820;
+}
+.account-avatar img,
+.profile-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.partner-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  color: var(--account-muted);
+  font-size: 10px;
+}
+.partner-status i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.partner-status.is-active {
+  color: #167653;
+}
+.account-rail__company {
+  margin: 0;
+  padding: 0 20px 20px;
+  color: var(--account-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.account-nav {
+  display: grid;
+  padding: 8px;
+  border-block: 1px solid var(--account-line-soft);
+}
+.account-nav button,
+.account-mobile-panel button {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 13px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #44474f;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+.account-nav button > span,
+.account-mobile-panel button > span {
+  color: #858a94;
+  font: 500 9px var(--conference-font-mono);
+}
+.account-nav button:hover,
+.account-nav button[aria-current],
+.account-mobile-panel button:hover,
+.account-mobile-panel button[aria-current] {
+  background: #f2f5fb;
+  color: var(--conference-primary);
+}
+.account-nav button[aria-current] > span,
+.account-mobile-panel button[aria-current] > span {
+  color: var(--conference-primary);
+}
+.account-rail__footer {
+  padding: 18px 20px 20px;
+  background: #fafafa;
+}
+.account-rail__footer > span {
+  color: var(--account-muted);
+  font-size: 10px;
+}
+.account-rail__footer p {
+  margin: 9px 0;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.account-rail__footer small {
+  color: var(--account-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.account-mobile-nav {
+  display: none;
+}
+.account-heading .mobile-partner-status {
+  display: none;
+}
+.account-content {
+  display: grid;
+  min-width: 0;
+  gap: 34px;
+}
+.account-section {
+  min-width: 0;
+  padding: 0;
+  scroll-margin-top: 80px;
+}
+.account-section__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+.account-section__heading h2 {
+  margin: 0;
+  font-size: var(--account-title-section);
+  font-weight: 820;
+  line-height: 1.15;
+}
+.account-section__heading > p {
+  max-width: 300px;
+  margin: 0;
+  color: var(--account-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.section-index {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--conference-primary);
+  font: 700 9px var(--conference-font-mono);
+  letter-spacing: 0.1em;
+}
+.account-surface {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--account-line);
+  border-radius: 10px;
+  background: var(--account-surface);
+}
+.balance-strip {
+  display: grid;
+  padding: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-block: 1px solid var(--account-line);
+  margin-bottom: 6px;
+}
+.balance-strip > div {
+  min-width: 0;
+  padding: 20px 14px;
+  border-right: 1px solid var(--account-line);
+}
+.balance-strip > div:first-child {
+  padding-left: 0;
+}
+.balance-strip > div:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+.balance-strip span,
+.balance-strip small {
+  display: block;
+  color: var(--account-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.balance-strip strong {
+  display: block;
+  margin: 9px 0 7px;
+  font-size: clamp(18px, 1.7vw, 24px);
+  font-weight: 780;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.balance-strip small {
+  font-size: 9px;
+}
+.section-stack {
+  display: grid;
+  gap: 28px;
+}
+.surface-heading {
+  padding: 24px 30px 20px;
+  border-bottom: 1px solid var(--account-line-soft);
+}
+.surface-heading h3,
+.section-row h3,
+.promotion-content h3,
+.inquiry-intro h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.5;
+}
+.surface-heading p {
+  margin: 6px 0 0;
+  color: var(--account-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.account-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  padding: 30px;
+}
+.wide {
+  grid-column: 1/-1;
+}
+label {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  color: #555962;
+  font-size: 11px;
+  font-weight: 650;
+}
+.required {
+  color: var(--conference-primary);
+  font-size: 10px;
+}
+label:has(> .required) {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+label:has(> .required) > input {
+  grid-column: 1/-1;
+}
+input,
+textarea,
+select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid #d7d9de;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--account-ink);
+  font: inherit;
+  outline: 0;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+input::placeholder,
+textarea::placeholder {
+  color: #8a8f98;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--conference-primary);
+  box-shadow: 0 0 0 3px rgb(37 99 235/10%);
+}
+textarea {
+  resize: vertical;
+  line-height: 1.7;
+}
+input[type='checkbox'] {
+  width: 16px;
+  min-height: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--conference-primary);
+  cursor: pointer;
+}
+input:disabled {
+  cursor: not-allowed;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.account-primary,
+.account-secondary {
+  display: inline-flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 0 20px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--conference-primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 720;
+  line-height: 1.5;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+.account-primary:hover:not(:disabled) {
+  background: var(--conference-primary-dark);
+}
+.account-secondary {
+  min-height: 44px;
+  gap: 8px;
+  padding: 0 14px;
+  border-color: var(--account-line);
+  border-radius: 7px;
+  background: #fff;
+  color: #44474f;
+  font-size: 12px;
+}
+.account-secondary:hover:not(:disabled) {
+  background: #f5f7fb;
+  color: var(--conference-primary);
+}
+button:active:not(:disabled),
+.account-primary:active,
+.account-secondary:active,
+.account-back-link:active {
+  transform: scale(0.98);
+}
+.field-hint {
+  display: block;
+  margin: 0;
+  color: var(--account-muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.7;
+}
+.field-note {
+  margin: 0;
+  padding: 12px;
+  border-radius: 7px;
+  background: #f2f5fb;
+  color: #425475;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 4px;
+}
+.form-actions small {
+  color: var(--account-muted);
+  font-size: 11px;
+}
+.avatar-editor {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 4px;
+}
+.profile-avatar {
+  display: grid;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #cddcf6;
+  border-radius: 8px;
+  background: #edf3fd;
+  color: var(--conference-primary);
+  font-size: 26px;
+  font-weight: 780;
+}
+.avatar-editor .field-hint {
+  margin-top: 8px;
+}
+.file-control {
+  position: relative;
+  width: fit-content;
+  overflow: hidden;
+}
+.file-control input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.file-control:focus-within {
+  outline: 2px solid var(--conference-primary);
+  outline-offset: 3px;
+}
+.file-control:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.gallery-editor {
+  padding-top: 8px;
+}
+.gallery-editor .field-hint {
+  margin-top: 5px;
+}
+.gallery-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 16px;
+}
+.gallery-list > div {
+  min-width: 0;
+}
+.gallery-list img {
+  width: 100%;
+  aspect-ratio: 4/3;
+  object-fit: cover;
+  border: 1px solid var(--account-line);
+  border-radius: 7px;
+  margin-bottom: 10px;
+}
+.text-button {
+  min-height: 44px;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--conference-primary);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+.privacy-content {
+  padding: 24px 30px 30px;
+}
+.privacy-status {
+  max-width: 300px;
+}
+.privacy-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 24px;
+  table-layout: fixed;
+  text-align: left;
+}
+.privacy-table thead th {
+  padding: 12px 0;
+  background: #fafafa;
+  color: var(--account-muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+.privacy-table th:first-child {
+  padding-left: 12px;
+}
+.privacy-table tbody th {
+  font-size: 12px;
+  font-weight: 550;
+}
+.privacy-table th,
+.privacy-table td {
+  border-bottom: 1px solid var(--account-line-soft);
+}
+.privacy-table th:not(:first-child),
+.privacy-table td {
+  text-align: center;
+}
+.check-control {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.check-control:has(input:disabled) {
+  cursor: not-allowed;
+}
+.switch-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-top: 16px;
+}
+.privacy-content > .form-actions {
+  margin-top: 20px;
+}
+.promotion-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  align-items: start;
+  gap: 24px;
+}
+.promotion-content {
+  padding: 30px;
+}
+.hint {
+  margin: 12px 0;
+  color: var(--account-muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.link-box {
+  margin: 22px 0 16px;
+  padding: 14px;
+  border: 1px solid var(--account-line-soft);
+  border-radius: 7px;
+  background: #f7f8fa;
+}
+.link-box code {
+  color: #44474f;
+  font: 12px/1.8 var(--conference-font-mono);
+  overflow-wrap: anywhere;
+}
+.promotion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+.promotion-tip {
+  margin-top: 30px;
+  padding-top: 26px;
+  border-top: 1px solid var(--account-line-soft);
+}
+.poster-preview {
+  min-width: 0;
+  margin: 0;
+  padding: 20px;
+}
+.poster-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.poster-heading h3 {
+  margin: 5px 0 0;
+  font-size: 16px;
+  font-weight: 750;
+}
+.poster-ratio {
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: #f0f4fa;
+  color: #687386;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.poster-preview figcaption {
+  margin-top: 16px;
+  color: var(--account-muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.promotion-poster {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3/4;
+  background: #07111f;
+  box-shadow: 0 12px 28px rgb(7 17 31 / 12%);
+}
+.poster-placeholder {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  aspect-ratio: 3/4;
+  padding: 24px;
+  background: #07111f;
+  color: #eef2f8;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.poster-qr-source {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 360px;
+  height: 360px;
+  pointer-events: none;
+}
+.record-count {
+  flex-shrink: 0;
+  color: var(--account-muted);
+  font: 10px var(--conference-font-mono);
+}
+.data-list {
+  padding: 0 30px;
+}
+.data-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 0;
+  border-bottom: 1px solid var(--account-line-soft);
+}
+.data-list article:last-child {
+  border-bottom: 0;
+}
+.data-list article > div {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+.data-list article > div:last-child {
+  justify-items: end;
+  text-align: right;
+}
+.data-list strong {
+  font-size: 13px;
+  font-weight: 680;
+  overflow-wrap: anywhere;
+}
+.data-list b {
+  font-size: 18px;
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+}
+.data-list small {
+  color: var(--account-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.status-badge {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  width: fit-content;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: #f2f5fb;
+  color: #48618c;
+  font-size: 10px;
+  font-weight: 650;
+}
+.status-badge.is-success {
+  background: #ecfdf5;
+  color: #047857;
+}
+.document-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.payout-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  align-items: start;
+}
+.stack-form {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  min-width: 0;
+  padding: 30px;
+}
+.stack-form > .account-primary {
+  width: fit-content;
+}
+.inquiry-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+}
+.inquiry-intro {
+  padding: 30px 24px;
+  background: #f7f8fa;
+  border-right: 1px solid var(--account-line-soft);
+}
+.inquiry-intro h3 {
+  margin: 20px 0 12px;
+}
+.inquiry-intro p,
+.inquiry-intro li {
+  color: var(--account-muted);
+  font-size: 12px;
+  line-height: 1.9;
+}
+.inquiry-intro ol {
+  margin: 20px 0;
+  padding-left: 18px;
+  list-style: decimal;
+}
+.inquiry-intro li + li {
+  margin-top: 8px;
+}
+.rules-card {
+  padding: 26px 30px;
+}
+.rules-card h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 750;
+}
+.rules-copy {
+  max-height: 160px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--account-line-soft);
+  border-radius: 7px;
+  background: #fafafa;
+  color: #44474f;
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+.rules-card > .account-primary {
+  margin-top: 6px;
+}
+.account-message {
+  position: sticky;
+  z-index: 15;
+  top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.account-message > span {
+  font-size: 18px;
+  font-weight: 750;
+}
+.account-message p {
+  margin: 0;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.account-message.is-error {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #be123c;
+}
+.account-message.is-success {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #047857;
+}
+.account-empty {
+  padding: 60px 30px;
+}
+.account-empty h2,
+.account-empty h3 {
+  margin: 16px 0 10px;
+  font-size: 22px;
+  font-weight: 720;
+}
+.account-empty p {
+  margin: 0 0 22px;
+  color: var(--account-muted);
+  font-size: 13px;
+  line-height: 1.8;
+}
+.account-loading {
+  display: grid;
+  min-height: 420px;
+  place-content: center;
+  justify-items: center;
+  gap: 15px;
+  color: var(--account-muted);
+}
+.account-loading > span {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--account-line);
+  border-top-color: var(--conference-primary);
+  border-radius: 50%;
+  animation: loading-spin 800ms linear infinite;
+}
+.account-loading p {
+  margin: 0;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 1200px) {
+  .promotion-layout {
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 18px;
+  }
+  .promotion-content {
+    padding: 24px;
+  }
+  .inquiry-layout {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+}
+@media (max-width: 1000px) {
+  .account-workspace {
+    grid-template-columns: 1fr;
+  }
+  .account-rail {
+    z-index: 20;
+    top: max(8px, env(safe-area-inset-top));
+    overflow: visible;
+    box-shadow: 0 8px 24px rgb(15 23 42/7%);
+  }
+  .account-rail__identity,
+  .account-rail__company,
+  .account-rail__footer,
+  .account-nav--desktop {
+    display: none;
+  }
+  .account-mobile-nav {
+    display: block;
+    position: relative;
+  }
+  .account-heading .mobile-partner-status {
+    display: flex;
+    margin-top: 8px;
+  }
+  .account-mobile-trigger {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 48px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 10px;
+    background: #fff;
+    color: var(--account-ink);
+    text-align: left;
+  }
+  .account-mobile-trigger > span {
+    color: var(--conference-primary);
+    font-size: 10px;
+  }
+  .account-mobile-trigger strong {
+    font-size: 12px;
+    font-weight: 750;
+  }
+  .account-mobile-trigger i {
+    font-size: 22px;
+    font-style: normal;
+    text-align: center;
+  }
+  .account-mobile-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: -1px;
+    right: -1px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    padding: 8px;
+    border: 1px solid var(--account-line);
+    border-radius: 9px;
+    background: #fff;
+    box-shadow: 0 12px 24px rgb(15 23 42/10%);
+  }
+  .account-mobile-panel button {
+    min-height: 44px;
+  }
+  .account-message {
+    top: 70px;
+  }
+  .account-content {
+    gap: 28px;
+  }
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  .balance-strip strong {
+    font-size: 24px;
+  }
+  .promotion-layout {
+    grid-template-columns: minmax(0, 1fr) 380px;
+  }
+  .inquiry-layout {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+}
+@media (max-width: 760px) {
+  .account-shell {
+    width: min(100% - 28px, 1180px);
+    padding: 26px 0 calc(72px + env(safe-area-inset-bottom));
+  }
+  .account-heading {
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .account-heading h1 {
+    font-size: 32px;
+  }
+  .account-heading > div > p:last-child {
+    margin-top: 12px;
+    max-width: 30ch;
+    font-size: 12px;
+  }
+  .account-back-link {
+    min-height: 44px;
+    padding: 0 12px;
+    border: 1px solid var(--account-line);
+    border-radius: 7px;
+    background: #fff;
+    font-size: 11px;
+    gap: 6px;
+  }
+  .account-workspace {
+    gap: 20px;
+  }
+  .account-section__heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .account-section__heading > p {
+    max-width: none;
+  }
+  .account-section__heading h2 {
+    font-size: 23px;
+  }
+  .balance-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 0;
+  }
+  .balance-strip > div {
+    padding: 16px;
+  }
+  .balance-strip > div:first-child {
+    padding-left: 16px;
+  }
+  .balance-strip > div:nth-child(2) {
+    border-right: 0;
+  }
+  .balance-strip > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--account-line);
+  }
+  .balance-strip > div:last-child {
+    padding-right: 16px;
+  }
+  .balance-strip strong {
+    font-size: 24px;
+  }
+  .balance-strip small {
+    font-size: 10px;
+  }
+  .account-form {
+    grid-template-columns: 1fr;
+    padding: 22px 20px;
+    gap: 20px;
+  }
+  .surface-heading {
+    padding: 20px;
+  }
+  .privacy-content {
+    padding: 20px;
+  }
+  .privacy-status {
+    max-width: none;
+  }
+  .privacy-table th:first-child {
+    padding-left: 8px;
+  }
+  .privacy-table thead th {
+    font-size: 10px;
+  }
+  .promotion-layout,
+  .payout-layout,
+  .inquiry-layout {
+    grid-template-columns: 1fr;
+  }
+  .promotion-content {
+    padding: 24px 20px;
+  }
+  .poster-preview {
+    width: min(100%, 420px);
+    margin-inline: auto;
+  }
+  .stack-form {
+    padding: 22px 20px;
+  }
+  .data-list {
+    padding: 0 20px;
+  }
+  .data-list article {
+    gap: 12px;
+  }
+  .data-list article > div:last-child {
+    flex-shrink: 0;
+  }
+  .inquiry-intro {
+    padding: 24px 20px;
+    border-right: 0;
+    border-bottom: 1px solid var(--account-line-soft);
+  }
+  .inquiry-intro h3 {
+    margin: 12px 0;
+  }
+  .inquiry-intro ol {
+    margin: 14px 0;
+  }
+  .rules-card {
+    padding: 24px 20px;
+  }
+  .account-empty {
+    padding: 40px 24px;
+  }
+  .section-stack {
+    gap: 24px;
+  }
+  .form-actions {
+    gap: 12px;
+  }
+  .avatar-editor {
+    gap: 14px;
+  }
+  .avatar-editor > div:last-child {
+    min-width: 0;
+  }
+  .gallery-list {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 420px) {
+  .account-heading {
+    flex-wrap: wrap;
+    row-gap: 12px;
+  }
+  .account-heading > div {
+    flex: 1 1 200px;
+  }
+  .account-back-link {
+    min-height: 44px;
+  }
+  .account-mobile-trigger {
+    padding-inline: 12px;
+    gap: 8px;
+  }
+  .account-mobile-panel button {
+    padding-inline: 8px;
+    gap: 8px;
+  }
+  .balance-strip strong {
+    font-size: 23px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
 </style>

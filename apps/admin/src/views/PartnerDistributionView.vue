@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
-import type { PartnerRelationshipView } from '@conference/contracts';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { AdminEnablePartnerSchema, AdminEditPartnerDetailsSchema, type AdminPartnerRelationshipView } from '@conference/contracts';
+import { partnerFieldIssues, partnerServerFieldIssues, type PartnerFieldIssue } from '../lib/partner-form-feedback';
 import AdminConfirmDialog from '../components/AdminConfirmDialog.vue';
 import { conferenceApi, session } from '../lib/api';
 
-type Tab = 'overview' | 'partners' | 'commissions' | 'payouts' | 'settings';
+type Tab = 'overview' | 'commissions' | 'payouts' | 'settings';
 type MoneyRow = Record<string, unknown> & { id?: string; status?: string; version?: number };
 
 const activeTab = ref<Tab>('overview');
@@ -14,7 +15,7 @@ const errorMessage = ref('');
 const successMessage = ref('');
 const enableDialogOpen = ref(false);
 const overview = ref<Record<string, unknown>>({});
-const partners = ref<PartnerRelationshipView[]>([]);
+const partners = ref<AdminPartnerRelationshipView[]>([]);
 const commissions = ref<MoneyRow[]>([]);
 const payoutRequests = ref<MoneyRow[]>([]);
 const payoutBatches = ref<MoneyRow[]>([]);
@@ -24,7 +25,36 @@ const payoutDocuments = ref<MoneyRow[]>([]);
 const reconciliations = ref<MoneyRow[]>([]);
 const payoutSettings = ref<Record<string, unknown>>({});
 const selectedRequestIds = ref<string[]>([]);
-const enableForm = reactive({ publicUserId: '', ratePercent: '10', note: '' });
+const partnerInvitationOpen = ref(false);
+const partnerInvitation = ref<HTMLDialogElement>();
+const partnerInvitationTrigger = ref<HTMLButtonElement>();
+const partnerInvitationError = ref('');
+const partnerInvitationIssues = ref<PartnerFieldIssue[]>([]);
+const enableForm = reactive({
+  mobile: '',
+  displayName: '',
+  company: '',
+  title: '',
+  ratePercent: '',
+  note: '',
+});
+const editingPartner = ref<AdminPartnerRelationshipView | null>(null);
+const partnerEditor = ref<HTMLDialogElement>();
+const partnerEditorError = ref('');
+const partnerEditorIssues = ref<PartnerFieldIssue[]>([]);
+const partnerEditorNotice = ref('');
+const editForm = reactive({
+  displayName: '',
+  company: '',
+  title: '',
+  industry: '',
+  businessIntro: '',
+  businessUrl: '',
+  ratePercent: '',
+  sortOrder: '0',
+  internalNote: '',
+});
+let partnerEditorReturnFocus: HTMLElement | null = null;
 const adjustmentForm = reactive({ partnerId: '', direction: 'credit', amountYuan: '', reason: '' });
 const reconciliationForm = reactive({
   batchId: '',
@@ -80,7 +110,6 @@ const tabs = computed<Array<{ id: Tab; label: string }>>(() => [
   ...(canReadPartners.value || canReadCommissions.value
     ? [{ id: 'overview' as const, label: '概览' }]
     : []),
-  ...(canReadPartners.value ? [{ id: 'partners' as const, label: '合作伙伴' }] : []),
   ...(canReadCommissions.value ? [{ id: 'commissions' as const, label: '佣金订单' }] : []),
   ...(canReviewPayouts.value ? [{ id: 'payouts' as const, label: '提现与对账' }] : []),
   ...(canManageRules.value || canReadPayoutSettings.value
@@ -93,6 +122,17 @@ const commissionTotals = computed(
   () => (overview.value.commissionTotals ?? {}) as Record<string, number>,
 );
 const payoutTotals = computed(() => (overview.value.payoutTotals ?? {}) as Record<string, number>);
+const enableRateValid = computed(() => {
+  if (!enableForm.ratePercent.trim()) return true;
+  const value = Number(enableForm.ratePercent);
+  return Number.isFinite(value) && value >= 0 && value <= 100;
+});
+const editRateValid = computed(() => {
+  if (!editForm.ratePercent.trim()) return true;
+  const value = Number(editForm.ratePercent);
+  return Number.isFinite(value) && value >= 0 && value <= 100;
+});
+
 
 function money(value: unknown) {
   return `¥${(Number(value ?? 0) / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`;
@@ -100,6 +140,10 @@ function money(value: unknown) {
 
 function dateTime(value: unknown) {
   return typeof value === 'string' && value ? new Date(value).toLocaleString('zh-CN') : '暂无';
+}
+
+function mobileDisplay(value: string) {
+  return value.replace(/^\+86/u, '');
 }
 
 function label(value: unknown) {
@@ -278,15 +322,16 @@ async function load() {
   }
 }
 
-async function run(action: () => Promise<unknown>, message: string) {
+async function run<T>(action: () => Promise<T>, message: string): Promise<T | undefined> {
   if (pending.value) return;
   pending.value = true;
   errorMessage.value = '';
   successMessage.value = '';
   try {
-    await action();
+    const result = await action();
     successMessage.value = message;
     await load();
+    return result;
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '操作失败';
   } finally {
@@ -294,21 +339,127 @@ async function run(action: () => Promise<unknown>, message: string) {
   }
 }
 
-function enablePartner() {
-  return run(
-    () =>
-      conferenceApi.enableEventPartner({
-        customerPublicUserId: Number(enableForm.publicUserId),
-        personalRateBps: enableForm.ratePercent ? numberValue(enableForm.ratePercent, 100) : null,
-        sortOrder: 0,
-        internalNote: enableForm.note,
-        sendInvitation: true,
-      }),
-    '合作伙伴资格已开通，用户确认规则后开始归因。',
-  );
+type PartnerFormKind = 'invite' | 'edit';
+
+function fieldIssues(kind: PartnerFormKind) {
+  return kind === 'invite' ? partnerInvitationIssues : partnerEditorIssues;
 }
 
-function updatePartner(item: PartnerRelationshipView, status: 'active' | 'paused' | 'closed') {
+function fieldError(kind: PartnerFormKind, field: string) {
+  return fieldIssues(kind).value.find(issue => issue.field === field)?.message ?? '';
+}
+
+function fieldAttributes(kind: PartnerFormKind, field: string) {
+  return {
+    name: field,
+    'aria-invalid': fieldError(kind, field) ? 'true' as const : undefined,
+    'aria-describedby': fieldError(kind, field) ? `partner-${kind}-${field}-error` : undefined,
+  };
+}
+
+async function focusPartnerFeedback(kind: PartnerFormKind, field?: string) {
+  await nextTick();
+  const dialog = kind === 'invite' ? partnerInvitation.value : partnerEditor.value;
+  const targetField = field ?? fieldIssues(kind).value[0]?.field;
+  const input = targetField ? dialog?.querySelector<HTMLElement>(`[name="${targetField}"]`) : null;
+  if (input) {
+    input.focus({ preventScroll: true });
+    input.scrollIntoView({ block: 'nearest' });
+  } else {
+    dialog?.querySelector<HTMLElement>('.partner-form-feedback')?.focus({ preventScroll: true });
+  }
+}
+
+function clearPartnerFieldError(kind: PartnerFormKind, event: Event) {
+  const field = (event.target as HTMLInputElement | HTMLTextAreaElement).name;
+  fieldIssues(kind).value = fieldIssues(kind).value.filter(issue => issue.field !== field);
+  if (kind === 'invite') partnerInvitationError.value = '';
+  else partnerEditorError.value = '';
+}
+
+function openPartnerInvitation() {
+  if (pending.value || !canManagePartners.value) return;
+  Object.assign(enableForm, {
+    mobile: '',
+    displayName: '',
+    company: '',
+    title: '',
+    ratePercent: '',
+    note: '',
+  });
+  partnerInvitationError.value = '';
+  partnerInvitationIssues.value = [];
+  partnerInvitationOpen.value = true;
+}
+
+function closePartnerInvitation() {
+  if (pending.value) return;
+  partnerInvitationOpen.value = false;
+  partnerInvitationError.value = '';
+}
+
+function handlePartnerInvitationCancel(event: Event) {
+  event.preventDefault();
+  closePartnerInvitation();
+}
+
+async function enablePartner() {
+  if (pending.value) return;
+  partnerInvitationError.value = '';
+  partnerInvitationIssues.value = [];
+  if (!program.value) {
+    partnerInvitationError.value = '请先开启当前大会的分销功能，再邀请合作伙伴。';
+    await focusPartnerFeedback('invite');
+    return;
+  }
+  const parsed = AdminEnablePartnerSchema.safeParse({
+    mobile: enableForm.mobile.trim(),
+    ...(enableForm.displayName.trim() ? { displayName: enableForm.displayName.trim() } : {}),
+    ...(enableForm.company.trim() ? { company: enableForm.company.trim() } : {}),
+    ...(enableForm.title.trim() ? { title: enableForm.title.trim() } : {}),
+    personalRateBps: enableRateValid.value
+      ? (enableForm.ratePercent.trim() ? numberValue(enableForm.ratePercent, 100) : null)
+      : NaN,
+    sortOrder: 0,
+    internalNote: enableForm.note,
+    sendInvitation: true,
+  });
+  if (!parsed.success) {
+    partnerInvitationIssues.value = partnerFieldIssues(parsed.error.issues);
+    await focusPartnerFeedback('invite');
+    return;
+  }
+  pending.value = true;
+  errorMessage.value = '';
+  successMessage.value = '';
+  try {
+    const enabledPartner = await conferenceApi.enableEventPartner(parsed.data);
+    await load();
+    partnerInvitationOpen.value = false;
+    await nextTick();
+    if (!enabledPartner.created) {
+      const existing = partners.value.find(item => item.id === enabledPartner.id);
+      if (existing) {
+        openPartnerEditor(existing);
+        partnerEditorNotice.value = '该手机号已是本大会的合作伙伴，已打开已有资料供你编辑。';
+        successMessage.value = '该手机号已经是合作伙伴，已为你打开资料编辑。';
+      } else {
+        successMessage.value = '该手机号已经是合作伙伴，请刷新列表后编辑资料。';
+      }
+    } else {
+      successMessage.value = '合作伙伴资格已就绪，对方可使用该手机号验证码登录并确认合作规则。';
+    }
+    Object.assign(enableForm, { mobile: '', displayName: '', company: '', title: '', ratePercent: '', note: '' });
+  } catch (error) {
+    partnerInvitationIssues.value = partnerServerFieldIssues(error);
+    partnerInvitationError.value = error instanceof Error ? error.message : '合作伙伴开通失败，请重试。';
+  } finally {
+    pending.value = false;
+  }
+  if (partnerInvitationOpen.value) await focusPartnerFeedback('invite');
+}
+
+function updatePartner(item: AdminPartnerRelationshipView, status: 'active' | 'paused' | 'closed') {
   return run(
     () =>
       conferenceApi.updateEventPartner(item.id, {
@@ -318,6 +469,79 @@ function updatePartner(item: PartnerRelationshipView, status: 'active' | 'paused
       }),
     '合作伙伴状态已更新。',
   );
+}
+
+function openPartnerEditor(item: AdminPartnerRelationshipView) {
+  partnerEditorReturnFocus =
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  partnerEditorError.value = '';
+  partnerEditorIssues.value = [];
+  partnerEditorNotice.value = '';
+  editForm.displayName = item.profile.displayName;
+  editForm.company = item.profile.company;
+  editForm.title = item.profile.title;
+  editForm.industry = item.profile.industry;
+  editForm.businessIntro = item.profile.businessIntro;
+  editForm.businessUrl = item.profile.businessUrl;
+  editForm.ratePercent = item.personalRateBps === null ? '' : String(item.personalRateBps / 100);
+  editForm.sortOrder = String(item.sortOrder);
+  editForm.internalNote = item.internalNote;
+  editingPartner.value = item;
+}
+
+function closePartnerEditor() {
+  if (pending.value) return;
+  editingPartner.value = null;
+  partnerEditorError.value = '';
+}
+
+function handlePartnerEditorCancel(event: Event) {
+  event.preventDefault();
+  closePartnerEditor();
+}
+
+async function savePartnerDetails() {
+  const item = editingPartner.value;
+  if (!item || pending.value) return;
+  partnerEditorError.value = '';
+  partnerEditorIssues.value = [];
+  const parsed = AdminEditPartnerDetailsSchema.safeParse({
+    expectedVersion: item.version,
+    displayName: editForm.displayName.trim(),
+    company: editForm.company.trim(),
+    title: editForm.title.trim(),
+    industry: editForm.industry.trim(),
+    businessIntro: editForm.businessIntro.trim(),
+    businessUrl: editForm.businessUrl.trim(),
+    personalRateBps: editRateValid.value
+      ? (editForm.ratePercent.trim() ? numberValue(editForm.ratePercent, 100) : null)
+      : NaN,
+    sortOrder: Number(editForm.sortOrder),
+    internalNote: editForm.internalNote.trim(),
+  });
+  if (!parsed.success) {
+    partnerEditorIssues.value = partnerFieldIssues(parsed.error.issues);
+    partnerEditorError.value = partnerEditorIssues.value.length ? '' : '资料状态已变化，请关闭弹窗并刷新列表后重试。';
+    await focusPartnerFeedback('edit');
+    return;
+  }
+  pending.value = true;
+  errorMessage.value = '';
+  successMessage.value = '';
+  try {
+    await conferenceApi.updateEventPartnerDetails(item.id, parsed.data);
+    editingPartner.value = null;
+    successMessage.value = '合作伙伴资料和佣金设置已更新。';
+    await load();
+  } catch (error) {
+    partnerEditorIssues.value = partnerServerFieldIssues(error);
+    partnerEditorError.value = error instanceof Error ? error.message : '合作伙伴资料保存失败，请重试。';
+  } finally {
+    pending.value = false;
+  }
+  if (editingPartner.value) await focusPartnerFeedback('edit');
 }
 
 function publishProgram() {
@@ -570,6 +794,32 @@ async function exportPayouts() {
 }
 
 watch(program, hydrateProgram);
+watch(partnerInvitationOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    if (partnerInvitationOpen.value && partnerInvitation.value && !partnerInvitation.value.open) {
+      partnerInvitation.value.showModal();
+    }
+    return;
+  }
+  if (partnerInvitation.value?.open) partnerInvitation.value.close();
+  partnerInvitationTrigger.value?.focus();
+});
+watch(editingPartner, async (item) => {
+  const dialog = partnerEditor.value;
+  if (item) {
+    await nextTick();
+    if (partnerEditor.value && !partnerEditor.value.open) partnerEditor.value.showModal();
+    return;
+  }
+  if (dialog?.open) dialog.close();
+  partnerEditorReturnFocus?.focus();
+  partnerEditorReturnFocus = null;
+});
+onBeforeUnmount(() => {
+  if (partnerInvitation.value?.open) partnerInvitation.value.close();
+  if (partnerEditor.value?.open) partnerEditor.value.close();
+});
 onMounted(() => void load());
 </script>
 
@@ -667,41 +917,28 @@ onMounted(() => void load());
         </div>
       </dl>
     </section>
-  </template>
-
-  <template v-else-if="activeTab === 'partners'">
-    <section v-if="canManagePartners" class="partner-panel inline-form">
-      <div>
-        <p class="eyebrow">QUICK ENABLE</p>
-        <h2>按大会开通合作伙伴</h2>
-        <p>用户编号可在系统管理的用户列表查看。</p>
-      </div>
-      <label>用户编号<input
-        v-model="enableForm.publicUserId"
-        inputmode="numeric"
-        placeholder="例如 1024"
-      /></label>
-      <label>个人佣金比例<input v-model="enableForm.ratePercent" inputmode="decimal" /><span>%</span></label>
-      <label>内部备注<input v-model="enableForm.note" maxlength="2000" /></label>
-      <button
-        class="button"
-        type="button"
-        :disabled="pending || !enableForm.publicUserId"
-        @click="enablePartner"
-      >
-        开通资格
-      </button>
-    </section>
-    <section class="partner-panel">
+    <section v-if="canReadPartners" class="partner-panel partner-directory-panel">
       <div class="panel-heading">
         <div>
           <p class="eyebrow">PARTNER DIRECTORY</p>
           <h2>合作伙伴列表</h2>
         </div>
-        <span>{{ partners.length }} 人</span>
+        <div class="partner-directory-actions">
+          <span>{{ partners.length }} 人</span>
+          <button
+            v-if="canManagePartners"
+            ref="partnerInvitationTrigger"
+            class="button compact"
+            type="button"
+            :disabled="pending"
+            @click="openPartnerInvitation"
+          >
+            新增合作伙伴
+          </button>
+        </div>
       </div>
-      <div class="data-table-wrap">
-        <table class="data-table">
+      <div class="data-table-wrap partner-directory-wrap">
+        <table class="data-table partner-directory-table">
           <thead>
             <tr>
               <th>伙伴</th>
@@ -714,20 +951,35 @@ onMounted(() => void load());
           </thead>
           <tbody>
             <tr v-for="item in partners" :key="item.id">
-              <td>
-                <strong>{{ item.profile.displayName }}</strong><small>{{ item.profile.company || '未填写公司' }}</small>
+              <td data-label="伙伴">
+                <strong>{{ item.profile.displayName }}</strong>
+                <small>
+                  {{
+                    [item.profile.company, item.profile.title].filter(Boolean).join(' · ') ||
+                      '待补充资料'
+                  }}
+                </small>
+                <small>{{ mobileDisplay(item.loginMobile) }}</small>
               </td>
-              <td>{{ label(item.profile.publicStatus) }}</td>
-              <td>{{ (item.personalRateBps ?? item.currentProgram?.fixedRateBps ?? 0) / 100 }}%</td>
-              <td>
+              <td data-label="公开资料">{{ label(item.profile.publicStatus) }}</td>
+              <td data-label="佣金比例">
+                <strong>{{
+                  (item.personalRateBps ?? item.currentProgram?.fixedRateBps ?? 0) / 100
+                }}%</strong>
+                <small>{{ item.personalRateBps === null ? '继承大会规则' : '个人比例' }}</small>
+              </td>
+              <td data-label="收益余额">
                 {{ money(item.balances.available)
                 }}<small>占用 {{ money(item.balances.reserved) }}</small>
               </td>
-              <td>
+              <td data-label="状态">
                 <span class="status-badge">{{ label(item.qualificationStatus) }}</span>
               </td>
-              <td>
+              <td data-label="操作">
                 <div class="row-actions">
+                  <button v-if="canManagePartners" type="button" @click="openPartnerEditor(item)">
+                    编辑
+                  </button>
                   <button
                     v-if="canManagePartners && item.qualificationStatus !== 'active'"
                     type="button"
@@ -1295,6 +1547,364 @@ onMounted(() => void load());
     </section>
   </template>
 
+  <Teleport to="body">
+    <dialog
+      ref="partnerInvitation"
+      class="partner-dialog partner-invite-dialog"
+      aria-labelledby="partner-invite-title"
+      aria-describedby="partner-invite-description"
+      @cancel="handlePartnerInvitationCancel"
+    >
+      <form
+        v-if="partnerInvitationOpen"
+        class="partner-modal-form partner-invite-form"
+        novalidate
+        @input="clearPartnerFieldError('invite', $event)"
+        @submit.prevent="enablePartner"
+      >
+        <header class="partner-edit-head">
+          <div>
+            <p class="eyebrow">NEW PARTNER</p>
+            <h2 id="partner-invite-title">新增合作伙伴</h2>
+            <p id="partner-invite-description">
+              输入手机号即可邀请。新手机号会自动建立普通用户账号，对方使用验证码登录后确认合作规则。
+            </p>
+          </div>
+          <button
+            class="partner-edit-close"
+            type="button"
+            aria-label="关闭新增合作伙伴"
+            :disabled="pending"
+            @click="closePartnerInvitation"
+          >
+            ×
+          </button>
+        </header>
+
+        <section v-if="partnerInvitationError || partnerInvitationIssues.length" class="partner-form-feedback" role="alert" tabindex="-1">
+          <span class="partner-feedback-icon" aria-hidden="true">!</span>
+          <div>
+            <h3>{{ partnerInvitationIssues.length ? `请检查以下 ${partnerInvitationIssues.length} 项内容` : '提交未完成' }}</h3>
+            <ul v-if="partnerInvitationIssues.length">
+              <li v-for="issue in partnerInvitationIssues" :key="issue.field">
+                <button type="button" @click="focusPartnerFeedback('invite', issue.field)">{{ issue.message }}</button>
+              </li>
+            </ul>
+            <p v-else>{{ partnerInvitationError }}</p>
+          </div>
+        </section>
+
+        <div class="partner-edit-body">
+          <div v-if="!program" class="quick-enable-locked partner-invite-locked">
+            <div>
+              <strong>当前大会尚未开启分销功能</strong>
+              <p>请先确认佣金与归因规则，再邀请合作伙伴。</p>
+            </div>
+            <div v-if="canManageRules" class="quick-enable-actions">
+              <button
+                class="button compact"
+                type="button"
+                :disabled="pending"
+                @click="
+                  closePartnerInvitation();
+                  requestEnableDistribution();
+                "
+              >
+                一键开启分销
+              </button>
+              <button
+                class="button secondary compact"
+                type="button"
+                @click="
+                  closePartnerInvitation();
+                  openDistributionSettings();
+                "
+              >
+                查看分销设置
+              </button>
+            </div>
+            <p v-else class="quick-enable-permission-note">
+              请联系拥有分销设置权限的管理员开启当前大会的分销功能。
+            </p>
+          </div>
+          <fieldset v-else class="quick-enable-form" :disabled="pending">
+            <label><span>合作伙伴手机号 <span class="required-mark">必填</span></span>
+              <input
+                v-model="enableForm.mobile"
+                v-bind="fieldAttributes('invite', 'mobile')"
+                type="tel"
+                required
+                autofocus
+                inputmode="tel"
+                autocomplete="tel"
+                maxlength="14"
+                placeholder="请输入 11 位大陆手机号"
+              />
+              <small v-if="fieldError('invite', 'mobile')" id="partner-invite-mobile-error" class="partner-field-error">
+                {{ fieldError('invite', 'mobile') }}
+              </small>
+            </label>
+            <label><span>姓名 / 展示名称 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="enableForm.displayName"
+                v-bind="fieldAttributes('invite', 'displayName')"
+                maxlength="80"
+                autocomplete="name"
+                placeholder="例如 张三"
+              />
+              <small v-if="fieldError('invite', 'displayName')" id="partner-invite-displayName-error" class="partner-field-error">
+                {{ fieldError('invite', 'displayName') }}
+              </small>
+            </label>
+            <label><span>公司 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="enableForm.company"
+                v-bind="fieldAttributes('invite', 'company')"
+                maxlength="160"
+                autocomplete="organization"
+                placeholder="例如 北京某某科技有限公司"
+              />
+              <small v-if="fieldError('invite', 'company')" id="partner-invite-company-error" class="partner-field-error">
+                {{ fieldError('invite', 'company') }}
+              </small>
+            </label>
+            <label><span>职务 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="enableForm.title"
+                v-bind="fieldAttributes('invite', 'title')"
+                maxlength="100"
+                autocomplete="organization-title"
+                placeholder="例如 市场副总裁"
+              />
+              <small v-if="fieldError('invite', 'title')" id="partner-invite-title-error" class="partner-field-error">
+                {{ fieldError('invite', 'title') }}
+              </small>
+            </label>
+            <label><span>个人佣金比例 <span class="optional-mark">选填</span></span>
+              <span class="input-unit">
+                <input
+                  v-model="enableForm.ratePercent"
+                  v-bind="fieldAttributes('invite', 'personalRateBps')"
+                  inputmode="decimal"
+                  placeholder="留空按大会规则"
+                />
+                <span>%</span>
+              </span>
+              <small v-if="fieldError('invite', 'personalRateBps')" id="partner-invite-personalRateBps-error" class="partner-field-error">
+                {{ fieldError('invite', 'personalRateBps') }}
+              </small>
+            </label>
+            <label><span>内部备注 <span class="optional-mark">选填，仅后台可见</span></span>
+              <textarea
+                v-model="enableForm.note"
+                v-bind="fieldAttributes('invite', 'internalNote')"
+                maxlength="2000"
+                rows="3"
+                placeholder="记录合作来源、负责人或特殊约定"
+              />
+              <small v-if="fieldError('invite', 'internalNote')" id="partner-invite-internalNote-error" class="partner-field-error">
+                {{ fieldError('invite', 'internalNote') }}
+              </small>
+            </label>
+          </fieldset>
+        </div>
+        <footer class="partner-edit-footer">
+          <button
+            class="button secondary"
+            type="button"
+            :disabled="pending"
+            @click="closePartnerInvitation"
+          >
+            取消
+          </button>
+          <button
+            v-if="program"
+            class="button"
+            type="submit"
+            :disabled="pending"
+          >
+            {{ pending ? '正在开通…' : '邀请并开通' }}
+          </button>
+        </footer>
+      </form>
+    </dialog>
+  </Teleport>
+
+  <Teleport to="body">
+    <dialog
+      ref="partnerEditor"
+      class="partner-dialog partner-edit-dialog"
+      aria-labelledby="partner-edit-title"
+      @cancel="handlePartnerEditorCancel"
+    >
+      <form v-if="editingPartner" class="partner-modal-form partner-edit-form" novalidate @input="clearPartnerFieldError('edit', $event)" @submit.prevent="savePartnerDetails">
+        <header class="partner-edit-head">
+          <div>
+            <p class="eyebrow">EDIT PARTNER</p>
+            <h2 id="partner-edit-title">编辑合作伙伴</h2>
+            <p>资料修改仅作用于当前大会，佣金比例从后续符合条件的订单开始生效。</p>
+          </div>
+          <button
+            class="partner-edit-close"
+            type="button"
+            aria-label="关闭编辑"
+            :disabled="pending"
+            @click="closePartnerEditor"
+          >
+            ×
+          </button>
+        </header>
+
+        <p v-if="partnerEditorNotice" class="partner-editor-notice" role="status">{{ partnerEditorNotice }}</p>
+
+        <section v-if="partnerEditorError || partnerEditorIssues.length" class="partner-form-feedback" role="alert" tabindex="-1">
+          <span class="partner-feedback-icon" aria-hidden="true">!</span>
+          <div>
+            <h3>{{ partnerEditorIssues.length ? `请检查以下 ${partnerEditorIssues.length} 项内容` : '提交未完成' }}</h3>
+            <ul v-if="partnerEditorIssues.length">
+              <li v-for="issue in partnerEditorIssues" :key="issue.field">
+                <button type="button" @click="focusPartnerFeedback('edit', issue.field)">{{ issue.message }}</button>
+              </li>
+            </ul>
+            <p v-else>{{ partnerEditorError }}</p>
+          </div>
+        </section>
+
+
+        <div class="partner-edit-body">
+          <section class="partner-edit-section" aria-labelledby="partner-basic-title">
+            <div>
+              <h3 id="partner-basic-title">基础资料</h3>
+              <p>这些资料用于当前大会的合作伙伴名片和详情页。</p>
+            </div>
+            <label>登录手机号
+              <input :value="mobileDisplay(editingPartner.loginMobile)" type="tel" readonly />
+              <small>手机号是登录账号。如需更换，请在系统用户管理中处理。</small>
+            </label>
+            <label><span>姓名 / 展示名称 <span class="required-mark">必填</span></span>
+              <input
+                v-model="editForm.displayName"
+                v-bind="fieldAttributes('edit', 'displayName')" maxlength="80" required
+              />
+              <small v-if="fieldError('edit', 'displayName')" id="partner-edit-displayName-error" class="partner-field-error">
+                {{ fieldError('edit', 'displayName') }}
+              </small>
+            </label>
+            <label><span>公司 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="editForm.company"
+                v-bind="fieldAttributes('edit', 'company')" maxlength="160"
+              />
+              <small v-if="fieldError('edit', 'company')" id="partner-edit-company-error" class="partner-field-error">
+                {{ fieldError('edit', 'company') }}
+              </small>
+            </label>
+            <label><span>职务 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="editForm.title"
+                v-bind="fieldAttributes('edit', 'title')" maxlength="100"
+              />
+              <small v-if="fieldError('edit', 'title')" id="partner-edit-title-error" class="partner-field-error">
+                {{ fieldError('edit', 'title') }}
+              </small>
+            </label>
+            <label><span>行业 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="editForm.industry"
+                v-bind="fieldAttributes('edit', 'industry')" maxlength="80"
+              />
+              <small v-if="fieldError('edit', 'industry')" id="partner-edit-industry-error" class="partner-field-error">
+                {{ fieldError('edit', 'industry') }}
+              </small>
+            </label>
+            <label><span>个人 / 业务介绍 <span class="optional-mark">选填</span></span>
+              <textarea
+                v-model="editForm.businessIntro"
+                v-bind="fieldAttributes('edit', 'businessIntro')" maxlength="2000" rows="5"
+              />
+              <small v-if="fieldError('edit', 'businessIntro')" id="partner-edit-businessIntro-error" class="partner-field-error">
+                {{ fieldError('edit', 'businessIntro') }}
+              </small>
+            </label>
+            <label><span>业务链接 <span class="optional-mark">选填</span></span>
+              <input
+                v-model="editForm.businessUrl"
+                v-bind="fieldAttributes('edit', 'businessUrl')"
+                type="url"
+                maxlength="500"
+                placeholder="https://"
+              />
+              <small v-if="fieldError('edit', 'businessUrl')" id="partner-edit-businessUrl-error" class="partner-field-error">
+                {{ fieldError('edit', 'businessUrl') }}
+              </small>
+            </label>
+            <p class="partner-edit-tip">
+              联系方式和公开范围由合作伙伴登录个人中心确认，后台不会代替本人公开隐私信息。
+            </p>
+          </section>
+
+          <section class="partner-edit-section" aria-labelledby="partner-commercial-title">
+            <div>
+              <h3 id="partner-commercial-title">推广设置</h3>
+              <p>调整只影响后续新订单，已经入账的佣金保留原计算结果。</p>
+            </div>
+            <label><span>个人佣金比例 <span class="optional-mark">选填</span></span>
+              <span class="input-unit">
+                <input
+                  v-model="editForm.ratePercent"
+                  v-bind="fieldAttributes('edit', 'personalRateBps')"
+                  inputmode="decimal"
+                  placeholder="留空按大会规则"
+                />
+                <span>%</span>
+              </span>
+              <small>留空继承大会规则；填写 0 表示不计佣金。</small>
+              <small v-if="fieldError('edit', 'personalRateBps')" id="partner-edit-personalRateBps-error" class="partner-field-error">
+                {{ fieldError('edit', 'personalRateBps') }}
+              </small>
+            </label>
+            <label><span>展示顺序</span>
+              <input
+                v-model="editForm.sortOrder"
+                v-bind="fieldAttributes('edit', 'sortOrder')" inputmode="numeric"
+              />
+              <small>数值越小，在公开目录中的位置越靠前。</small>
+              <small v-if="fieldError('edit', 'sortOrder')" id="partner-edit-sortOrder-error" class="partner-field-error">
+                {{ fieldError('edit', 'sortOrder') }}
+              </small>
+            </label>
+            <label><span>内部备注 <span class="optional-mark">选填，仅后台可见</span></span>
+              <textarea
+                v-model="editForm.internalNote"
+                v-bind="fieldAttributes('edit', 'internalNote')" maxlength="2000" rows="4"
+              />
+              <small v-if="fieldError('edit', 'internalNote')" id="partner-edit-internalNote-error" class="partner-field-error">
+                {{ fieldError('edit', 'internalNote') }}
+              </small>
+            </label>
+          </section>
+        </div>
+        <footer class="partner-edit-footer">
+          <button
+            class="button secondary"
+            type="button"
+            :disabled="pending"
+            @click="closePartnerEditor"
+          >
+            取消
+          </button>
+          <button
+            class="button"
+            type="submit"
+            :disabled="pending"
+          >
+            {{ pending ? '正在保存…' : '保存修改' }}
+          </button>
+        </footer>
+      </form>
+    </dialog>
+  </Teleport>
+
   <AdminConfirmDialog
     :open="enableDialogOpen"
     title="确认开启合作伙伴分销？"
@@ -1439,21 +2049,85 @@ onMounted(() => void load());
   color: #163b66;
   font-weight: 700;
 }
-.inline-form {
+.partner-directory-panel .panel-heading {
+  flex-wrap: wrap;
+}
+.partner-directory-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.partner-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(880px, calc(100dvh - 32px));
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #dbe5f0;
+  border-radius: 18px;
+  background: #fff;
+  color: #17385e;
+  box-shadow: 0 24px 60px rgba(15, 38, 66, 0.2);
+}
+.partner-modal-form {
+  display: flex;
+  flex-direction: column;
+  max-height: min(878px, calc(100dvh - 34px));
+}
+.partner-modal-form > header,
+.partner-modal-form > footer,
+.partner-modal-form > .partner-form-feedback,
+.partner-modal-form > .partner-editor-notice {
+  flex-shrink: 0;
+}
+.partner-invite-form .partner-invite-locked {
+  align-items: flex-start;
+  flex-direction: column;
+}
+.partner-invite-locked .quick-enable-permission-note {
+  text-align: left;
+}
+.quick-enable-form {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(150px, 1fr)) auto;
-  gap: 14px;
-  align-items: end;
-}
-.inline-form h2 {
-  margin: 3px 0 5px;
-  color: #102e52;
-}
-.inline-form p {
+  min-width: 0;
   margin: 0;
-  color: #69788a;
+  padding: 0;
+  border: 0;
+  gap: 16px;
 }
-.inline-form label,
+.quick-enable-locked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px;
+  border: 1px solid #dbe5f0;
+  border-radius: 12px;
+  background: #f7f9fc;
+}
+.quick-enable-locked strong {
+  display: block;
+  color: #17385e;
+}
+.quick-enable-locked p {
+  margin: 5px 0 0;
+  color: #68788b;
+  font-size: 13px;
+}
+.quick-enable-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+.quick-enable-locked .quick-enable-permission-note {
+  max-width: 360px;
+  margin: 0;
+  text-align: right;
+}
+.quick-enable-form label,
 .settings-form label {
   display: grid;
   gap: 7px;
@@ -1461,7 +2135,8 @@ onMounted(() => void load());
   font-size: 13px;
   font-weight: 650;
 }
-.inline-form input,
+.quick-enable-form input,
+.quick-enable-form textarea,
 .settings-form input,
 .settings-form select,
 .settings-form textarea {
@@ -1473,6 +2148,27 @@ onMounted(() => void load());
   padding: 10px 12px;
   color: #17385e;
   font: inherit;
+}
+.quick-enable-form textarea,
+.partner-edit-form textarea {
+  resize: vertical;
+}
+.required-mark,
+.optional-mark {
+  margin-left: 5px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.required-mark {
+  color: #b42318;
+}
+.optional-mark {
+  color: #7b899a;
+}
+.quick-enable-form small {
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 500;
 }
 .data-table td strong,
 .data-table td small {
@@ -1493,6 +2189,184 @@ onMounted(() => void load());
   background: #fff;
   padding: 6px 9px;
   color: #21466f;
+  cursor: pointer;
+}
+.partner-dialog::backdrop {
+  background: rgba(14, 32, 52, 0.42);
+  backdrop-filter: blur(2px);
+}
+.partner-form-feedback {
+  display: flex;
+  gap: 10px;
+  max-height: min(180px, 23dvh);
+  margin: 16px 30px 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid #f0a6a6;
+  border-left: 4px solid #c83535;
+  border-radius: 10px;
+  color: #9b2222;
+  background: #fff1f1;
+}
+.partner-feedback-icon {
+  display: grid;
+  flex: 0 0 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  color: white;
+  background: #b42318;
+  font-weight: 700;
+}
+.partner-form-feedback h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.partner-form-feedback ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.partner-form-feedback li + li {
+  margin-top: 6px;
+}
+.partner-form-feedback p,
+.partner-form-feedback button {
+  margin: 0;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.partner-form-feedback button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.partner-editor-notice {
+  margin: 16px 30px 0;
+  padding: 12px 14px;
+  border: 1px solid #b9d1ea;
+  border-radius: 10px;
+  background: #eef5fc;
+  color: #234e7c;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.partner-modal-form input[aria-invalid='true'],
+.partner-modal-form textarea[aria-invalid='true'] {
+  border-color: #c83535;
+  background: #fff8f8;
+}
+.partner-modal-form .partner-field-error {
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+.partner-edit-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 28px 30px 22px;
+  border-bottom: 1px solid #e1e8f0;
+}
+.partner-edit-head h2 {
+  margin: 4px 0 8px;
+  color: #102e52;
+  font:
+    700 28px/1.2 Georgia,
+    'Songti SC',
+    serif;
+}
+.partner-edit-head p:last-child,
+.partner-edit-section > div > p {
+  margin: 0;
+  color: #69788a;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.partner-edit-close {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border: 1px solid #d4deea;
+  border-radius: 50%;
+  background: #fff;
+  color: #43576e;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+.partner-edit-body {
+  display: grid;
+  gap: 18px;
+  padding: 22px 30px 30px;
+  overflow: auto;
+}
+.partner-edit-section {
+  display: grid;
+  gap: 15px;
+  padding: 20px;
+  border: 1px solid #dde6f0;
+  border-radius: 14px;
+  background: #fbfcfe;
+}
+.partner-edit-section h3 {
+  margin: 0 0 4px;
+  color: #17385e;
+  font-size: 17px;
+}
+.partner-edit-section label {
+  display: grid;
+  gap: 7px;
+  color: #405168;
+  font-size: 13px;
+  font-weight: 650;
+}
+.partner-edit-section input,
+.partner-edit-section textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #ccd7e5;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  color: #17385e;
+  font: inherit;
+}
+.partner-edit-section input[readonly] {
+  background: #f1f5f9;
+  color: #627186;
+}
+.partner-edit-section small {
+  color: #758398;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.partner-edit-tip {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.partner-edit-tip {
+  background: #eef4fa;
+  color: #50657c;
+}
+.partner-edit-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 18px 30px;
+  border-top: 1px solid #e1e8f0;
+  background: #fff;
 }
 .partner-settings-grid {
   display: grid;
@@ -1543,9 +2417,6 @@ onMounted(() => void load());
   .partner-metrics {
     grid-template-columns: repeat(2, 1fr);
   }
-  .inline-form {
-    grid-template-columns: 1fr 1fr;
-  }
   .partner-settings-grid {
     grid-template-columns: 1fr;
   }
@@ -1553,11 +2424,86 @@ onMounted(() => void load());
 @media (max-width: 680px) {
   .partner-metrics,
   .field-pair,
-  .inline-form {
+  .quick-enable-form {
     grid-template-columns: 1fr;
+  }
+  .quick-enable-locked {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .quick-enable-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+  .quick-enable-actions .button {
+    width: 100%;
+  }
+  .quick-enable-locked .quick-enable-permission-note {
+    max-width: none;
+    text-align: left;
   }
   .partner-panel {
     padding: 16px;
+  }
+  .partner-directory-wrap {
+    overflow: visible;
+  }
+  .partner-directory-table,
+  .partner-directory-table tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .partner-directory-table thead {
+    display: none;
+  }
+  .partner-directory-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px 18px;
+    padding: 16px 0;
+    border-bottom: 1px solid #e1e7ef;
+  }
+  .partner-directory-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .partner-directory-table td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+  .partner-directory-table td::before {
+    display: block;
+    margin-bottom: 5px;
+    color: #8793a2;
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+  }
+  .partner-directory-table td:first-child,
+  .partner-directory-table td:last-child,
+  .partner-directory-table td.admin-empty {
+    grid-column: 1 / -1;
+  }
+  .partner-directory-table td:first-child {
+    padding-bottom: 12px;
+    border-bottom: 1px solid #eef2f7;
+  }
+  .partner-directory-table td:last-child {
+    padding-top: 2px;
+  }
+  .partner-directory-table td.admin-empty {
+    padding: 24px 0;
+    border-bottom: 0;
+  }
+  .partner-directory-table td.admin-empty::before {
+    content: none;
+  }
+  .partner-directory-table .row-actions button {
+    min-height: 38px;
+    padding-inline: 13px;
   }
   .panel-heading {
     display: block;
@@ -1571,6 +2517,25 @@ onMounted(() => void load());
   }
   .partner-tabs {
     margin-inline: -4px;
+  }
+  .partner-edit-head {
+    padding: 20px 18px 16px;
+  }
+  .partner-edit-head h2 {
+    font-size: 24px;
+  }
+  .partner-edit-body {
+    padding: 16px 18px 24px;
+  }
+  .partner-edit-section {
+    padding: 16px;
+  }
+  .partner-form-feedback,
+  .partner-editor-notice {
+    margin: 12px 18px 0;
+  }
+  .partner-edit-footer {
+    padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
   }
 }
 .file-action {

@@ -91,7 +91,8 @@ persistent('batch inventory and deployment gates with real PostgreSQL', () => {
       opened.push(connection);
       const client = await connection.pool.connect();
       try {
-        for (const migration of migrations.slice(0, index === 0 ? 66 : 65)) {
+        const selectedMigrations = index === 0 ? migrations : migrations.slice(0, 65);
+        for (const migration of selectedMigrations) {
           await client.query('begin');
           for (const statement of migration.sql) await client.query(statement);
           await client.query('commit');

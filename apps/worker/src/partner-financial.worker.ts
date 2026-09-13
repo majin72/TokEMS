@@ -29,7 +29,7 @@ import {
   type ConferenceDatabase,
 } from '@conference/database';
 import { decryptIntegrationCredentials } from '@conference/security';
-import { and, asc, count, eq, gt, gte, inArray, isNull, lt, lte, or, sql, sum } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, isNull, lt, lte, max, or, sql, sum } from 'drizzle-orm';
 
 type FinancialEventType = 'PaymentSucceeded' | 'RefundSucceeded' | 'PartnerAttendeeClaimed';
 
@@ -141,20 +141,19 @@ async function consumePayment(
       .innerJoin(registrations, eq(registrations.id, orderItems.registrationId))
       .where(eq(orderItems.orderId, orderId))
       .orderBy(asc(orderItems.position));
-    const [previousCount] = await tx
-      .select({ value: count(partnerCommissions.id) })
+    const [history] = await tx
+      .select({
+        lastSequence: max(partnerCommissions.sequence),
+        eligibleOrderCount: sql<number>`count(*) filter (where ${partnerCommissions.eligibleAmount} > 0)`,
+      })
       .from(partnerCommissions)
-      .where(
-        and(
-          eq(partnerCommissions.partnerId, scope.attribution.partnerId),
-          gt(partnerCommissions.commissionAmount, partnerCommissions.reversedAmount),
-        ),
-      );
+      .where(eq(partnerCommissions.partnerId, scope.attribution.partnerId));
     if (!partner || !program || !scope.payment.succeededAt) return;
-    const sequence = Number(previousCount?.value ?? 0) + 1;
+    // The immutable ledger sequence also includes excluded and fully reversed orders.
+    const sequence = Number(history?.lastSequence ?? 0) + 1;
     const rateBps = resolvePartnerCommissionRate(
       program,
-      sequence,
+      Number(history?.eligibleOrderCount ?? 0) + 1,
       scope.attribution.personalRateBps,
     );
     const eligibleTickets = new Set(program.eligibleTicketTypeIds);
@@ -255,7 +254,10 @@ async function consumePayment(
   });
 }
 
-async function recalculateCommission(db: ConferenceDatabase, commissionId: string) {
+async function recalculateCommission(
+  db: Pick<ConferenceDatabase, 'select' | 'update'>,
+  commissionId: string,
+) {
   const [totals] = await db
     .select({
       eligible: sum(partnerCommissionItems.eligibleAmount),
@@ -267,11 +269,22 @@ async function recalculateCommission(db: ConferenceDatabase, commissionId: strin
     .where(eq(partnerCommissionItems.commissionId, commissionId));
   const commissionAmount = Number(totals?.commission ?? 0);
   const reversedAmount = Number(totals?.reversed ?? 0);
+  const eligibleAmount = Number(totals?.eligible ?? 0);
+  const refundedAmount = Number(totals?.refunded ?? 0);
   const [current] = await db
-    .select({ status: partnerCommissions.status })
+    .select()
     .from(partnerCommissions)
     .where(eq(partnerCommissions.id, commissionId))
     .limit(1);
+  if (
+    !current ||
+    (current.eligibleAmount === eligibleAmount &&
+      current.refundedAmount === refundedAmount &&
+      current.commissionAmount === commissionAmount &&
+      current.reversedAmount === reversedAmount)
+  ) {
+    return;
+  }
   const [recovery] = await db
     .select({ value: sum(partnerLedgerEntries.amount) })
     .from(partnerLedgerEntries)
@@ -289,12 +302,12 @@ async function recalculateCommission(db: ConferenceDatabase, commissionId: strin
         ? 'reversed'
         : reversedAmount > 0
           ? 'partially_reversed'
-          : (current?.status ?? 'pending');
+          : current.status;
   await db
     .update(partnerCommissions)
     .set({
-      eligibleAmount: Number(totals?.eligible ?? 0),
-      refundedAmount: Number(totals?.refunded ?? 0),
+      eligibleAmount,
+      refundedAmount,
       commissionAmount,
       reversedAmount,
       status,
@@ -345,7 +358,6 @@ async function consumeRefund(
     }
     return;
   }
-  const touched = new Set<string>();
   for (const row of allocations) {
     await db.transaction(async (tx) => {
       await tx.execute(
@@ -392,7 +404,10 @@ async function consumeRefund(
         ? Math.max(line.reversedAmount, line.commissionAmount - next.commissionAmount)
         : line.reversedAmount;
       const delta = Math.max(0, targetReversedAmount - line.reversedAmount);
-      if (nextRefunded === line.refundedAmount && delta === 0) return;
+      if (nextRefunded === line.refundedAmount && delta === 0) {
+        await recalculateCommission(tx, line.commissionId);
+        return;
+      }
       await tx
         .update(partnerCommissionItems)
         .set({
@@ -487,10 +502,9 @@ async function consumeRefund(
             .where(eq(partnerCommissions.id, line.commissionId));
         }
       }
-      touched.add(line.commissionId);
+      await recalculateCommission(tx, line.commissionId);
     });
   }
-  for (const commissionId of touched) await recalculateCommission(db, commissionId);
 }
 
 async function consumeClaim(
@@ -540,7 +554,11 @@ async function consumeClaim(
       .where(eq(partnerCommissionItems.id, scope.line.id))
       .for('update')
       .limit(1);
-    if (!line || line.eligibility !== 'eligible') return;
+    if (!line) return;
+    if (line.eligibility !== 'eligible') {
+      await recalculateCommission(tx, line.commissionId);
+      return;
+    }
     const [commission] = await tx
       .select({ status: partnerCommissions.status, availableAt: partnerCommissions.availableAt })
       .from(partnerCommissions)
@@ -566,7 +584,6 @@ async function consumeClaim(
       return;
     }
     const delta = line.commissionAmount - line.reversedAmount;
-    if (delta <= 0) return;
     await tx
       .update(partnerCommissionItems)
       .set({
@@ -584,6 +601,10 @@ async function consumeClaim(
           eq(partnerCommissionItems.version, line.version),
         ),
       );
+    if (delta <= 0) {
+      await recalculateCommission(tx, line.commissionId);
+      return;
+    }
     const [available] = await tx
       .select({ value: sum(partnerLedgerEntries.amount) })
       .from(partnerLedgerEntries)
@@ -644,8 +665,8 @@ async function consumeClaim(
         .set({ status: 'recovery_due', updatedAt: new Date() })
         .where(eq(partnerCommissions.id, line.commissionId));
     }
+    await recalculateCommission(tx, line.commissionId);
   });
-  await recalculateCommission(db, scope.line.commissionId);
 }
 
 export async function processPartnerFinancialInbox(db: ConferenceDatabase) {
@@ -766,6 +787,12 @@ export async function releasePartnerCommissions(db: ConferenceDatabase) {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${candidate.partnerId}`}, 0))`,
       );
+      const [partner] = await tx
+        .select({ settlementHold: eventPartners.settlementHold })
+        .from(eventPartners)
+        .where(eq(eventPartners.id, candidate.partnerId))
+        .limit(1);
+      if (!partner || partner.settlementHold) return;
       const [commission] = await tx
         .select()
         .from(partnerCommissions)
@@ -1479,7 +1506,13 @@ export async function activateScheduledPartnerPrograms(db: ConferenceDatabase) {
           and(
             eq(eventPartners.organizationId, program.organizationId),
             eq(eventPartners.eventId, program.eventId),
-            inArray(eventPartners.qualificationStatus, ['active', 'pending_confirmation']),
+            or(
+              eq(eventPartners.qualificationStatus, 'pending_confirmation'),
+              and(
+                eq(eventPartners.qualificationStatus, 'active'),
+                eq(eventPartners.attributionEnabled, true),
+              ),
+            ),
           ),
         );
     });

@@ -9,6 +9,7 @@ import {
   PartnerTransferConfigurationSchema,
   calculateCommissionLine,
   publicEventScopedPath,
+  type AdminEditPartnerDetails,
   type AdminEnablePartner,
   type AdminUpdatePartner,
   type PartnerProgramDraft,
@@ -45,13 +46,14 @@ import {
   publicUserIds,
   ticketTypes,
 } from '@conference/database';
-import { sealSecret } from '@conference/security';
+import { normalizeMainlandMobile, sealSecret } from '@conference/security';
 import { and, asc, count, desc, eq, gt, inArray, isNull, or, sql, sum } from 'drizzle-orm';
 import type { AuthenticatedCustomer } from './customer-auth.service.js';
 import { DatabaseService } from './database.service.js';
 import { DomainError } from './domain-error.js';
 import { matchesDeclaredMediaType, readUploadWithinLimit } from './object-storage-verification.js';
 import { RedisService } from './redis.service.js';
+import { lockPartnerSettlement } from './partner-settlement-guard.js';
 
 export const PARTNER_REFERRAL_COOKIE = 'tokems_partner_referral';
 export const PARTNER_REFERRAL_COOKIE_SECONDS = 30 * 24 * 60 * 60;
@@ -401,34 +403,6 @@ export class PartnerDistributionService {
     return program;
   }
 
-  async ensureDefaultProgram(organizationId: string, eventId: number, actorId: string) {
-    await this.eventForOrganization(organizationId, eventId);
-    const existing = await this.activeProgram(organizationId, eventId);
-    if (existing) return existing;
-    const input = PartnerProgramDraftSchema.parse({
-      termsTitle: '大会合作伙伴推广规则',
-      termsContent:
-        '合作伙伴应使用本人专属链接开展真实推广。佣金按成功付款且符合资格的订单明细计算，退款与自购会按规则冲正。',
-      promotionPolicy:
-        '推广内容应真实、清晰，不得承诺大会未公开的权益。发现误导宣传、异常流量或套取佣金时，大会可暂停归因与结算。',
-    });
-    const [created] = await this.db()
-      .insert(eventPartnerProgramVersions)
-      .values({
-        organizationId,
-        eventId,
-        version: 1,
-        status: 'active',
-        ...normalizedProgram(input),
-        contentHash: programHash(input),
-        effectiveAt: new Date(),
-        createdBy: actorId,
-      })
-      .onConflictDoNothing()
-      .returning();
-    return created ?? (await this.activeProgram(organizationId, eventId))!;
-  }
-
   async publishProgram(
     organizationId: string,
     eventId: number,
@@ -508,6 +482,13 @@ export class PartnerDistributionService {
             and(
               eq(eventPartners.organizationId, organizationId),
               eq(eventPartners.eventId, eventId),
+              or(
+                eq(eventPartners.qualificationStatus, 'pending_confirmation'),
+                and(
+                  eq(eventPartners.qualificationStatus, 'active'),
+                  eq(eventPartners.attributionEnabled, true),
+                ),
+              ),
             ),
           );
       }
@@ -534,28 +515,112 @@ export class PartnerDistributionService {
     input: AdminEnablePartner,
   ) {
     const event = await this.eventForOrganization(organizationId, eventId);
-    const customerUserId =
-      input.customerUserId ??
-      (
-        await this.db()
-          .select({ id: publicUserIds.subjectUuid })
+    let mobileE164: string | null = null;
+    if (input.mobile) {
+      try {
+        mobileE164 = normalizeMainlandMobile(input.mobile);
+      } catch {
+        fail(
+          API_ERROR_CODES.VALIDATION_ERROR,
+          '请输入有效的中国大陆手机号',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
+    const db = this.db();
+    const result = await db.transaction(async (tx) => {
+      const [program] = await tx
+        .select()
+        .from(eventPartnerProgramVersions)
+        .where(
+          and(
+            eq(eventPartnerProgramVersions.organizationId, organizationId),
+            eq(eventPartnerProgramVersions.eventId, eventId),
+            eq(eventPartnerProgramVersions.status, 'active'),
+          ),
+        )
+        .orderBy(desc(eventPartnerProgramVersions.version))
+        .for('share')
+        .limit(1);
+      if (!program) {
+        fail(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '请先开启当前大会的分销功能，再邀请合作伙伴',
+        );
+      }
+      let customerUserId = input.customerUserId;
+      if (mobileE164) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`customer-user:${organizationId}:${mobileE164}`}, 0))`,
+        );
+        const [mobileCustomer] = await tx
+          .select()
+          .from(customerUsers)
+          .where(
+            and(
+              eq(customerUsers.organizationId, organizationId),
+              eq(customerUsers.mobileE164, mobileE164),
+            ),
+          )
+          .for('update')
+          .limit(1);
+        if (mobileCustomer) {
+          if (mobileCustomer.status !== 'active') {
+            fail(
+              API_ERROR_CODES.INVALID_STATE_TRANSITION,
+              '该手机号对应的用户已停用，请先在系统管理中恢复账号',
+            );
+          }
+          customerUserId = mobileCustomer.id;
+        } else {
+          const [createdCustomer] = await tx
+            .insert(customerUsers)
+            .values({ organizationId, mobileE164 })
+            .returning();
+          await tx.insert(customerProfiles).values({
+            customerUserId: createdCustomer!.id,
+            realName: input.displayName || null,
+            company: input.company || null,
+            title: input.title || null,
+          });
+          await tx.insert(auditLogs).values({
+            organizationId,
+            eventId,
+            actorId,
+            actorType: 'staff',
+            action: 'customer.partner_invitation.provisioned',
+            resourceType: 'customer_user',
+            resourceId: createdCustomer!.id,
+            before: {},
+            after: { status: 'active', source: 'partner_invitation' },
+            traceId: randomUUID(),
+          });
+          customerUserId = createdCustomer!.id;
+        }
+      } else if (input.customerPublicUserId !== undefined) {
+        const [publicCustomer] = await tx
+          .select({ id: customerUsers.id })
           .from(publicUserIds)
+          .innerJoin(
+            customerUsers,
+            and(
+              eq(customerUsers.id, publicUserIds.subjectUuid),
+              eq(customerUsers.organizationId, organizationId),
+            ),
+          )
           .where(
             and(
               eq(publicUserIds.subjectType, 'customer'),
-              eq(publicUserIds.publicId, input.customerPublicUserId!),
+              eq(publicUserIds.publicId, input.customerPublicUserId),
               isNull(publicUserIds.retiredAt),
             ),
           )
-          .limit(1)
-      )[0]?.id;
-    if (!customerUserId)
-      fail(API_ERROR_CODES.NOT_FOUND, '用户不存在或不属于当前组织', HttpStatus.NOT_FOUND);
-    const program =
-      (await this.activeProgram(organizationId, eventId)) ??
-      (await this.ensureDefaultProgram(organizationId, eventId, actorId));
-    const db = this.db();
-    const result = await db.transaction(async (tx) => {
+          .limit(1);
+        customerUserId = publicCustomer?.id;
+      }
+      if (!customerUserId) {
+        fail(API_ERROR_CODES.NOT_FOUND, '用户不存在或不属于当前组织', HttpStatus.NOT_FOUND);
+      }
       const [customer] = await tx
         .select({ user: customerUsers, profile: customerProfiles })
         .from(customerUsers)
@@ -580,7 +645,7 @@ export class PartnerDistributionService {
           ),
         )
         .limit(1);
-      if (existing) return existing;
+      if (existing) return { created: false, partner: existing };
       const publicSlug = randomBytes(9).toString('base64url').toLowerCase();
       const [partner] = await tx
         .insert(eventPartners)
@@ -596,6 +661,7 @@ export class PartnerDistributionService {
         })
         .returning();
       const displayName =
+        input.displayName ||
         customer.profile?.nickname ||
         customer.profile?.realName ||
         `合作伙伴 ${publicSlug.slice(0, 5)}`;
@@ -605,8 +671,8 @@ export class PartnerDistributionService {
         eventId,
         version: 1,
         displayName,
-        company: customer.profile?.company ?? '',
-        title: customer.profile?.title ?? '',
+        company: input.company || customer.profile?.company || '',
+        title: input.title || customer.profile?.title || '',
         businessIntro: '',
         contactEmail: customer.profile?.email ?? '',
         contactPhone: customer.user.mobileE164,
@@ -656,9 +722,16 @@ export class PartnerDistributionService {
           payload: { deliveryId, partnerId: partner!.id, recipientRole: 'partner' },
         });
       }
-      return partner!;
+      return { created: true, partner: partner! };
     });
-    return this.relationship(result.id, result.customerUserId, organizationId);
+    return {
+      ...(await this.relationship(
+        result.partner.id,
+        result.partner.customerUserId,
+        organizationId,
+      )),
+      created: result.created,
+    };
   }
 
   async batchEnablePartners(
@@ -703,40 +776,92 @@ export class PartnerDistributionService {
     actorId: string,
     input: AdminUpdatePartner,
   ) {
-    const [updated] = await this.db()
-      .update(eventPartners)
-      .set({
-        ...(input.qualificationStatus ? { qualificationStatus: input.qualificationStatus } : {}),
-        ...(input.attributionEnabled !== undefined
-          ? { attributionEnabled: input.attributionEnabled }
-          : {}),
-        ...(input.settlementHold !== undefined ? { settlementHold: input.settlementHold } : {}),
-        ...(input.settlementHoldReason !== undefined
-          ? { settlementHoldReason: input.settlementHoldReason }
-          : {}),
-        ...(input.personalRateBps !== undefined ? { personalRateBps: input.personalRateBps } : {}),
-        ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
-        ...(input.internalNote !== undefined ? { internalNote: input.internalNote } : {}),
-        ...(input.qualificationStatus === 'active' ? { activatedAt: new Date() } : {}),
-        ...(input.qualificationStatus === 'paused' ? { pausedAt: new Date() } : {}),
-        ...(input.qualificationStatus === 'closed' ? { closedAt: new Date() } : {}),
-        version: sql`${eventPartners.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(eventPartners.id, partnerId),
-          eq(eventPartners.organizationId, organizationId),
-          eq(eventPartners.eventId, eventId),
-          eq(eventPartners.version, input.expectedVersion),
-        ),
-      )
-      .returning();
-    if (!updated)
-      fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
-    await this.db()
-      .insert(auditLogs)
-      .values({
+    const updated = await this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
+      );
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${partnerId}`}, 0))`,
+      );
+      const [partner] = await tx
+        .select()
+        .from(eventPartners)
+        .where(
+          and(
+            eq(eventPartners.id, partnerId),
+            eq(eventPartners.organizationId, organizationId),
+            eq(eventPartners.eventId, eventId),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!partner || partner.version !== input.expectedVersion) {
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      }
+      let qualificationStatus = input.qualificationStatus ?? partner.qualificationStatus;
+      let attributionEnabled = input.attributionEnabled ?? partner.attributionEnabled;
+      let programChange:
+        | {
+            currentProgramVersionId: string;
+            acceptedProgramVersionId: null;
+          }
+        | undefined;
+      if (
+        qualificationStatus === 'active' &&
+        (input.qualificationStatus === 'active' || input.attributionEnabled === true)
+      ) {
+        const [program] = await tx
+          .select({ id: eventPartnerProgramVersions.id })
+          .from(eventPartnerProgramVersions)
+          .where(
+            and(
+              eq(eventPartnerProgramVersions.organizationId, organizationId),
+              eq(eventPartnerProgramVersions.eventId, eventId),
+              eq(eventPartnerProgramVersions.status, 'active'),
+            ),
+          )
+          .orderBy(desc(eventPartnerProgramVersions.version))
+          .limit(1);
+        if (!program) {
+          fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '请先发布当前大会的合作伙伴规则');
+        }
+        if (partner.acceptedProgramVersionId !== program.id) {
+          qualificationStatus = 'pending_confirmation';
+          attributionEnabled = false;
+          programChange = { currentProgramVersionId: program.id, acceptedProgramVersionId: null };
+        }
+      }
+      const [result] = await tx
+        .update(eventPartners)
+        .set({
+          qualificationStatus,
+          attributionEnabled,
+          ...programChange,
+          ...(input.settlementHold !== undefined ? { settlementHold: input.settlementHold } : {}),
+          ...(input.settlementHoldReason !== undefined
+            ? { settlementHoldReason: input.settlementHoldReason }
+            : {}),
+          ...(input.personalRateBps !== undefined
+            ? { personalRateBps: input.personalRateBps }
+            : {}),
+          ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
+          ...(input.internalNote !== undefined ? { internalNote: input.internalNote } : {}),
+          ...(input.qualificationStatus === 'active' && qualificationStatus === 'active'
+            ? { activatedAt: new Date() }
+            : {}),
+          ...(input.qualificationStatus === 'paused' ? { pausedAt: new Date() } : {}),
+          ...(input.qualificationStatus === 'closed' ? { closedAt: new Date() } : {}),
+          version: sql`${eventPartners.version} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(eventPartners.id, partnerId), eq(eventPartners.version, input.expectedVersion)),
+        )
+        .returning();
+      if (!result) {
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      }
+      await tx.insert(auditLogs).values({
         organizationId,
         eventId,
         actorId,
@@ -745,10 +870,135 @@ export class PartnerDistributionService {
         resourceType: 'event_partner',
         resourceId: partnerId,
         before: { expectedVersion: input.expectedVersion },
-        after: input,
+        after: { ...input, qualificationStatus, attributionEnabled, ...programChange },
         traceId: randomUUID(),
       });
+      return result;
+    });
     return this.relationship(updated.id, updated.customerUserId, organizationId);
+  }
+
+  async updatePartnerDetails(
+    organizationId: string,
+    eventId: number,
+    partnerId: string,
+    actorId: string,
+    input: AdminEditPartnerDetails,
+  ) {
+    const result = await this.db().transaction(async (tx) => {
+      const [partner] = await tx
+        .select()
+        .from(eventPartners)
+        .where(
+          and(
+            eq(eventPartners.id, partnerId),
+            eq(eventPartners.organizationId, organizationId),
+            eq(eventPartners.eventId, eventId),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!partner) {
+        fail(API_ERROR_CODES.NOT_FOUND, '合作伙伴不存在或无权编辑', HttpStatus.NOT_FOUND);
+      }
+      if (partner.version !== input.expectedVersion) {
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      }
+      const [profile] = await tx
+        .select()
+        .from(eventPartnerProfileVersions)
+        .where(
+          and(
+            eq(eventPartnerProfileVersions.partnerId, partner.id),
+            eq(eventPartnerProfileVersions.version, partner.profileVersion),
+          ),
+        )
+        .limit(1);
+      if (!profile) {
+        fail(API_ERROR_CODES.NOT_FOUND, '合作伙伴资料不存在', HttpStatus.NOT_FOUND);
+      }
+
+      const profileValues = {
+        displayName: input.displayName,
+        company: input.company,
+        title: input.title,
+        industry: input.industry,
+        businessIntro: input.businessIntro,
+        businessUrl: input.businessUrl,
+      };
+      const profileChanged = Object.entries(profileValues).some(
+        ([key, value]) => profile[key as keyof typeof profileValues] !== value,
+      );
+      const changedFields = [
+        ...Object.entries(profileValues)
+          .filter(([key, value]) => profile[key as keyof typeof profileValues] !== value)
+          .map(([key]) => `profile.${key}`),
+        ...(partner.personalRateBps === input.personalRateBps ? [] : ['personalRateBps']),
+        ...(partner.sortOrder === input.sortOrder ? [] : ['sortOrder']),
+        ...(partner.internalNote === input.internalNote ? [] : ['internalNote']),
+      ];
+      if (!changedFields.length) {
+        return { customerUserId: partner.customerUserId };
+      }
+
+      const timestamp = new Date();
+      const nextProfileVersion = partner.profileVersion + (profileChanged ? 1 : 0);
+      if (profileChanged) {
+        await tx.insert(eventPartnerProfileVersions).values({
+          ...profile,
+          ...profileValues,
+          id: randomUUID(),
+          version: nextProfileVersion,
+          actorType: 'staff',
+          actorId,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+      const [updated] = await tx
+        .update(eventPartners)
+        .set({
+          ...(profileChanged ? { profileVersion: nextProfileVersion } : {}),
+          personalRateBps: input.personalRateBps,
+          sortOrder: input.sortOrder,
+          internalNote: input.internalNote,
+          version: sql`${eventPartners.version} + 1`,
+          updatedAt: timestamp,
+        })
+        .where(
+          and(
+            eq(eventPartners.id, partnerId),
+            eq(eventPartners.organizationId, organizationId),
+            eq(eventPartners.eventId, eventId),
+            eq(eventPartners.version, partner.version),
+          ),
+        )
+        .returning({ customerUserId: eventPartners.customerUserId });
+      if (!updated) {
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      }
+      await tx.insert(auditLogs).values({
+        organizationId,
+        eventId,
+        actorId,
+        actorType: 'staff',
+        action: 'partner.details.updated',
+        resourceType: 'event_partner',
+        resourceId: partnerId,
+        before: {
+          partnerVersion: partner.version,
+          profileVersion: partner.profileVersion,
+        },
+        after: {
+          changedFields,
+          partnerVersion: partner.version + 1,
+          profileVersion: nextProfileVersion,
+        },
+        traceId: randomUUID(),
+      });
+      return updated;
+    });
+    return this.relationship(partnerId, result.customerUserId, organizationId);
   }
 
   private async relationship(partnerId: string, customerUserId: string, organizationId: string) {
@@ -921,6 +1171,15 @@ export class PartnerDistributionService {
     if (partner.version !== expectedPartnerVersion) {
       fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴规则已更新，请刷新后确认');
     }
+    if (
+      partner.qualificationStatus !== 'pending_confirmation' ||
+      partner.currentProgramVersionId !== programVersionId
+    ) {
+      fail(
+        API_ERROR_CODES.INVALID_STATE_TRANSITION,
+        '当前合作伙伴资格未开放规则确认，请联系大会管理员',
+      );
+    }
     const [program] = await this.db()
       .select()
       .from(eventPartnerProgramVersions)
@@ -960,7 +1219,12 @@ export class PartnerDistributionService {
           updatedAt: new Date(),
         })
         .where(
-          and(eq(eventPartners.id, partner.id), eq(eventPartners.version, expectedPartnerVersion)),
+          and(
+            eq(eventPartners.id, partner.id),
+            eq(eventPartners.version, expectedPartnerVersion),
+            eq(eventPartners.qualificationStatus, 'pending_confirmation'),
+            eq(eventPartners.currentProgramVersionId, programVersionId),
+          ),
         )
         .returning({ id: eventPartners.id });
       if (!updated)
@@ -1042,11 +1306,25 @@ export class PartnerDistributionService {
     expectedPartnerVersion: number,
     mutate: (profile: ProfileRow) => Omit<ProfileRow, 'id' | 'createdAt' | 'updatedAt'>,
   ) {
-    const partner = await this.ownPartner(session, eventId);
-    if (partner.version !== expectedPartnerVersion) {
-      fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
-    }
-    await this.db().transaction(async (tx) => {
+    const result = await this.db().transaction(async (tx) => {
+      const [partner] = await tx
+        .select()
+        .from(eventPartners)
+        .where(
+          and(
+            eq(eventPartners.organizationId, session.organizationId),
+            eq(eventPartners.customerUserId, session.customerUserId),
+            eq(eventPartners.eventId, eventId),
+          ),
+        )
+        .for('update')
+        .limit(1);
+      if (!partner) {
+        fail(API_ERROR_CODES.NOT_FOUND, '合作伙伴关系不存在', HttpStatus.NOT_FOUND);
+      }
+      if (partner.version !== expectedPartnerVersion) {
+        fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      }
       const [profile] = await tx
         .select()
         .from(eventPartnerProfileVersions)
@@ -1083,8 +1361,9 @@ export class PartnerDistributionService {
         .returning({ id: eventPartners.id });
       if (!updated)
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '合作伙伴资料已更新，请刷新后重试');
+      return updated;
     });
-    return this.relationship(partner.id, session.customerUserId, session.organizationId);
+    return this.relationship(result.id, session.customerUserId, session.organizationId);
   }
 
   async publicPartners(
@@ -1658,6 +1937,7 @@ export class PartnerDistributionService {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${partner.id}`}, 0))`,
       );
+      await lockPartnerSettlement(tx, session.organizationId, eventId, [partner.id]);
       const [recipient] = await tx
         .select()
         .from(partnerPayoutRecipients)
@@ -1916,6 +2196,9 @@ export class PartnerDistributionService {
       }
       let adjustmentLedgerEntryId: string | null = null;
       if (adjusts) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${inquiry.partnerId}`}, 0))`,
+        );
         const [available] = await tx
           .select({ value: sum(partnerLedgerEntries.amount) })
           .from(partnerLedgerEntries)
@@ -2145,15 +2428,33 @@ export class PartnerDistributionService {
 
   async adminPartners(organizationId: string, eventId: number) {
     const rows = await this.db()
-      .select({ id: eventPartners.id, customerUserId: eventPartners.customerUserId })
+      .select({
+        id: eventPartners.id,
+        customerUserId: eventPartners.customerUserId,
+        loginMobile: customerUsers.mobileE164,
+        sortOrder: eventPartners.sortOrder,
+        internalNote: eventPartners.internalNote,
+      })
       .from(eventPartners)
+      .innerJoin(
+        customerUsers,
+        and(
+          eq(customerUsers.id, eventPartners.customerUserId),
+          eq(customerUsers.organizationId, eventPartners.organizationId),
+        ),
+      )
       .where(
         and(eq(eventPartners.organizationId, organizationId), eq(eventPartners.eventId, eventId)),
       )
       .orderBy(asc(eventPartners.sortOrder), desc(eventPartners.createdAt));
     return {
       items: await Promise.all(
-        rows.map((row) => this.relationship(row.id, row.customerUserId, organizationId)),
+        rows.map(async (row) => ({
+          ...(await this.relationship(row.id, row.customerUserId, organizationId)),
+          loginMobile: row.loginMobile,
+          sortOrder: row.sortOrder,
+          internalNote: row.internalNote,
+        })),
       ),
     };
   }
@@ -2709,10 +3010,10 @@ export class PartnerDistributionService {
     },
   ) {
     return this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
+      );
       if (input.decision === 'approve') {
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
-        );
         const [unresolvedReconciliation] = await tx
           .select({ id: partnerReconciliationRuns.id })
           .from(partnerReconciliationRuns)
@@ -2748,6 +3049,9 @@ export class PartnerDistributionService {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${request.partnerId}`}, 0))`,
       );
+      if (input.decision === 'approve') {
+        await lockPartnerSettlement(tx, organizationId, eventId, [request.partnerId]);
+      }
       const [recovery] = await tx
         .select({ value: sum(partnerLedgerEntries.amount) })
         .from(partnerLedgerEntries)
@@ -2974,7 +3278,15 @@ export class PartnerDistributionService {
               having sum(recovery.amount) > 0
             )`,
           ),
-        );
+        )
+        .orderBy(asc(partnerPayoutRequests.id))
+        .for('update', { of: partnerPayoutRequests });
+      await lockPartnerSettlement(
+        tx,
+        organizationId,
+        eventId,
+        requests.map((row) => row.request.partnerId),
+      );
       if (requests.length !== input.requestIds.length) {
         fail(API_ERROR_CODES.INVALID_STATE_TRANSITION, '部分提现申请不可组批或结算渠道不一致');
       }
@@ -3011,7 +3323,15 @@ export class PartnerDistributionService {
           version: sql`${partnerPayoutRequests.version} + 1`,
           updatedAt: new Date(),
         })
-        .where(inArray(partnerPayoutRequests.id, input.requestIds));
+        .where(
+          and(
+            eq(partnerPayoutRequests.organizationId, organizationId),
+            eq(partnerPayoutRequests.eventId, eventId),
+            eq(partnerPayoutRequests.status, 'approved'),
+            isNull(partnerPayoutRequests.batchId),
+            inArray(partnerPayoutRequests.id, input.requestIds),
+          ),
+        );
       await tx.insert(auditLogs).values({
         organizationId,
         eventId,
@@ -3043,6 +3363,9 @@ export class PartnerDistributionService {
     input: { expectedVersion: number; decision: 'approve' | 'hold' | 'cancel'; reason: string },
   ) {
     return this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
+      );
       const [batch] = await tx
         .select()
         .from(partnerPayoutBatches)
@@ -3082,8 +3405,15 @@ export class PartnerDistributionService {
         }
       }
       if (input.decision === 'approve') {
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${batch.eventId}`}, 0))`,
+        const batchRequests = await tx
+          .select({ partnerId: partnerPayoutRequests.partnerId })
+          .from(partnerPayoutRequests)
+          .where(eq(partnerPayoutRequests.batchId, batch.id));
+        await lockPartnerSettlement(
+          tx,
+          organizationId,
+          eventId,
+          batchRequests.map((row) => row.partnerId),
         );
         const [unresolvedReconciliation] = await tx
           .select({ id: partnerReconciliationRuns.id })
@@ -3165,6 +3495,9 @@ export class PartnerDistributionService {
     },
   ) {
     return this.db().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
+      );
       const [request] = await tx
         .select({ request: partnerPayoutRequests, batch: partnerPayoutBatches })
         .from(partnerPayoutRequests)
@@ -3179,9 +3512,6 @@ export class PartnerDistributionService {
         .for('update')
         .limit(1);
       if (!request) fail(API_ERROR_CODES.NOT_FOUND, '提现申请不存在', HttpStatus.NOT_FOUND);
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
-      );
       const [unresolvedReconciliation] = await tx
         .select({ id: partnerReconciliationRuns.id })
         .from(partnerReconciliationRuns)
@@ -3203,6 +3533,7 @@ export class PartnerDistributionService {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${request.request.partnerId}`}, 0))`,
       );
+      await lockPartnerSettlement(tx, organizationId, eventId, [request.request.partnerId]);
       const [recovery] = await tx
         .select({ value: sum(partnerLedgerEntries.amount) })
         .from(partnerLedgerEntries)

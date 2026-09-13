@@ -121,21 +121,36 @@ export type RefundApplicationView = z.infer<typeof RefundApplicationViewSchema>;
 export type RefundContext = z.infer<typeof RefundContextSchema>;
 export type EventRefundPolicy = z.infer<typeof EventRefundPolicySchema>;
 
-export type AdminRefundApplicationView = RefundApplicationView & {
-  orderNo: string;
-  executionMode: string;
-  attentionReason: string | null;
-  executions: Array<{
-    id: string;
-    refundNo: string;
-    status: string;
-    channelStatus: string | null;
-    amount: number;
-    recipientKind: string | null;
-    lastError: string | null;
-    nextAttemptAt: string | null;
-    acceptedAt: string | null;
-    fulfillmentAttention: string | null;
-    currentAttempt: boolean;
-  }>;
-};
+export const RefundApplicantSchema = z.object({
+  id: z.number().int().min(101).nullable(),
+  mobile: z.string().nullable(),
+  name: z.string().nullable(),
+  company: z.string().nullable(),
+});
+
+export const RefundExecutionViewSchema = z.object({
+  id: z.string(),
+  refundNo: z.string(),
+  status: z.string(),
+  channelStatus: z.string().nullable(),
+  amount: z.number().int(),
+  recipientKind: z.string().nullable(),
+  lastError: z.string().nullable(),
+  nextAttemptAt: z.string().nullable(),
+  acceptedAt: z.string().nullable(),
+  fulfillmentAttention: z.string().nullable(),
+  currentAttempt: z.boolean(),
+});
+
+export const AdminRefundApplicationViewSchema = RefundApplicationViewSchema.extend({
+  orderNo: z.string(),
+  executionMode: z.string(),
+  attentionReason: z.string().nullable(),
+  customerSubmitted: z.boolean(),
+  applicantVisible: z.boolean(),
+  applicant: RefundApplicantSchema,
+  executions: z.array(RefundExecutionViewSchema),
+});
+
+export type RefundApplicant = z.infer<typeof RefundApplicantSchema>;
+export type AdminRefundApplicationView = z.infer<typeof AdminRefundApplicationViewSchema>;

@@ -6,6 +6,6 @@
   "latestMigration": "0070_partner_distribution_scope_guards.sql",
   "databaseTables": 105,
   "apiControllers": 46,
-  "apiOperations": 360,
-  "testFiles": 221
+  "apiOperations": 361,
+  "testFiles": 226
 }

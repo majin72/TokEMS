@@ -85,10 +85,7 @@ persistent('partner profile versioning with real PostgreSQL', () => {
       actorType: 'system',
     });
 
-    const service = new PartnerDistributionService(
-      { db } as DatabaseService,
-      {} as RedisService,
-    );
+    const service = new PartnerDistributionService({ db } as DatabaseService, {} as RedisService);
     const session = {
       sessionId: randomUUID(),
       customerUserId,
@@ -138,5 +135,47 @@ persistent('partner profile versioning with real PostgreSQL', () => {
     expect(versions.map((item) => item.version)).toEqual([1, 2, 3]);
     expect(new Set(versions.map((item) => item.id)).size).toBe(3);
     expect(versions[0]?.id).toBe(originalProfileId);
+
+    const concurrentResults = await Promise.allSettled([
+      service.updateOwnProfile(session, event!.id, {
+        expectedVersion: privacyUpdated.version,
+        displayName: '合作伙伴本人修改',
+        company: '远见增长实验室',
+        title: '创始人',
+        industry: '品牌增长与 GEO',
+        businessIntro: '本人提交的新介绍。',
+        businessUrl: 'https://example.com/self',
+        contactPhone: '13800000000',
+        contactEmail: 'partner@example.com',
+        wechatId: 'tokems-partner',
+        gallery: [],
+      }),
+      service.updatePartnerDetails(organizationId, event!.id, partnerId, randomUUID(), {
+        expectedVersion: privacyUpdated.version,
+        displayName: '后台修改名称',
+        company: '大会合作公司',
+        title: '渠道负责人',
+        industry: '人工智能',
+        businessIntro: '后台提交的新介绍。',
+        businessUrl: 'https://example.com/admin',
+        personalRateBps: 0,
+        sortOrder: 2,
+        internalNote: '并发编辑测试',
+      }),
+    ]);
+    expect(concurrentResults.filter((item) => item.status === 'fulfilled')).toHaveLength(1);
+    const rejected = concurrentResults.find((item) => item.status === 'rejected');
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: expect.objectContaining({ message: expect.stringContaining('请刷新后重试') }),
+    });
+
+    const concurrentVersions = await db
+      .select({ id: eventPartnerProfileVersions.id, version: eventPartnerProfileVersions.version })
+      .from(eventPartnerProfileVersions)
+      .where(eq(eventPartnerProfileVersions.partnerId, partnerId))
+      .orderBy(asc(eventPartnerProfileVersions.version));
+    expect(concurrentVersions.map((item) => item.version)).toEqual([1, 2, 3, 4]);
+    expect(new Set(concurrentVersions.map((item) => item.id)).size).toBe(4);
   });
 });

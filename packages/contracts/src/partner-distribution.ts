@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MainlandMobileSchema } from './mobile.js';
 
 export const PartnerQualificationStatusSchema = z.enum([
   'pending_confirmation',
@@ -7,12 +8,7 @@ export const PartnerQualificationStatusSchema = z.enum([
   'closed',
 ]);
 export const PartnerPublicStatusSchema = z.enum(['draft', 'published', 'hidden']);
-export const PartnerRecipientStatusSchema = z.enum([
-  'unbound',
-  'pending',
-  'verified',
-  'disabled',
-]);
+export const PartnerRecipientStatusSchema = z.enum(['unbound', 'pending', 'verified', 'disabled']);
 export const PartnerCommissionStatusSchema = z.enum([
   'provisional',
   'pending',
@@ -98,7 +94,13 @@ export const DEFAULT_PARTNER_POSTER_FIELDS: PartnerVisibleFields = {
 
 const OptionalPublicText = (maximum: number) => z.string().trim().max(maximum).default('');
 const OptionalHttpUrl = z
-  .union([z.literal(''), z.url().refine((value) => /^https?:\/\//u.test(value), '请输入 HTTP 或 HTTPS 地址')])
+  .union([
+    z.literal(''),
+    z
+      .url()
+      .max(500)
+      .refine((value) => /^https?:\/\//u.test(value), '请输入 HTTP 或 HTTPS 地址'),
+  ])
   .default('');
 
 export const PartnerGalleryItemSchema = z.object({
@@ -185,14 +187,33 @@ export const AdminEnablePartnerSchema = z
   .object({
     customerUserId: z.uuid().optional(),
     customerPublicUserId: z.number().int().min(101).optional(),
+    mobile: MainlandMobileSchema.optional(),
+    displayName: z.string().trim().max(80).optional(),
+    company: z.string().trim().max(160).optional(),
+    title: z.string().trim().max(100).optional(),
     personalRateBps: z.number().int().min(0).max(10_000).nullable().default(null),
     sortOrder: z.number().int().min(-1_000_000).max(1_000_000).default(0),
     internalNote: z.string().trim().max(2000).default(''),
     sendInvitation: z.boolean().default(true),
   })
-  .refine((value) => Boolean(value.customerUserId || value.customerPublicUserId), {
-    message: '需要指定组织内用户',
-    path: ['customerUserId'],
+  .superRefine((value, context) => {
+    const identityCount = [value.customerUserId, value.customerPublicUserId, value.mobile].filter(
+      (identity) => identity !== undefined,
+    ).length;
+    if (identityCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['mobile'],
+        message: '手机号、用户编号和内部用户标识只能指定一项',
+      });
+    }
+    if (value.mobile && !value.sendInvitation) {
+      context.addIssue({
+        code: 'custom',
+        path: ['sendInvitation'],
+        message: '手机号邀请必须发送合作伙伴通知',
+      });
+    }
   });
 
 export const AdminBatchEnablePartnersSchema = z
@@ -222,6 +243,19 @@ export const AdminUpdatePartnerSchema = z.object({
   personalRateBps: z.number().int().min(0).max(10_000).nullable().optional(),
   sortOrder: z.number().int().min(-1_000_000).max(1_000_000).optional(),
   internalNote: z.string().trim().max(2000).optional(),
+});
+
+export const AdminEditPartnerDetailsSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  displayName: z.string().trim().min(1).max(80),
+  company: OptionalPublicText(160),
+  title: OptionalPublicText(100),
+  industry: OptionalPublicText(80),
+  businessIntro: OptionalPublicText(2000),
+  businessUrl: OptionalHttpUrl,
+  personalRateBps: z.number().int().min(0).max(10_000).nullable(),
+  sortOrder: z.number().int().min(-1_000_000).max(1_000_000).default(0),
+  internalNote: z.string().trim().max(2000).default(''),
 });
 
 export const PartnerListQuerySchema = z.object({
@@ -344,7 +378,11 @@ export const PartnerMediaUploadSchema = z.object({
   kind: z.enum(['avatar', 'gallery']),
   fileName: z.string().trim().min(1).max(180),
   mediaType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
-  size: z.number().int().positive().max(5 * 1024 * 1024),
+  size: z
+    .number()
+    .int()
+    .positive()
+    .max(5 * 1024 * 1024),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/i),
 });
 
@@ -358,7 +396,11 @@ export const PreparePartnerPayoutDocumentSchema = z.object({
   kind: z.enum(['settlement_statement', 'tax_document', 'manual_receipt', 'wechat_receipt']),
   fileName: z.string().trim().min(1).max(180),
   mediaType: z.enum(['application/pdf', 'image/jpeg', 'image/png']),
-  size: z.number().int().positive().max(10 * 1024 * 1024),
+  size: z
+    .number()
+    .int()
+    .positive()
+    .max(10 * 1024 * 1024),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/i),
 });
 
@@ -416,7 +458,13 @@ export const PartnerTransferConfigurationSchema = z
     payoutCadence: z.enum(['weekly', 'monthly']).default('weekly'),
     singleTransferLimit: z.number().int().safe().positive().max(1_000_000_000).default(20_000),
     dailyUserLimit: z.number().int().safe().positive().max(1_000_000_000).default(200_000),
-    dailyMerchantLimit: z.number().int().safe().positive().max(9_000_000_000_000).default(5_000_000),
+    dailyMerchantLimit: z
+      .number()
+      .int()
+      .safe()
+      .positive()
+      .max(9_000_000_000_000)
+      .default(5_000_000),
     monthlyMerchantLimit: z
       .number()
       .int()
@@ -467,6 +515,7 @@ export type PartnerProgramDraft = z.infer<typeof PartnerProgramDraftSchema>;
 export type PublishPartnerProgram = z.infer<typeof PublishPartnerProgramSchema>;
 export type AdminEnablePartner = z.infer<typeof AdminEnablePartnerSchema>;
 export type AdminUpdatePartner = z.infer<typeof AdminUpdatePartnerSchema>;
+export type AdminEditPartnerDetails = z.infer<typeof AdminEditPartnerDetailsSchema>;
 export type PartnerTransferConfiguration = z.infer<typeof PartnerTransferConfigurationSchema>;
 
 export interface PartnerProgramVersionView extends PartnerProgramDraft {
@@ -521,6 +570,16 @@ export interface PartnerRelationshipView {
   };
   profile: PartnerProfileView;
   version: number;
+}
+
+export interface AdminPartnerRelationshipView extends PartnerRelationshipView {
+  loginMobile: string;
+  sortOrder: number;
+  internalNote: string;
+}
+
+export interface AdminEnablePartnerResult extends PartnerRelationshipView {
+  created: boolean;
 }
 
 export interface PublicPartnerSummary {

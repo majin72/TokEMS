@@ -2858,6 +2858,17 @@
     },
     {
       "method": "PATCH",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners/:partnerId/details",
+      "handler": "AdminPartnerController.updateDetails",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "PATCH",
       "path": "/api/v1/admin/events/:eventId/feishu-digest",
       "handler": "OrganizationEventsController.updateFeishuDigestSubscription",
       "actionId": null,

@@ -82,6 +82,7 @@ jobs:
       DEPLOYMENT_MODE: local
       DATABASE_URL: postgresql://conference:conference@localhost:5432/conference
       BATCH_TEST_DATABASE_URL: postgresql://conference:conference@localhost:5432/conference
+      PARTNER_TEST_DATABASE_URL: postgresql://conference:conference@localhost:5432/conference
       INVOICE_SMS_TEST_DATABASE_URL: postgresql://conference:conference@localhost:5432/conference
       REDIS_URL: redis://localhost:6379
       INVOICE_SMS_TEST_REDIS_URL: redis://localhost:6379
@@ -195,6 +196,8 @@ jobs:
           pnpm test:registration-experience
           pnpm test:payment-resume
           pnpm test:admin-order-close
+          PARTNER_ACCOUNT_BASE_URL=http://localhost:3000 pnpm test:partner-account
+          pnpm test:partner-dialogs
           node --test tooling/invoice-sms-ui-smoke.mjs
           INVOICE_SMS_GATEWAY_TEST=1 node --test tooling/invoice-sms-gateway-smoke.mjs
           pnpm test:visual

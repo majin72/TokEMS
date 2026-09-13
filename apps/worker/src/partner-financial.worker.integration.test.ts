@@ -25,9 +25,10 @@ import {
   refunds,
   registrations,
   ticketTypes,
+  type ConferenceDatabase,
 } from '@conference/database';
 import { and, eq, sql, sum } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 import {
   processPartnerFinancialInbox,
   reconcilePartnerFinancialFacts,
@@ -35,6 +36,303 @@ import {
 } from './partner-financial.worker.js';
 
 const persistent = process.env.PARTNER_TEST_DATABASE_URL ? describe : describe.skip;
+
+async function financialFixture(db: ConferenceDatabase, zeroInitialRate = false) {
+  const organizationId = randomUUID();
+  const partnerCustomerId = randomUUID();
+  const purchaserCustomerId = randomUUID();
+  await db.insert(organizations).values({
+    id: organizationId,
+    slug: `financial-regression-${organizationId}`,
+    name: '佣金恢复回归测试',
+  });
+  onTestFinished(async () => {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set constraints all deferred`);
+      await tx
+        .update(payments)
+        .set({ partnerAttributionRevisionId: null })
+        .where(
+          sql`${payments.orderId} in (select id from orders where organization_id = ${organizationId})`,
+        );
+      for (const table of [
+        refundItemAllocations,
+        refunds,
+        partnerLedgerEntries,
+        partnerCommissionItems,
+        partnerCommissions,
+        partnerAttributionRevisions,
+        partnerFinancialEventInbox,
+        partnerReconciliationRuns,
+        partnerReferralLinks,
+        eventPartners,
+        eventPartnerProgramVersions,
+        orderItems,
+      ]) {
+        await tx.delete(table).where(eq(table.organizationId, organizationId));
+      }
+      await tx.delete(events).where(eq(events.organizationId, organizationId));
+      await tx.delete(customerUsers).where(eq(customerUsers.organizationId, organizationId));
+      await tx.delete(organizations).where(eq(organizations.id, organizationId));
+    });
+  });
+  await db.insert(customerUsers).values([
+    { id: partnerCustomerId, organizationId, mobileE164: '+8613811111111' },
+    { id: purchaserCustomerId, organizationId, mobileE164: '+8613822222222' },
+  ]);
+  const [event] = await db
+    .insert(events)
+    .values({
+      organizationId,
+      slug: `financial-${organizationId}`,
+      name: '佣金恢复测试大会',
+      shortName: '佣金恢复',
+      tagline: '恢复验收',
+      description: '验证序号、阶梯与退款事务。',
+      status: 'registration_open',
+      startsAt: new Date('2027-10-01T01:00:00Z'),
+      endsAt: new Date('2027-10-01T10:00:00Z'),
+      timezone: 'Asia/Shanghai',
+      venue: '测试会场',
+      city: '上海',
+      address: '测试地址',
+    })
+    .returning();
+  const [ticket] = await db
+    .insert(ticketTypes)
+    .values({
+      organizationId,
+      eventId: event!.id,
+      code: 'FINANCIAL',
+      name: '测试票',
+      description: '测试票',
+      price: 10_000,
+      currency: 'CNY',
+      capacity: 100,
+    })
+    .returning();
+  const [program] = await db
+    .insert(eventPartnerProgramVersions)
+    .values({
+      organizationId,
+      eventId: event!.id,
+      version: 1,
+      status: 'active',
+      mode: 'order_count_tiered',
+      fixedRateBps: zeroInitialRate ? 0 : 1000,
+      tiers: [
+        { minimumOrderCount: 2, rateBps: zeroInitialRate ? 1000 : 2000 },
+        { minimumOrderCount: 4, rateBps: 3000 },
+      ],
+      settlementDelayDays: 0,
+      termsTitle: '测试规则',
+      termsContent: '全额退款撤销阶梯计数，历史比例保留。',
+      promotionPolicy: '测试推广规范。',
+      contentHash: '0'.repeat(64),
+    })
+    .returning();
+  const [partner] = await db
+    .insert(eventPartners)
+    .values({
+      organizationId,
+      eventId: event!.id,
+      customerUserId: partnerCustomerId,
+      publicSlug: `financial-${organizationId.slice(0, 8)}`,
+      qualificationStatus: 'active',
+      attributionEnabled: true,
+      currentProgramVersionId: program!.id,
+      acceptedProgramVersionId: program!.id,
+    })
+    .returning();
+  const [link] = await db
+    .insert(partnerReferralLinks)
+    .values({
+      organizationId,
+      eventId: event!.id,
+      partnerId: partner!.id,
+      code: `financial-${organizationId}`,
+      destinationPath: `/register?event=${event!.slug}`,
+    })
+    .returning();
+  let attendeeSequence = 0;
+  const createPaidOrder = async () => {
+    const identity = randomUUID().replaceAll('-', '');
+    const attendeeMobile = `13833${String(++attendeeSequence).padStart(6, '0')}`;
+    const [registration] = await db
+      .insert(registrations)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        ticketTypeId: ticket!.id,
+        registrationCode: `FR${identity.slice(0, 20)}`,
+        status: 'confirmed',
+        attendee: {
+          name: '参会人',
+          mobile: attendeeMobile,
+          email: `${identity}@example.test`,
+          company: '测试公司',
+          title: '测试职位',
+          city: '上海',
+        },
+        attendeeMobileE164: `+86${attendeeMobile}`,
+        attendeeEmailNormalized: `${identity}@example.test`,
+      })
+      .returning();
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`set constraints all deferred`);
+      const [order] = await tx
+        .insert(orders)
+        .values({
+          organizationId,
+          eventId: event!.id,
+          registrationId: registration!.id,
+          modelVersion: 2,
+          quantity: 1,
+          purchaserCustomerUserId: purchaserCustomerId,
+          purchaseIntentId: randomUUID(),
+          purchaserSnapshot: {
+            customerUserId: purchaserCustomerId,
+            mobile: '+8613822222222',
+            name: '购买人',
+            email: 'buyer@example.test',
+            company: '测试公司',
+            title: '采购',
+            city: '上海',
+          },
+          orderNo: `FO${identity.slice(0, 20)}`,
+          status: 'paid',
+          amount: 10_000,
+          currency: 'CNY',
+          pricingSnapshot: { refundPolicy: { enabled: false } },
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .returning();
+      const [item] = await tx
+        .insert(orderItems)
+        .values({
+          orderId: order!.id,
+          registrationId: registration!.id,
+          organizationId,
+          eventId: event!.id,
+          position: 1,
+          ticketTypeId: ticket!.id,
+          unitPrice: 10_000,
+          allocatedAmount: 10_000,
+          pricingSnapshot: { unitPrice: 10_000 },
+          state: 'active',
+        })
+        .returning();
+      const [attribution] = await tx
+        .insert(partnerAttributionRevisions)
+        .values({
+          organizationId,
+          eventId: event!.id,
+          orderId: order!.id,
+          purchaseIntentId: order!.purchaseIntentId,
+          orderVersion: order!.version,
+          partnerId: partner!.id,
+          referralLinkId: link!.id,
+          programVersionId: program!.id,
+          decision: 'attributed',
+          decisionReason: '测试有效来源',
+          attributionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000),
+          purchaserCustomerUserId: purchaserCustomerId,
+          orderSnapshot: { quantity: 1, amount: 10_000, currency: 'CNY' },
+          createdBy: 'checkout',
+        })
+        .returning();
+      const [payment] = await tx
+        .insert(payments)
+        .values({
+          orderId: order!.id,
+          partnerAttributionRevisionId: attribution!.id,
+          provider: 'partner-test',
+          status: 'succeeded',
+          amount: 10_000,
+          currency: 'CNY',
+          succeededAt: new Date(Date.now() - 10 * 24 * 60 * 60_000),
+        })
+        .returning();
+      await tx
+        .update(orders)
+        .set({ settledPaymentId: payment!.id })
+        .where(eq(orders.id, order!.id));
+      await tx.insert(partnerFinancialEventInbox).values({
+        organizationId,
+        eventId: event!.id,
+        eventType: 'PaymentSucceeded',
+        eventKey: `financial-payment:${payment!.id}`,
+        payload: { orderId: order!.id },
+      });
+      return { order: order!, item: item!, payment: payment! };
+    });
+  };
+  const refundOrder = async (paid: Awaited<ReturnType<typeof createPaidOrder>>) => {
+    const [refund] = await db
+      .insert(refunds)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        orderId: paid.order.id,
+        paymentId: paid.payment.id,
+        refundNo: `FF${randomUUID().replaceAll('-', '').slice(0, 20)}`,
+        amount: paid.order.amount,
+        currency: 'CNY',
+        status: 'succeeded',
+        reason: '全额退款恢复测试',
+        idempotencyKey: `financial-refund:${paid.order.id}`,
+      })
+      .returning();
+    await db.insert(refundItemAllocations).values({
+      refundId: refund!.id,
+      paymentId: paid.payment.id,
+      orderId: paid.order.id,
+      orderItemId: paid.item.id,
+      organizationId,
+      eventId: event!.id,
+      amount: paid.order.amount,
+      basis: '全额退款恢复测试',
+    });
+    const [inbox] = await db
+      .insert(partnerFinancialEventInbox)
+      .values({
+        organizationId,
+        eventId: event!.id,
+        eventType: 'RefundSucceeded',
+        eventKey: `financial-refund:${refund!.id}`,
+        payload: { refundId: refund!.id },
+      })
+      .returning();
+    return inbox!;
+  };
+  return { partner: partner!, createPaidOrder, refundOrder };
+}
+
+function interruptNextCommissionSummary(db: ConferenceDatabase): ConferenceDatabase {
+  let pending = true;
+  const wrap = <T extends object>(target: T): T =>
+    new Proxy(target, {
+      get(target, property, receiver) {
+        const method = Reflect.get(target, property, receiver);
+        if (typeof method !== 'function') return method;
+        if (property === 'transaction') {
+          return (callback: (tx: object) => Promise<unknown>, ...args: unknown[]) =>
+            method.call(target, (tx: object) => callback(wrap(tx)), ...args);
+        }
+        if (property === 'update') {
+          return (table: unknown) => {
+            if (pending && table === partnerCommissions) {
+              pending = false;
+              throw new Error('Injected interruption before commission summary write');
+            }
+            return method.call(target, table);
+          };
+        }
+        return method.bind(target);
+      },
+    });
+  return wrap(db);
+}
 
 persistent('partner financial ledger with real PostgreSQL', () => {
   let connection: ReturnType<typeof createDatabase>;
@@ -46,6 +344,175 @@ persistent('partner financial ledger with real PostgreSQL', () => {
   afterAll(async () => {
     await connection.pool.end();
   });
+
+  it('keeps immutable sequence numbers while full refunds remove tier counts', async () => {
+    const db = connection.db;
+    const fixture = await financialFixture(db);
+    const first = await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    await fixture.refundOrder(first);
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const second = await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const third = await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const commissions = await db
+      .select()
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.partnerId, fixture.partner.id))
+      .orderBy(partnerCommissions.sequence);
+    expect(
+      commissions.map((row) => ({
+        orderId: row.orderId,
+        sequence: row.sequence,
+        rate: row.rateBps,
+      })),
+    ).toEqual([
+      { orderId: first.order.id, sequence: 1, rate: 1000 },
+      { orderId: second.order.id, sequence: 2, rate: 1000 },
+      { orderId: third.order.id, sequence: 3, rate: 2000 },
+    ]);
+  }, 30_000);
+
+  it('counts zero-rate eligible orders and serializes concurrent tier allocation', async () => {
+    const db = connection.db;
+    const fixture = await financialFixture(db, true);
+    await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    await Promise.all([fixture.createPaidOrder(), fixture.createPaidOrder()]);
+    const processed = await Promise.all([
+      processPartnerFinancialInbox(db),
+      processPartnerFinancialInbox(db),
+    ]);
+    expect(processed.reduce((total, value) => total + value, 0)).toBe(2);
+    const commissions = await db
+      .select()
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.partnerId, fixture.partner.id))
+      .orderBy(partnerCommissions.sequence);
+    expect(commissions.map((row) => [row.sequence, row.rateBps, row.commissionAmount])).toEqual([
+      [1, 0, 0],
+      [2, 1000, 1000],
+      [3, 1000, 1000],
+      [4, 3000, 3000],
+    ]);
+  }, 30_000);
+
+  it('replays a refund interrupted before its summary without releasing reversed funds', async () => {
+    const db = connection.db;
+    const fixture = await financialFixture(db);
+    const paid = await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const inbox = await fixture.refundOrder(paid);
+    expect(await processPartnerFinancialInbox(interruptNextCommissionSummary(db))).toBe(0);
+    const [failed] = await db
+      .select()
+      .from(partnerFinancialEventInbox)
+      .where(eq(partnerFinancialEventInbox.id, inbox.id));
+    expect(failed?.status).toBe('retrying');
+    expect(failed?.lastError).toContain('Injected interruption');
+    await db
+      .update(partnerFinancialEventInbox)
+      .set({ nextAttemptAt: new Date(0) })
+      .where(eq(partnerFinancialEventInbox.id, inbox.id));
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const [commission] = await db
+      .select()
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.orderId, paid.order.id));
+    expect(commission).toMatchObject({
+      reversedAmount: 1000,
+      eligibleAmount: 0,
+      status: 'reversed',
+    });
+    await releasePartnerCommissions(db);
+    const balances = await db
+      .select({
+        bucket: partnerLedgerEntries.balanceBucket,
+        amount: sum(partnerLedgerEntries.amount),
+      })
+      .from(partnerLedgerEntries)
+      .where(eq(partnerLedgerEntries.partnerId, fixture.partner.id))
+      .groupBy(partnerLedgerEntries.balanceBucket);
+    expect(Object.fromEntries(balances.map((row) => [row.bucket, Number(row.amount)]))).toEqual({
+      pending: 0,
+    });
+    const reversals = await db
+      .select()
+      .from(partnerLedgerEntries)
+      .where(
+        and(
+          eq(partnerLedgerEntries.partnerId, fixture.partner.id),
+          eq(partnerLedgerEntries.entryType, 'refund_reversal'),
+        ),
+      );
+    expect(reversals).toHaveLength(1);
+  }, 30_000);
+
+  it('honors a settlement hold applied after selecting due commissions', async () => {
+    const db = connection.db;
+    const fixture = await financialFixture(db);
+    await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    let holdPending = true;
+    const heldAfterSelection = new Proxy(db, {
+      get(target, property, receiver) {
+        const method = Reflect.get(target, property, receiver);
+        if (property === 'transaction') {
+          return async (...args: Parameters<typeof db.transaction>) => {
+            if (holdPending) {
+              holdPending = false;
+              await db
+                .update(eventPartners)
+                .set({ settlementHold: true })
+                .where(eq(eventPartners.id, fixture.partner.id));
+            }
+            return method.apply(target, args);
+          };
+        }
+        return typeof method === 'function' ? method.bind(target) : method;
+      },
+    });
+    expect(await releasePartnerCommissions(heldAfterSelection)).toBe(0);
+    const [commission] = await db
+      .select()
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.partnerId, fixture.partner.id));
+    expect(commission).toMatchObject({ status: 'pending', availableAt: null });
+  }, 30_000);
+
+  it('removes a zero-rate order from tier counts when the partner claims its attendee', async () => {
+    const db = connection.db;
+    const fixture = await financialFixture(db, true);
+    const first = await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    await db
+      .update(registrations)
+      .set({ customerUserId: fixture.partner.customerUserId })
+      .where(eq(registrations.id, first.item.registrationId));
+    await db.insert(partnerFinancialEventInbox).values({
+      organizationId: fixture.partner.organizationId,
+      eventId: fixture.partner.eventId,
+      eventType: 'PartnerAttendeeClaimed',
+      eventKey: `zero-rate-claim:${first.item.id}`,
+      payload: { orderItemId: first.item.id, customerUserId: fixture.partner.customerUserId },
+    });
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const second = await fixture.createPaidOrder();
+    expect(await processPartnerFinancialInbox(db)).toBe(1);
+    const [claimed] = await db
+      .select()
+      .from(partnerCommissionItems)
+      .where(eq(partnerCommissionItems.orderItemId, first.item.id));
+    expect(claimed).toMatchObject({ eligibility: 'self_attendee', eligibleAmount: 0 });
+    const [commission] = await db
+      .select()
+      .from(partnerCommissions)
+      .where(eq(partnerCommissions.orderId, second.order.id));
+    expect(commission).toMatchObject({ sequence: 2, rateBps: 0, commissionAmount: 0 });
+  }, 30_000);
 
   it('creates one commission with five lines and recovers post-reservation reversals once', async () => {
     const db = connection.db;

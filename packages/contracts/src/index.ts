@@ -1,5 +1,7 @@
 import { InvoiceSmsPolicySchema, InvoiceSmsNotificationSchema } from './invoice-sms.js';
 export * from './invoice-sms.js';
+import { MainlandMobileSchema } from './mobile.js';
+export * from './mobile.js';
 import { z } from 'zod';
 import { EventRefundPolicySchema } from './refunds.js';
 export * from './refunds.js';
@@ -1850,11 +1852,6 @@ export const AuthMeSchema = z.object({
   }),
   adminPreferences: AdminPreferencesSchema.default({ lastEventId: null }),
 });
-
-export const MainlandMobileSchema = z
-  .string()
-  .trim()
-  .regex(/^(?:\+?86)?1[3-9]\d{9}$/, '请输入有效的中国大陆手机号');
 
 export const COOPERATION_TYPE_OPTIONS = [
   { value: 'brand_sponsorship', label: '品牌赞助' },

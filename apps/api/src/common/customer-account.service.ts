@@ -61,6 +61,7 @@ import {
   outboxEvents,
   payments,
   paymentNotificationInbox,
+  partnerAttributionRevisions,
   partnerCommissionInquiries,
   partnerLedgerEntries,
   partnerPayoutRecipients,
@@ -2343,6 +2344,16 @@ export class CustomerAccountService {
               eq(customerAuthChallenges.mobileE164, user.mobileE164),
               isNull(customerAuthChallenges.consumedAt),
               isNull(customerAuthChallenges.invalidatedAt),
+            ),
+          );
+        // Preserve each order's financial attribution while detaching the deleted account.
+        await tx
+          .update(partnerAttributionRevisions)
+          .set({ purchaserCustomerUserId: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(partnerAttributionRevisions.organizationId, organizationId),
+              eq(partnerAttributionRevisions.purchaserCustomerUserId, customerUserId),
             ),
           );
         const detachedPurchaserOrders = await tx

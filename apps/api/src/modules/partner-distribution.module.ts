@@ -25,6 +25,7 @@ import {
   API_ERROR_CODES,
   AcceptPartnerProgramSchema,
   AdminBatchEnablePartnersSchema,
+  AdminEditPartnerDetailsSchema,
   AdminEnablePartnerSchema,
   AdminUpdatePartnerSchema,
   ApprovePartnerPayoutBatchSchema,
@@ -586,6 +587,23 @@ export class AdminPartnerController {
       partnerId,
       request.user.sub,
       parse(AdminUpdatePartnerSchema, body, '合作伙伴设置校验失败'),
+    );
+  }
+
+  @Patch('partners/:partnerId/details')
+  @RequireGrant('event.partner.manage')
+  updateDetails(
+    @Req() request: AdminRequest,
+    @Param('eventId', ParseIntPipe) eventId: number,
+    @Param('partnerId', ParseUUIDPipe) partnerId: string,
+    @Body() body: unknown,
+  ) {
+    return this.partners.updatePartnerDetails(
+      request.user.organizationId,
+      eventId,
+      partnerId,
+      request.user.sub,
+      parse(AdminEditPartnerDetailsSchema, body, '合作伙伴资料校验失败'),
     );
   }
 

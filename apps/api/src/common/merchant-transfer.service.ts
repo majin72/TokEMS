@@ -39,6 +39,7 @@ import { DatabaseService } from './database.service.js';
 import { DomainError } from './domain-error.js';
 import { decryptIntegrationCredentials } from './integration-credentials.js';
 import { RedisService } from './redis.service.js';
+import { lockPartnerSettlement } from './partner-settlement-guard.js';
 
 const WECHAT_PAY_API = 'https://api.mch.weixin.qq.com';
 const PROVIDER = 'wechatpay';
@@ -943,6 +944,9 @@ export class MerchantTransferService {
     const integration = await this.integration(organizationId);
     const prepared = await this.db().transaction(async (tx) => {
       await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${eventId}`}, 0))`,
+      );
+      await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`partner-wechat-budget:${organizationId}`}, 0))`,
       );
       const [batch] = await tx
@@ -984,9 +988,6 @@ export class MerchantTransferService {
           HttpStatus.CONFLICT,
         );
       }
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`partner-payout-gate:${organizationId}:${batch.eventId}`}, 0))`,
-      );
       const [unresolvedReconciliation] = await tx
         .select({ id: partnerReconciliationRuns.id })
         .from(partnerReconciliationRuns)
@@ -1043,6 +1044,7 @@ export class MerchantTransferService {
         );
       }
       const partnerIds = [...new Set(rows.map((row) => row.request.partnerId))].sort();
+      await lockPartnerSettlement(tx, organizationId, eventId, partnerIds);
       for (const partnerId of partnerIds) {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`partner-balance:${partnerId}`}, 0))`,
