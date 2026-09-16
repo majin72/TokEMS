@@ -222,7 +222,7 @@ persistent('partner payout guards with real PostgreSQL', () => {
 
   it('reveals manual recipient details only in scope and records a redacted audit', async () => {
     const f = await fixture();
-    const secret = 'recipient-details-test-secret-32-characters';
+    const secret = randomUUID();
     const previous = process.env.PARTNER_PAYOUT_DATA_SECRET;
     process.env.PARTNER_PAYOUT_DATA_SECRET = secret;
     try {
