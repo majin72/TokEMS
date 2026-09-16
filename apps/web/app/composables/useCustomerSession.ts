@@ -1,5 +1,8 @@
 import type {
   CustomerRefundApplication,
+  CustomerPartnerInquiryList,
+  CustomerPartnerInquiryView,
+  CustomerPartnerPayoutList,
   RefundApplicationView,
   RefundContext,
   AttendeeClaimInput,
@@ -219,11 +222,7 @@ export function useCustomerSession() {
   }
 
   function partnerPayouts(eventId: number) {
-    return $fetch<{
-      requests: Array<Record<string, unknown>>;
-      recipients: Array<Record<string, unknown>>;
-      documents: Array<Record<string, unknown>>;
-    }>(
+    return $fetch<CustomerPartnerPayoutList>(
       `/customer/partnerships/${eventId}/payouts`,
       { baseURL, credentials: 'include', headers: headers() },
     );
@@ -294,8 +293,14 @@ export function useCustomerSession() {
     );
   }
 
+  function partnerInquiries(eventId: number) {
+    return $fetch<CustomerPartnerInquiryList>(`/customer/partnerships/${eventId}/inquiries`, {
+      baseURL, credentials: 'include', headers: headers(),
+    });
+  }
+
   function createPartnerInquiry(eventId: number, input: Record<string, unknown>) {
-    return $fetch<Record<string, unknown>>(`/customer/partnerships/${eventId}/inquiries`, {
+    return $fetch<CustomerPartnerInquiryView>(`/customer/partnerships/${eventId}/inquiries`, {
       method: 'POST', baseURL, credentials: 'include', headers: headers(true), body: input,
     });
   }
@@ -737,6 +742,7 @@ export function useCustomerSession() {
     createPartnerPayout,
     confirmPartnerPayoutSettlement,
     createPartnerInquiry,
+    partnerInquiries,
     partnerPayoutConfirmation,
     markPartnerPayoutConfirmed,
     uploadPartnerMedia,

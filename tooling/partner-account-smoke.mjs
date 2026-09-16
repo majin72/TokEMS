@@ -96,9 +96,9 @@ const session = {
     },
   },
 };
-async function fixtures(page, { empty = false, unauthenticated = false, profile = {} } = {}) {
+async function fixtures(page, { empty = false, unauthenticated = false, profile = {}, directoryEnabled = false } = {}) {
   const writes = [];
-  const state = { partner: structuredClone(partner), reject: false };
+  const state = { partner: { ...structuredClone(partner), directoryEnabled }, reject: false };
   Object.assign(state.partner.profile, profile);
   await page.route('**/api/v1/**', async (route) => {
     const req = route.request();
@@ -356,7 +356,7 @@ test('payouts, inquiries and empty records retain usable entry points', async (t
 });
 
 test('public partner preview crosses the account boundary with a new document', async (t) => {
-  const { page } = await setup(t);
+  const { page } = await setup(t, 1440, { directoryEnabled: true, profile: { publicStatus: 'published' } });
   await selectModule(page, '推广素材');
   await page.route('**/partners/test-partner?event=tokems26', (route) =>
     route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<h1>公开详情测试页</h1>' }),
@@ -489,4 +489,15 @@ test('poster renders uploaded avatars, tolerates long copy and refreshes after a
   await selectModule(page, '推广素材');
   await canvas.waitFor({ state: 'visible' });
   assert.ok((await page.evaluate(() => window.__posterText.join(''))).includes('更新后的伙伴'));
+});
+
+
+test('unpublished partner profiles and disabled directories do not offer a broken public preview', async (t) => {
+  const { page } = await setup(t, 375, { profile: { publicStatus: 'published' } });
+  await selectModule(page, '推广素材');
+  assert.equal(await page.getByRole('link', { name: '预览公开详情' }).count(), 0);
+  await page.getByText(/主办方尚未开放公开目录/).waitFor();
+  await selectModule(page, '提现与结算');
+  assert.equal(await page.getByRole('combobox', { name: /^结算渠道/ }).inputValue(), 'manual_bank');
+  assert.equal(await page.getByRole('combobox', { name: /^结算渠道/ }).getByRole('option', { name: '微信商家转账', exact: true }).count(), 0);
 });

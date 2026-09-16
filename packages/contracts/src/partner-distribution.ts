@@ -546,7 +546,17 @@ export interface PartnerProfileView {
   searchIndexingEnabled: boolean;
 }
 
+export interface PartnerPromotionStats {
+  visits: number;
+  uniqueDailyVisits: number;
+  paidOrders: number;
+  netSalesAmount: number;
+  netCommissionAmount: number;
+}
+
 export interface PartnerRelationshipView {
+  promotion?: PartnerPromotionStats;
+  directoryEnabled?: boolean;
   id: string;
   eventId: number;
   eventSlug: string;
@@ -602,4 +612,37 @@ export interface PublicPartnerDetail extends PublicPartnerSummary {
   posterFields: PartnerVisibleFields;
   referralPath: string;
   event: { id: number; slug: string; name: string; startsAt: string; endsAt: string; city: string };
+}
+
+export interface CustomerPartnerInquiryView {
+  id: string;
+  type: 'missing_order' | 'amount_dispute';
+  status: 'open' | 'under_review' | 'resolved' | 'rejected';
+  orderReference: string;
+  purchasedAt: string | null;
+  description: string;
+  decision: string | null;
+  decisionReason: string | null;
+  adjustmentAmount: number | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomerPartnerInquiryList {
+  items: CustomerPartnerInquiryView[];
+  hasMore: boolean;
+}
+
+export interface PartnerPayoutChannelAvailability {
+  channel: 'manual_bank' | 'wechat_transfer';
+  enabled: boolean;
+  reason: string | null;
+}
+
+export interface CustomerPartnerPayoutList {
+  requests: Array<Record<string, unknown>>;
+  recipients: Array<Record<string, unknown>>;
+  documents: Array<Record<string, unknown>>;
+  channels: PartnerPayoutChannelAvailability[];
 }

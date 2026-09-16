@@ -466,6 +466,13 @@ class CustomerPartnerController {
     );
   }
 
+  @Get(':eventId/inquiries')
+  inquiries(@Req() request: CustomerRequest, @Param('eventId', ParseIntPipe) eventId: number,
+    @Res({ passthrough: true }) reply: FastifyReply) {
+    reply.header('Cache-Control', 'private, no-store');
+    return this.partners.inquiryList(request.customerSession, eventId);
+  }
+
   @Post(':eventId/inquiries')
   inquiry(
     @Req() request: CustomerRequest,
@@ -892,6 +899,24 @@ export class AdminPartnerController {
       requestId,
       request.user.sub,
       input,
+    );
+  }
+
+  @Post('recipients/:recipientId/details')
+  @HttpCode(HttpStatus.OK)
+  @RequireGrant('event.payout.review', 'event.payout.execute')
+  recipientDetails(
+    @Req() request: AdminRequest,
+    @Param('eventId', ParseIntPipe) eventId: number,
+    @Param('recipientId', ParseUUIDPipe) recipientId: string,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    reply.header('Cache-Control', 'private, no-store').header('Pragma', 'no-cache');
+    return this.partners.recipientDetails(
+      request.user.organizationId,
+      eventId,
+      recipientId,
+      request.user.sub,
     );
   }
 
