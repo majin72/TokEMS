@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type {
   PartnerRelationshipView,
+  CustomerPartnerInquiryView,
+  PartnerPayoutChannelAvailability,
   PartnerVisibleFields,
   PublicEvent,
 } from '@conference/contracts';
@@ -28,6 +30,11 @@ const eventId = computed(() => Number(route.params.eventId));
 const partner = ref<PartnerRelationshipView | null>(null);
 const commissions = ref<FinanceRow[]>([]);
 const payouts = ref<FinanceRow[]>([]);
+const inquiryHistory = ref<CustomerPartnerInquiryView[]>([]);
+const inquiriesHasMore = ref(false);
+const payoutChannels = ref<PartnerPayoutChannelAvailability[]>([]);
+const wechatPayoutEnabled = computed(() => payoutChannels.value.some((item) => item.channel === 'wechat_transfer' && item.enabled));
+const minimumPayout = computed(() => (partner.value?.currentProgram?.minimumPayoutAmount ?? 1000) / 100);
 const recipients = ref<FinanceRow[]>([]);
 const payoutDocuments = ref<FinanceRow[]>([]);
 const activeTab = ref<Tab>('profile');
@@ -85,7 +92,7 @@ const privacyForm = reactive({
 const gallery = ref<Array<{ assetId: string; url: string; alt: string }>>([]);
 const recipientForm = reactive({
   type: 'individual',
-  channel: 'wechat_transfer',
+  channel: 'manual_bank',
   displayName: '',
   accountReference: '',
 });
@@ -152,7 +159,11 @@ const statusText: Record<string, string> = {
   closed: '已关闭',
   provisional: '预计',
   pending: '结算等待中',
-  available: '可提现',
+  available: '已过等待期',
+  partially_reversed: '部分冲正',
+  reversed: '已冲正',
+  held: '暂缓结算',
+  cancelled: '已取消',
   reserved: '提现处理中',
   paid: '已结算',
   recovery_due: '待追偿',
@@ -249,10 +260,15 @@ function hydrate(value: PartnerRelationshipView) {
   pendingAvatarAssetId.value = undefined;
 }
 async function refreshFinance() {
-  const [commissionResult, payoutResult] = await Promise.all([
+  const [commissionResult, payoutResult, inquiryResult] = await Promise.all([
     customer.partnerCommissions(eventId.value),
     customer.partnerPayouts(eventId.value),
+    customer.partnerInquiries(eventId.value),
   ]);
+  inquiryHistory.value = inquiryResult.items;
+  inquiriesHasMore.value = inquiryResult.hasMore;
+  payoutChannels.value = payoutResult.channels ?? [];
+  if (!wechatPayoutEnabled.value) recipientForm.channel = 'manual_bank';
   commissions.value = commissionResult.items;
   payouts.value = payoutResult.requests;
   recipients.value = payoutResult.recipients;
@@ -471,6 +487,7 @@ function submitInquiry() {
     await customer.createPartnerInquiry(eventId.value, { ...inquiryForm, evidenceAssetIds: [] });
     inquiryForm.orderReference = '';
     inquiryForm.description = '';
+    await refreshFinance();
   }, '佣金申诉已提交');
 }
 async function confirmWechat(request: FinanceRow) {
@@ -906,9 +923,17 @@ useHead({ title: '合作伙伴中心' });
                       rel="noopener"
                       class="account-secondary"
                     >测试推广入口 ↗</a><a
+                      v-if="partner.directoryEnabled && partner.profile.publicStatus === 'published' && partner.qualificationStatus === 'active'"
                       :href="`/partners/${partner.publicSlug}?event=${partner.eventSlug}`"
                       class="account-secondary"
                     >预览公开详情 ↗</a>
+                  </div>
+                  <p v-if="!partner.directoryEnabled" class="field-hint">主办方尚未开放公开目录，个人详情暂不可访问；专属推广链接确认规则后仍可使用。</p>
+                  <p v-else-if="partner.profile.publicStatus !== 'published'" class="field-hint">请在资料与公开设置中选择公开发布后查看个人详情。</p>
+                  <div class="promotion-tip">
+                    <h3>推广效果</h3>
+                    <div class="data-list"><article><span>推广访问次数</span><strong>{{ partner.promotion?.visits ?? 0 }}</strong></article><article><span>每日去重访问人次</span><strong>{{ partner.promotion?.uniqueDailyVisits ?? 0 }}</strong></article><article><span>有效推广订单</span><strong>{{ partner.promotion?.paidOrders ?? 0 }}</strong></article><article><span>有效推广成交额</span><strong>{{ money(partner.promotion?.netSalesAmount) }}</strong></article></div>
+                    <p class="field-hint">累计数据，仅统计专属入口。访问按日去重后累计；成交额扣除退款和不计佣明细，自购不计入。</p>
                   </div>
                   <div class="promotion-tip">
                     <h3>分享你的大会名片</h3>
@@ -979,17 +1004,17 @@ useHead({ title: '合作伙伴中心' });
                 <div class="surface-heading section-row">
                   <div>
                     <h3>佣金记录</h3>
-                    <p>订单金额、退款和结算状态更新后，收益会同步调整。</p>
+                    <p>展示每笔订单扣除冲正后的佣金。可提现余额以页面顶部为准，到账进度见提现与结算记录。</p>
                   </div>
                   <span class="record-count">{{ commissions.length }} 条记录</span>
                 </div>
                 <div v-if="commissions.length" class="data-list">
                   <article v-for="item in commissions" :key="String(item.id)">
                     <div>
-                      <strong>订单 {{ String(item.orderId ?? '').slice(-8) }}</strong><small>{{ dateTime(item.createdAt) }}</small>
+                      <strong style="overflow-wrap:anywhere">订单 {{ String(item.orderId ?? '') }}</strong><small>{{ dateTime(item.createdAt) }}</small>
                     </div>
                     <div>
-                      <b>{{ money(item.commissionAmount) }}</b><span
+                      <b>{{ money(Number(item.commissionAmount ?? 0) - Number(item.reversedAmount ?? 0)) }}</b><small v-if="Number(item.reversedAmount ?? 0)">原佣金 {{ money(item.commissionAmount) }} · 已冲正 {{ money(item.reversedAmount) }}</small><span
                         class="status-badge"
                         :class="{
                           'is-success': item.status === 'available' || item.status === 'paid',
@@ -1013,7 +1038,7 @@ useHead({ title: '合作伙伴中心' });
                   <article class="account-surface">
                     <div class="surface-heading">
                       <h3>申请提现</h3>
-                      <p>税前金额满 10 元可申请。</p>
+                      <p>税前金额满 {{ money(minimumPayout * 100) }} 可申请。</p>
                     </div>
                     <form class="stack-form" @submit.prevent="requestPayout">
                       <label>已验证收款人<select v-model="payoutForm.recipientId" required>
@@ -1032,7 +1057,7 @@ useHead({ title: '合作伙伴中心' });
                       <label>税前提现金额（元）<input
                         v-model="payoutForm.amountYuan"
                         type="number"
-                        min="10"
+                        :min="minimumPayout"
                         step="0.01"
                         required
                         inputmode="decimal"
@@ -1052,7 +1077,7 @@ useHead({ title: '合作伙伴中心' });
                   <form class="account-surface" @submit.prevent="bindRecipient">
                     <div class="surface-heading">
                       <h3>收款信息</h3>
-                      <p>选择与你实际收款身份一致的信息。</p>
+                      <p>选择与你实际收款身份一致的信息。</p><p v-if="!wechatPayoutEnabled" class="field-hint">主办方暂未开通微信转账，请使用银行账户结算。</p>
                     </div>
                     <div class="stack-form">
                       <label>收款主体<select v-model="recipientForm.type">
@@ -1060,7 +1085,7 @@ useHead({ title: '合作伙伴中心' });
                         <option value="organization">企业</option>
                       </select></label><label>结算渠道<select v-model="recipientForm.channel">
                         <option
-                          v-if="recipientForm.type === 'individual'"
+                          v-if="recipientForm.type === 'individual' && wechatPayoutEnabled"
                           value="wechat_transfer"
                         >
                           微信商家转账
@@ -1134,7 +1159,7 @@ useHead({ title: '合作伙伴中心' });
                         >
                           确认结算金额
                         </button><button
-                          v-if="item.status === 'executing'"
+                          v-if="item.status === 'executing' && recipients.some((recipient) => recipient.id === item.recipientId && recipient.channel === 'wechat_transfer')"
                           type="button"
                           class="account-secondary"
                           :disabled="pending"
@@ -1153,38 +1178,45 @@ useHead({ title: '合作伙伴中心' });
                 </article>
               </div>
 
-              <div v-else class="account-surface inquiry-layout">
-                <div class="inquiry-intro">
-                  <span class="section-index">HOW IT WORKS</span>
-                  <h3>我们会核对每一笔收益</h3>
-                  <p>请填写订单编号和具体情况，方便大会运营人员核对。</p>
-                  <ol>
-                    <li>选择问题类型</li>
-                    <li>填写订单与情况说明</li>
-                    <li>提交后等待运营人员核查</li>
-                  </ol>
-                  <p>核查内容包括订单、推广来源、退款和结算记录。</p>
+              <div v-else class="section-stack">
+                <div class="account-surface inquiry-layout">
+                  <div class="inquiry-intro">
+                    <span class="section-index">HOW IT WORKS</span>
+                    <h3>我们会核对每一笔收益</h3>
+                    <p>请填写订单编号和具体情况，方便大会运营人员核对。</p>
+                    <ol>
+                      <li>选择问题类型</li>
+                      <li>填写订单与情况说明</li>
+                      <li>提交后等待运营人员核查</li>
+                    </ol>
+                    <p>核查内容包括订单、推广来源、退款和结算记录。</p>
+                  </div>
+                  <form class="stack-form" @submit.prevent="submitInquiry">
+                    <label>问题类型<select v-model="inquiryForm.type">
+                      <option value="missing_order">订单未计佣</option>
+                      <option value="amount_dispute">佣金金额有疑问</option>
+                    </select></label><label>订单编号<input
+                      v-model="inquiryForm.orderReference"
+                      required
+                      maxlength="80"
+                      placeholder="填写需要核对的订单编号"
+                    /></label><label>问题说明<textarea
+                      v-model="inquiryForm.description"
+                      required
+                      rows="7"
+                      minlength="10"
+                      maxlength="4000"
+                      placeholder="请描述遇到的问题及相关情况，至少 10 个字"
+                    ></textarea><span class="field-hint">请填写 10 至 4,000 个字。</span></label><button class="account-primary" :disabled="pending">
+                      提交佣金申诉 <span aria-hidden="true">→</span>
+                    </button>
+                  </form>
                 </div>
-                <form class="stack-form" @submit.prevent="submitInquiry">
-                  <label>问题类型<select v-model="inquiryForm.type">
-                    <option value="missing_order">订单未计佣</option>
-                    <option value="amount_dispute">佣金金额有疑问</option>
-                  </select></label><label>订单编号<input
-                    v-model="inquiryForm.orderReference"
-                    required
-                    maxlength="80"
-                    placeholder="填写需要核对的订单编号"
-                  /></label><label>问题说明<textarea
-                    v-model="inquiryForm.description"
-                    required
-                    rows="7"
-                    minlength="10"
-                    maxlength="4000"
-                    placeholder="请描述遇到的问题及相关情况，至少 10 个字"
-                  ></textarea><span class="field-hint">请填写 10 至 4,000 个字。</span></label><button class="account-primary" :disabled="pending">
-                    提交佣金申诉 <span aria-hidden="true">→</span>
-                  </button>
-                </form>
+                <article class="account-surface">
+                  <div class="surface-heading"><h3>我的申诉记录</h3><p>查看核查进度及大会运营人员的处理说明。</p></div>
+                  <div v-if="inquiryHistory.length" class="data-list"><article v-for="item in inquiryHistory" :key="item.id"><div><strong style="overflow-wrap:anywhere">订单 {{ item.orderReference }}</strong><small>{{ dateTime(item.createdAt) }}</small><p>{{ item.description }}</p><p v-if="item.decisionReason">处理说明：{{ item.decisionReason }}</p><small v-if="item.adjustmentAmount !== null">佣金调整 {{ money(item.adjustmentAmount) }}</small></div><span class="status-badge">{{ item.status === 'open' ? '待核查' : item.status === 'under_review' ? '复核中' : item.status === 'resolved' ? '已处理' : '已驳回' }}</span></article></div>
+                  <p v-else class="field-hint">还没有申诉记录，提交后可在这里跟进。</p><p v-if="inquiriesHasMore" class="field-hint">当前显示最近 100 条记录，较早记录请联系大会运营人员查询。</p>
+                </article>
               </div>
             </section>
           </div>
