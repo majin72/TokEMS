@@ -215,7 +215,10 @@ export async function renderPersonalEventPoster(
 
   context.fillStyle = '#f3f5f8';
   context.font = '800 54px "Arial Narrow", "PingFang SC", sans-serif';
-  const eventTitleLines = wrapText(context, options.eventName, 72, 174, 760, 64, 2);
+  // The title has the full top-row width available. Keeping this at 900px
+  // prevents the final character of the event name from becoming an orphan
+  // line (for example, “会” in “营销大会”).
+  const eventTitleLines = wrapText(context, options.eventName, 72, 174, 900, 64, 2);
   context.fillStyle = '#8fa1bf';
   context.font = '600 22px "Arial Narrow", "PingFang SC", sans-serif';
   wrapText(
