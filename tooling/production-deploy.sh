@@ -2333,7 +2333,7 @@ assert_standard_release_scope() {
     die 'Cannot read complete Compose release files.'
   fi
 
-# Accept only the reviewed Compose transformations when every other byte is unchanged.
+  # Accept only the reviewed Compose transformations when every other byte is unchanged.
   python3 - "$baseline_compose" "$target_compose" <<'PY' || scope_status=$?
 import re
 import sys
@@ -2359,11 +2359,6 @@ api_switch_after = (
     "      BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}\n"
     "      API_PORT: 4100\n"
 )
-
-def add_api_switch(value):
-    if value.count(api_switch_before) != 1:
-        raise SystemExit(1)
-    return value.replace(api_switch_before, api_switch_after, 1)
 
 def reviewed_partner_minio_change(value):
     additions = (
@@ -2393,8 +2388,9 @@ except (IndexError, ValueError):
 
 try:
     expected_reviewed = reviewed_partner_minio_change(baseline)
-    expected_reviewed = add_api_switch(expected_reviewed)
     reviewed_infrastructure_allowed = target == expected_reviewed
+    if not reviewed_infrastructure_allowed and body.count(api_switch_before) == 1:
+        reviewed_infrastructure_allowed = target == reviewed_partner_minio_change(expected_api)
 except SystemExit:
     reviewed_infrastructure_allowed = False
 

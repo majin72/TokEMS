@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -1258,10 +1259,14 @@ test('standard release scope allows the reviewed partner and MinIO Compose migra
   const oldMc =
     'minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727';
   const baseline = current
-    .replace(batchFlag, '')
     .replace(partnerBlockWithNewline, '')
     .replace(`quay.io/${oldMinio}`, oldMinio)
     .replace(`quay.io/${oldMc}`, oldMc);
+  // Pin the full production fd2086f Compose bytes without depending on CI Git history.
+  assert.equal(
+    createHash('sha256').update(baseline).digest('hex'),
+    '9e62eda0625978a9d8c0e1a5283ece8bc4c876bdabfb4757f2e4689e2274fce9',
+  );
   const gate = source.slice(
     source.indexOf('assert_standard_release_scope() {'),
     source.indexOf('\ncanonical_repair_scope_is_compatible() {'),
@@ -1299,7 +1304,30 @@ assert_standard_release_scope
     );
   }
   try {
-    assert.equal(run(baseline, current).status, 0);
+    assert.equal(run(baseline, current).status, 0, 'production already contains the batch switch');
+    assert.equal(
+      run(baseline.replace(batchFlag, ''), current).status,
+      0,
+      'older release adds both',
+    );
+    for (const target of [
+      current.replace(batchFlag, ''),
+      current.replace(
+        'BATCH_PURCHASE_CREATION_ENABLED:-true',
+        'BATCH_PURCHASE_CREATION_ENABLED:-false',
+      ),
+      current.replace(batchFlag, `${batchFlag}${batchFlag}`),
+      current.replace(partnerBlockWithNewline, ''),
+      current.replace(`quay.io/${oldMinio}`, oldMinio),
+      current.replace(`quay.io/${oldMc}`, oldMc),
+      current.replace('sha256:14cea', 'sha256:24cea'),
+      current.replace('API_PORT: 4100', 'API_PORT: 4200'),
+      current.replace('tokems-postgres', 'tokems-postgres-other'),
+      `${current}\n  extra-service:\n    image: example\n`,
+    ]) {
+      assert.notEqual(target, current, 'negative case must change the target');
+      assert.equal(run(baseline, target).status, 1, 'unreviewed changes remain blocked');
+    }
     assert.equal(
       run(baseline, current.replace('quay.io/minio/mc:', 'quay.io/minio/changed:')).status,
       1,

@@ -298,7 +298,9 @@ sudo /usr/local/sbin/tokems-deploy deploy \
 
 生产巡检、发布、宝塔面板和故障诊断禁止执行 `docker system df` 及其 `-v` 变体。磁盘门禁使用 `docker info --format '{{.DockerRootDir}}'` 定位 Docker 数据目录，再以 `df -Pk` 或 `df -h` 读取文件系统可用空间；单个镜像证据使用有界的 `docker image inspect`。出现 Docker 异常时先保存 `journalctl -u docker`、内核 OOM 日志、容器状态、进程树和 Docker socket 客户端证据，避免运行全局对象盘点命令。每次发布前同时确认 `pgrep -af 'docker system df'` 没有真实匹配项，并观察 `dockerd` RSS 保持稳定。
 
-标准单命令发布拒绝 `docker-compose.yml` 的基础设施变化。当前只允许一项已评审的应用配置增量：在 API 的环境配置中增加 `BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}`。门禁将目标文件与当前运行提交逐字节比较，除该行在指定位置的增加外，任何其他差异均会阻断发布；开关的默认值变化、删除、其他服务或额外环境项也不在允许范围内。数据库、缓存、对象存储、卷、端口和服务拓扑变更继续进入单独评审的基础设施维护窗口。
+标准单命令发布逐字节核对 `docker-compose.yml`，只允许已评审的精确变换：API 增加 `BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}`，以及合作伙伴配置与 MinIO 镜像来源的组合变更。后者在共享应用环境的 `PUBLIC_API_URL` 后增加 `PARTNER_ATTRIBUTION_SECRET: ${PARTNER_ATTRIBUTION_SECRET:-}`、`PARTNER_PAYOUT_DATA_SECRET: ${PARTNER_PAYOUT_DATA_SECRET:-}` 和 `PAYOUT_PUBLIC_URL: ${PAYOUT_PUBLIC_URL:-${PUBLIC_ORIGIN}}`，同时将 MinIO 与 mc 的来源改为 `quay.io/minio/`，保持现有版本及固定摘要。该组合既支持已经包含批量购票开关的线上版本，也支持同时增加该开关的旧版本。
+
+除上述变换外，任何额外差异均会阻断发布；开关默认值变化或删除、部分组合变更、镜像摘要变化、卷、端口和服务拓扑变化继续进入独立评审。门禁通过后仍须完成完整预检、备份、写冻结、迁移和验收。应用切换使用 `--no-deps`，不会重建 PostgreSQL、Redis 或 MinIO。发布前应检查目标 Compose 解析出的两个 `PARTNER_*` 密钥均至少 32 字符，只输出检查结果；目标代码中的 `??` 不会将 Compose 提供的空字符串回退为 `JWT_SECRET`。
 
 每次标准发布都有短暂写冻结窗口：六个候选镜像拉取并验证完成后停止 API 和 Worker，持久化恢复标记，在静止写入状态重新生成最终数据库备份与业务基线，再执行迁移和可选的规范同步。语义验收期间 API 仅允许数据库读取，Worker 暂停消费。只读验收阶段公开浏览恢复；报名、支付回调、后台保存及异步任务会在窗口内失败或重试。脚本在恢复正常 API/Worker、核对持久 ready 身份和数据复验后归档恢复标记并记录成功。选择业务低峰执行，并确认支付渠道具备回调重试。
 
