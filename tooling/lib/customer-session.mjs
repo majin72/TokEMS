@@ -1,3 +1,10 @@
+function cookieFrom(response, name) {
+  const values = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : (response.headers.get('set-cookie') ?? '').split(/,(?=[^;,]+=)/u);
+  return values.find((value) => value.trimStart().startsWith(`${name}=`))?.split(';', 1)[0];
+}
+
 export async function createCustomerSession({ apiBase, mobile, organizationSlug, forwardedFor }) {
   const organizationHeaders = {
     'Content-Type': 'application/json',
@@ -37,7 +44,7 @@ export async function createCustomerSession({ apiBase, mobile, organizationSlug,
       `Customer OTP verification failed: ${verifyResponse.status} ${JSON.stringify(session)}`,
     );
   }
-  let cookie = verifyResponse.headers.get('set-cookie')?.split(';', 1)[0];
+  let cookie = cookieFrom(verifyResponse, 'conference_customer_consent');
   if (session.consentRequired) {
     if (!cookie || !session.policy) {
       throw new Error('Customer OTP verification returned an incomplete consent challenge');
@@ -62,7 +69,7 @@ export async function createCustomerSession({ apiBase, mobile, organizationSlug,
         `Customer consent confirmation failed: ${consentResponse.status} ${JSON.stringify(session)}`,
       );
     }
-    cookie = consentResponse.headers.get('set-cookie')?.split(';', 1)[0];
+    cookie = cookieFrom(consentResponse, 'conference_customer_session');
   }
   if (!cookie || typeof session.csrfToken !== 'string') {
     throw new Error('Customer OTP verification did not return a usable session');
