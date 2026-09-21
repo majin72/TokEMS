@@ -647,7 +647,11 @@ async function runVisualSmoke() {
 
     await page.getByRole('button', { name: '验证并继续' }).click();
     const consent = page.locator('.auth-consent input[type="checkbox"]');
-    if (await consent.count()) {
+    const consentRequired = await consent
+      .waitFor({ state: 'visible', timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (consentRequired) {
       await consent.check();
       await page.getByRole('button', { name: '同意并继续' }).click();
     }
