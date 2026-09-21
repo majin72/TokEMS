@@ -31,13 +31,39 @@ export async function createCustomerSession({ apiBase, mobile, organizationSlug,
       privacyVersion: '',
     }),
   });
-  const session = await verifyResponse.json().catch(() => ({}));
+  let session = await verifyResponse.json().catch(() => ({}));
   if (!verifyResponse.ok) {
     throw new Error(
       `Customer OTP verification failed: ${verifyResponse.status} ${JSON.stringify(session)}`,
     );
   }
-  const cookie = verifyResponse.headers.get('set-cookie')?.split(';', 1)[0];
+  let cookie = verifyResponse.headers.get('set-cookie')?.split(';', 1)[0];
+  if (session.consentRequired) {
+    if (!cookie || !session.policy) {
+      throw new Error('Customer OTP verification returned an incomplete consent challenge');
+    }
+    const consentResponse = await fetch(`${apiBase}/customer-auth/consent`, {
+      method: 'POST',
+      headers: {
+        ...organizationHeaders,
+        Cookie: cookie,
+        Origin: process.env.PUBLIC_ORIGIN ?? new URL(apiBase).origin,
+        'X-Consent-Confirmation': 'true',
+      },
+      body: JSON.stringify({
+        consentAccepted: true,
+        termsVersion: session.policy.termsVersion,
+        privacyVersion: session.policy.privacyVersion,
+      }),
+    });
+    session = await consentResponse.json().catch(() => ({}));
+    if (!consentResponse.ok) {
+      throw new Error(
+        `Customer consent confirmation failed: ${consentResponse.status} ${JSON.stringify(session)}`,
+      );
+    }
+    cookie = consentResponse.headers.get('set-cookie')?.split(';', 1)[0];
+  }
   if (!cookie || typeof session.csrfToken !== 'string') {
     throw new Error('Customer OTP verification did not return a usable session');
   }
