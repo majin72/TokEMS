@@ -136,7 +136,9 @@ class CustomerAuthController {
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     const allowedOrigin =
-      process.env.PUBLIC_ORIGIN ?? `${request.protocol}://${request.headers.host}`;
+      process.env.PUBLIC_ORIGIN ??
+      process.env.PUBLIC_WEB_URL ??
+      `${request.protocol}://${request.headers.host}`;
     let originMatches = request.headers.origin === allowedOrigin;
     if (!originMatches && process.env.DEPLOYMENT_MODE !== 'production' && request.headers.origin) {
       try {
