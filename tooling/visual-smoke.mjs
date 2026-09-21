@@ -646,6 +646,11 @@ async function runVisualSmoke() {
     await page.getByPlaceholder('6 位验证码').fill(code);
 
     await page.getByRole('button', { name: '验证并继续' }).click();
+    const consent = page.locator('.auth-consent input[type="checkbox"]');
+    if (await consent.count()) {
+      await consent.check();
+      await page.getByRole('button', { name: '同意并继续' }).click();
+    }
     await page.locator('.auth-dialog').waitFor({ state: 'detached' });
     await page.getByRole('heading', { name: '个人中心', level: 1 }).waitFor();
   }
