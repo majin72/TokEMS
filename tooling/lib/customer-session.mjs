@@ -5,6 +5,29 @@ function cookieFrom(response, name) {
   return values.find((value) => value.trimStart().startsWith(`${name}=`))?.split(';', 1)[0];
 }
 
+function mergeCookies(cookieJar, response) {
+  const cookies = new Map(
+    cookieJar
+      .split(';')
+      .map((value) => value.trim().split('=', 2))
+      .filter(([name, value]) => name && value)
+      .map(([name, value]) => [name, `${name}=${value}`]),
+  );
+  const values = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : (response.headers.get('set-cookie') ?? '').split(/,(?=[^;,]+=)/u);
+  for (const value of values) {
+    const pair = value.trimStart().split(';', 1)[0];
+    const separator = pair.indexOf('=');
+    if (separator < 1) continue;
+    const name = pair.slice(0, separator);
+    const cookieValue = pair.slice(separator + 1);
+    if (cookieValue) cookies.set(name, pair);
+    else cookies.delete(name);
+  }
+  return [...cookies.values()].join('; ');
+}
+
 export async function createCustomerSession({ apiBase, mobile, organizationSlug, forwardedFor }) {
   const organizationHeaders = {
     'Content-Type': 'application/json',
@@ -44,16 +67,17 @@ export async function createCustomerSession({ apiBase, mobile, organizationSlug,
       `Customer OTP verification failed: ${verifyResponse.status} ${JSON.stringify(session)}`,
     );
   }
-  let cookie = cookieFrom(verifyResponse, 'conference_customer_consent');
+  let cookie = mergeCookies('', verifyResponse);
   if (session.consentRequired) {
-    if (!cookie || !session.policy) {
+    const consentCookie = cookieFrom(verifyResponse, 'conference_customer_consent');
+    if (!consentCookie || !session.policy) {
       throw new Error('Customer OTP verification returned an incomplete consent challenge');
     }
     const consentResponse = await fetch(`${apiBase}/customer-auth/consent`, {
       method: 'POST',
       headers: {
         ...organizationHeaders,
-        Cookie: cookie,
+        Cookie: consentCookie,
         Origin: process.env.PUBLIC_ORIGIN ?? new URL(apiBase).origin,
         'X-Consent-Confirmation': 'true',
       },
@@ -69,9 +93,9 @@ export async function createCustomerSession({ apiBase, mobile, organizationSlug,
         `Customer consent confirmation failed: ${consentResponse.status} ${JSON.stringify(session)}`,
       );
     }
-    cookie = cookieFrom(consentResponse, 'conference_customer_session');
+    cookie = mergeCookies(cookie, consentResponse);
   }
-  if (!cookie || typeof session.csrfToken !== 'string') {
+  if (!cookie.includes('conference_customer_session=') || typeof session.csrfToken !== 'string') {
     throw new Error('Customer OTP verification did not return a usable session');
   }
   return {
