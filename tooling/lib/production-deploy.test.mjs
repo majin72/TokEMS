@@ -1135,7 +1135,11 @@ test('standard release scope allows only the reviewed API batch switch addition'
   function run(base, target, failures = {}) {
     writeFileSync(basePath, base);
     writeFileSync(targetPath, target);
-    return spawnSync('bash', ['-c', `
+    return spawnSync(
+      'bash',
+      [
+        '-c',
+        `
 set -Eeuo pipefail
 release_baseline_sha=baseline
 target_sha=target
@@ -1152,21 +1156,71 @@ git_as_owner() {
 }
 ${gate}
 assert_standard_release_scope
-`], { encoding: 'utf8', env: { ...process.env, BASE: basePath, TARGET: targetPath, TEMP_DIR: directory, ...failures } });
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          BASE: basePath,
+          TARGET: targetPath,
+          TEMP_DIR: directory,
+          ...failures,
+        },
+      },
+    );
   }
   try {
     for (const [name, base, target, allowed] of [
       ['unchanged legacy compose', baseline, baseline, true],
       ['unchanged current compose', current, current, true],
       ['reviewed API switch', baseline, current, true],
-      ['switch default altered', baseline, current.replace('BATCH_PURCHASE_CREATION_ENABLED:-true', 'BATCH_PURCHASE_CREATION_ENABLED:-false'), false],
-      ['switch under worker', baseline, baseline.replace('  worker:\n', `  worker:\n    environment:\n${flag}`), false],
-      ['switch plus API port change', baseline, current.replace('API_PORT: 4100', 'API_PORT: 4200'), false],
-      ['switch plus volume change', baseline, current.replace('tokems-postgres', 'tokems-postgres-other'), false],
-      ['switch plus another variable', baseline, current.replace(flag, `${flag}      EXTRA_SETTING: true\n`), false],
-      ['switch plus new service', baseline, `${current}\n  unexpected-service:\n    image: example\n`, false],
+      [
+        'switch default altered',
+        baseline,
+        current.replace(
+          'BATCH_PURCHASE_CREATION_ENABLED:-true',
+          'BATCH_PURCHASE_CREATION_ENABLED:-false',
+        ),
+        false,
+      ],
+      [
+        'switch under worker',
+        baseline,
+        baseline.replace('  worker:\n', `  worker:\n    environment:\n${flag}`),
+        false,
+      ],
+      [
+        'switch plus API port change',
+        baseline,
+        current.replace('API_PORT: 4100', 'API_PORT: 4200'),
+        false,
+      ],
+      [
+        'switch plus volume change',
+        baseline,
+        current.replace('tokems-postgres', 'tokems-postgres-other'),
+        false,
+      ],
+      [
+        'switch plus another variable',
+        baseline,
+        current.replace(flag, `${flag}      EXTRA_SETTING: true\n`),
+        false,
+      ],
+      [
+        'switch plus new service',
+        baseline,
+        `${current}\n  unexpected-service:\n    image: example\n`,
+        false,
+      ],
       ['switch removal', current, baseline, false],
-      ['unknown baseline layout', baseline.replace('  api:\n', '  different-api:\n'), current, false],
+      [
+        'unknown baseline layout',
+        baseline.replace('  api:\n', '  different-api:\n'),
+        current,
+        false,
+      ],
       ['missing baseline', '', current, false],
       ['missing target', baseline, '', false],
     ]) {
@@ -1183,6 +1237,83 @@ assert_standard_release_scope
       { FAIL_BASE: '128', FAIL_TARGET: '128' },
     );
     assert.equal(incomplete.status, 1, 'Partial Git output cannot prove unchanged infrastructure');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('standard release scope allows the reviewed partner and MinIO Compose migration', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'tokems-reviewed-compose-scope-'));
+  const basePath = resolve(directory, 'base.yml');
+  const targetPath = resolve(directory, 'target.yml');
+  const current = readFileSync(resolve(repositoryRoot, 'docker-compose.yml'), 'utf8');
+  const batchFlag =
+    '      BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}\n';
+  const partnerStart = current.indexOf('  PARTNER_ATTRIBUTION_SECRET:');
+  const partnerEnd = current.indexOf('  TRUST_PROXY:', partnerStart);
+  assert.ok(partnerStart >= 0 && partnerEnd > partnerStart);
+  const partnerBlockWithNewline = current.slice(partnerStart, partnerEnd);
+  const oldMinio =
+    'minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e';
+  const oldMc =
+    'minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727';
+  const baseline = current
+    .replace(batchFlag, '')
+    .replace(partnerBlockWithNewline, '')
+    .replace(`quay.io/${oldMinio}`, oldMinio)
+    .replace(`quay.io/${oldMc}`, oldMc);
+  const gate = source.slice(
+    source.indexOf('assert_standard_release_scope() {'),
+    source.indexOf('\ncanonical_repair_scope_is_compatible() {'),
+  );
+  function run(base, target) {
+    writeFileSync(basePath, base);
+    writeFileSync(targetPath, target);
+    return spawnSync(
+      'bash',
+      [
+        '-c',
+        `
+set -Eeuo pipefail
+release_baseline_sha=baseline
+target_sha=target
+LOCK_DIR="$TEMP_DIR"
+log() { printf '%s\\n' "$*"; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+git_as_owner() {
+  case "$1:$2" in
+    diff:--quiet) cmp -s "$BASE" "$TARGET" ;;
+    show:baseline:docker-compose.yml) cat "$BASE" ;;
+    show:target:docker-compose.yml) cat "$TARGET" ;;
+    *) exit 2 ;;
+  esac
+}
+${gate}
+assert_standard_release_scope
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, BASE: basePath, TARGET: targetPath, TEMP_DIR: directory },
+      },
+    );
+  }
+  try {
+    assert.equal(run(baseline, current).status, 0);
+    assert.equal(
+      run(baseline, current.replace('quay.io/minio/mc:', 'quay.io/minio/changed:')).status,
+      1,
+    );
+    assert.equal(
+      run(
+        baseline,
+        current.replace(
+          'PAYOUT_PUBLIC_URL: ${PAYOUT_PUBLIC_URL:-${PUBLIC_ORIGIN}}',
+          'PAYOUT_PUBLIC_URL: https://example.test',
+        ),
+      ).status,
+      1,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

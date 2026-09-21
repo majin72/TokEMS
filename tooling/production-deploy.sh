@@ -2333,7 +2333,7 @@ assert_standard_release_scope() {
     die 'Cannot read complete Compose release files.'
   fi
 
-  # Accept the reviewed API switch only when every other Compose byte is unchanged.
+# Accept only the reviewed Compose transformations when every other byte is unchanged.
   python3 - "$baseline_compose" "$target_compose" <<'PY' || scope_status=$?
 import re
 import sys
@@ -2353,20 +2353,56 @@ api = api_headers[0]
 next_service = re.search(r"(?m)^  [A-Za-z0-9_-]+:", baseline[api.end():])
 end = api.end() + next_service.start() if next_service else len(baseline)
 body = baseline[api.start():end]
-before = "    environment:\n      <<: *app-environment\n      API_PORT: 4100\n"
-after = (
+api_switch_before = "    environment:\n      <<: *app-environment\n      API_PORT: 4100\n"
+api_switch_after = (
     "    environment:\n      <<: *app-environment\n"
     "      BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}\n"
     "      API_PORT: 4100\n"
 )
-if body.count(before) != 1:
-    raise SystemExit(1)
-expected = baseline[:api.start()] + body.replace(before, after, 1) + baseline[end:]
-raise SystemExit(0 if target == expected else 1)
+
+def add_api_switch(value):
+    if value.count(api_switch_before) != 1:
+        raise SystemExit(1)
+    return value.replace(api_switch_before, api_switch_after, 1)
+
+def reviewed_partner_minio_change(value):
+    additions = (
+        "  PARTNER_ATTRIBUTION_SECRET: ${PARTNER_ATTRIBUTION_SECRET:-}\n"
+        "  PARTNER_PAYOUT_DATA_SECRET: ${PARTNER_PAYOUT_DATA_SECRET:-}\n"
+        "  PAYOUT_PUBLIC_URL: ${PAYOUT_PUBLIC_URL:-${PUBLIC_ORIGIN}}\n"
+    )
+    if value.count(additions) != 0:
+        raise SystemExit(1)
+    anchor = "  PUBLIC_API_URL: ${PUBLIC_ORIGIN}\n"
+    if value.count(anchor) != 1:
+        raise SystemExit(1)
+    value = value.replace(anchor, anchor + additions, 1)
+    old_minio = "minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+    new_minio = "quay.io/minio/" + old_minio.split("/", 1)[1]
+    old_mc = "minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+    new_mc = "quay.io/minio/" + old_mc.split("/", 1)[1]
+    if value.count(old_minio) != 1 or value.count(old_mc) != 1:
+        raise SystemExit(1)
+    return value.replace(old_minio, new_minio, 1).replace(old_mc, new_mc, 1)
+
+try:
+    expected_api = baseline[:api.start()] + body.replace(api_switch_before, api_switch_after, 1) + baseline[end:]
+    api_only_allowed = body.count(api_switch_before) == 1 and target == expected_api
+except (IndexError, ValueError):
+    api_only_allowed = False
+
+try:
+    expected_reviewed = reviewed_partner_minio_change(baseline)
+    expected_reviewed = add_api_switch(expected_reviewed)
+    reviewed_infrastructure_allowed = target == expected_reviewed
+except SystemExit:
+    reviewed_infrastructure_allowed = False
+
+raise SystemExit(0 if api_only_allowed or reviewed_infrastructure_allowed else 1)
 PY
   rm -f -- "$baseline_compose" "$target_compose"
   if [[ "$scope_status" == 0 ]]; then
-    log 'Approved API batch purchase switch addition; Compose infrastructure is unchanged.'
+    log 'Approved Compose scope: the reviewed API switch or the reviewed partner/MinIO change set.'
     return
   fi
   die 'docker-compose.yml changed; use the reviewed infrastructure maintenance procedure for this release.'
