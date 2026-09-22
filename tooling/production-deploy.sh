@@ -2178,13 +2178,71 @@ capture_release_baseline() {
   release_baseline_code_migration_hash="$runtime_code_migration_hash"
 }
 
+capture_canonical_snapshot() {
+  local output_file="$1"
+  compose_read_only_bounded "$DB_QUERY_TIMEOUT_SECONDS" run --rm --no-deps \
+    -e CANONICAL_API_BASE_URL=http://api:4100/api/v1 \
+    -e CANONICAL_EXPORT_TRUSTED_COMPOSE_INTERNAL=true \
+    api \
+    node --preserve-symlinks-main node_modules/@conference/database/dist/export-canonical-homepage.js --stdout \
+    >"$output_file"
+  chmod 600 "$output_file"
+}
+
 canonical_snapshot_files_match() {
   local actual_snapshot="$1"
   shift
   [[ $# -gt 0 ]] || return 2
   python3 - "$actual_snapshot" "$@" <<'PY'
+import copy
 import json
+import re
 import sys
+
+
+UUID_RE = re.compile(
+    r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])"
+)
+
+
+def asset_maps(actual, expected):
+    actual_assets = actual.get("assets", []) if isinstance(actual, dict) else []
+    expected_assets = expected.get("assets", []) if isinstance(expected, dict) else []
+    expected_by_digest = {
+        asset.get("contentDigest"): asset
+        for asset in expected_assets
+        if isinstance(asset, dict) and asset.get("contentDigest")
+    }
+    id_map = {}
+    storage_map = {}
+    for asset in actual_assets:
+        if not isinstance(asset, dict):
+            continue
+        expected_asset = expected_by_digest.get(asset.get("contentDigest"))
+        if not expected_asset:
+            continue
+        if asset.get("id") and expected_asset.get("id"):
+            id_map[asset["id"]] = expected_asset["id"]
+        if asset.get("storageKey") and expected_asset.get("storageKey"):
+            storage_map[asset["storageKey"]] = expected_asset["storageKey"]
+    return id_map, storage_map
+
+
+def normalize_asset_references(value, id_map, storage_map):
+    if isinstance(value, str):
+        if value in id_map:
+            return id_map[value]
+        if value in storage_map:
+            return storage_map[value]
+        return UUID_RE.sub(lambda match: id_map.get(match.group(1), match.group(1)), value)
+    if isinstance(value, list):
+        return [normalize_asset_references(item, id_map, storage_map) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: normalize_asset_references(item, id_map, storage_map)
+            for key, item in value.items()
+        }
+    return value
 
 
 def load_snapshot(file_name):
@@ -2204,6 +2262,12 @@ try:
     expected = [load_snapshot(file_name) for file_name in sys.argv[2:]]
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit(2)
+
+for candidate in expected:
+    id_map, storage_map = asset_maps(actual, candidate)
+    normalized_actual = normalize_asset_references(copy.deepcopy(actual), id_map, storage_map)
+    if normalized_actual == candidate:
+        raise SystemExit(0)
 
 raise SystemExit(0 if actual in expected else 1)
 PY
@@ -3797,13 +3861,52 @@ PY
 verify_homepage_file() {
   local file_name="$1"
   local expected_snapshot="${2:-${release_source_dir:-$APP_DIR}/packages/contracts/src/canonical-homepage.public.json}"
+  local actual_full_snapshot="${3:-}"
+  local expected_full_snapshot="${4:-}"
   python3 - \
     "$file_name" \
     "$expected_snapshot" \
-    "$CANONICAL_EVENT_SLUG" <<'PY'
+    "$CANONICAL_EVENT_SLUG" \
+    "$actual_full_snapshot" \
+    "$expected_full_snapshot" <<'PY'
 from copy import deepcopy
 import json
+import re
 import sys
+
+UUID_RE = re.compile(
+    r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])"
+)
+
+
+def asset_id_map(actual_snapshot, expected_snapshot):
+    actual_assets = actual_snapshot.get("assets", []) if isinstance(actual_snapshot, dict) else []
+    expected_assets = expected_snapshot.get("assets", []) if isinstance(expected_snapshot, dict) else []
+    expected_by_digest = {
+        asset.get("contentDigest"): asset
+        for asset in expected_assets
+        if isinstance(asset, dict) and asset.get("contentDigest")
+    }
+    return {
+        asset["id"]: expected_asset["id"]
+        for asset in actual_assets
+        if isinstance(asset, dict)
+        and asset.get("id")
+        and (expected_asset := expected_by_digest.get(asset.get("contentDigest")))
+        and expected_asset.get("id")
+    }
+
+
+def normalize_asset_ids(value, id_map):
+    if isinstance(value, str):
+        if value in id_map:
+            return id_map[value]
+        return UUID_RE.sub(lambda match: id_map.get(match.group(1), match.group(1)), value)
+    if isinstance(value, list):
+        return [normalize_asset_ids(item, id_map) for item in value]
+    if isinstance(value, dict):
+        return {key: normalize_asset_ids(item, id_map) for key, item in value.items()}
+    return value
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     actual = json.load(handle)
@@ -3814,6 +3917,12 @@ if actual.get("slug") != sys.argv[3]:
     raise SystemExit("public homepage did not return the canonical event slug")
 
 normalized = deepcopy(actual)
+if len(sys.argv) == 6 and sys.argv[4] and sys.argv[5]:
+    with open(sys.argv[4], encoding="utf-8") as handle:
+        actual_full = json.load(handle)
+    with open(sys.argv[5], encoding="utf-8") as handle:
+        expected_full = json.load(handle)
+    normalized = normalize_asset_ids(normalized, asset_id_map(actual_full, expected_full))
 normalized["publicMetrics"] = deepcopy(expected.get("publicMetrics"))
 for event in (normalized, expected):
     form = event.get("registrationForm")
@@ -3851,13 +3960,7 @@ verify_canonical_full_snapshot() {
   [[ -z "$alternate_expected_snapshot" || -s "$alternate_expected_snapshot" ]] || {
     die 'Alternate verified canonical full snapshot is unavailable.'
   }
-  compose_read_only_bounded "$DB_QUERY_TIMEOUT_SECONDS" run --rm --no-deps \
-    -e CANONICAL_API_BASE_URL=http://api:4100/api/v1 \
-    -e CANONICAL_EXPORT_TRUSTED_COMPOSE_INTERNAL=true \
-    api \
-    node --preserve-symlinks-main node_modules/@conference/database/dist/export-canonical-homepage.js --stdout \
-    >"$actual_snapshot"
-  chmod 600 "$actual_snapshot"
+  capture_canonical_snapshot "$actual_snapshot"
   local -a expected_snapshots=("$expected_snapshot")
   [[ -z "$alternate_expected_snapshot" ]] || expected_snapshots+=("$alternate_expected_snapshot")
   canonical_snapshot_files_match "$actual_snapshot" "${expected_snapshots[@]}" || {
@@ -3902,7 +4005,12 @@ verify_release() {
     >"$backup_dir/worker-version-after.json"
 
   verify_build_identity_files "$expected_runtime_sha" "$expected_migration" "$expected_migration_hash"
-  verify_homepage_file "$backup_dir/homepage-after.json"
+  verify_canonical_full_snapshot
+  verify_homepage_file \
+    "$backup_dir/homepage-after.json" \
+    "$release_source_dir/packages/contracts/src/canonical-homepage.public.json" \
+    "$backup_dir/canonical-homepage.snapshot.production.json" \
+    "$release_source_dir/packages/contracts/src/canonical-homepage.snapshot.json"
 
   curl "${CURL_ARGS[@]}" "${PUBLIC_ORIGIN}/version.json" >"$backup_dir/public-version-after.json"
   curl "${CURL_ARGS[@]}" "${PUBLIC_ORIGIN}/web-version.json" >"$backup_dir/public-web-version-after.json"
@@ -3924,8 +4032,11 @@ verify_release() {
     die 'Public homepage returned an empty document.'
   }
   assert_health_json <"$backup_dir/public-health-after.json"
-  verify_homepage_file "$backup_dir/public-homepage-after.json"
-  verify_canonical_full_snapshot
+  verify_homepage_file \
+    "$backup_dir/public-homepage-after.json" \
+    "$release_source_dir/packages/contracts/src/canonical-homepage.public.json" \
+    "$backup_dir/canonical-homepage.snapshot.production.json" \
+    "$release_source_dir/packages/contracts/src/canonical-homepage.snapshot.json"
 
   capture_business_snapshot "$backup_dir/business-counts-after.csv"
   capture_protected_business_ids "$backup_dir/protected-business-ids-after.csv" stable comparison
@@ -4166,16 +4277,24 @@ resolve_pending_recovery() {
   chmod 600 \
     "$backup_dir/canonical-homepage.public.resolved-runtime.json" \
     "$backup_dir/canonical-homepage.snapshot.resolved-runtime.json"
+  export TOKEMS_READ_ONLY_DATABASE_URL
+  TOKEMS_READ_ONLY_DATABASE_URL="$(read_only_database_url)"
+  capture_canonical_snapshot "$backup_dir/canonical-homepage.snapshot.recovery-resolve.json"
+  unset TOKEMS_READ_ONLY_DATABASE_URL
   curl "${CURL_ARGS[@]}" 'http://127.0.0.1:8088/api/v1/homepage' \
     >"$backup_dir/homepage-recovery-resolve.json"
   if verify_homepage_file \
     "$backup_dir/homepage-recovery-resolve.json" \
-    "$backup_dir/canonical-homepage.public.before.json" 2>/dev/null; then
+    "$backup_dir/canonical-homepage.public.before.json" \
+    "$backup_dir/canonical-homepage.snapshot.recovery-resolve.json" \
+    "$backup_dir/canonical-homepage.snapshot.before.json" 2>/dev/null; then
     previous_projection='true'
   fi
   if verify_homepage_file \
     "$backup_dir/homepage-recovery-resolve.json" \
-    "$backup_dir/canonical-homepage.public.resolved-runtime.json" 2>/dev/null; then
+    "$backup_dir/canonical-homepage.public.resolved-runtime.json" \
+    "$backup_dir/canonical-homepage.snapshot.recovery-resolve.json" \
+    "$backup_dir/canonical-homepage.snapshot.resolved-runtime.json" 2>/dev/null; then
     runtime_projection='true'
   fi
   if [[ "$previous_projection" == 'true' && "$runtime_projection" == 'true' ]]; then
@@ -4197,7 +4316,11 @@ resolve_pending_recovery() {
   curl "${CURL_ARGS[@]}" "${PUBLIC_ORIGIN}/api/v1/homepage" \
     >"$backup_dir/public-homepage-recovery-resolve.json"
   chmod 600 "$backup_dir/public-homepage-recovery-resolve.json"
-  verify_homepage_file "$backup_dir/public-homepage-recovery-resolve.json" "$resolved_snapshot"
+  verify_homepage_file \
+    "$backup_dir/public-homepage-recovery-resolve.json" \
+    "$resolved_snapshot" \
+    "$backup_dir/canonical-homepage.snapshot.recovery-resolve.json" \
+    "$resolved_full_snapshot"
   export TOKEMS_READ_ONLY_DATABASE_URL
   TOKEMS_READ_ONLY_DATABASE_URL="$(read_only_database_url)"
   verify_canonical_full_snapshot \
