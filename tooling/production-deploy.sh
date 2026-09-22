@@ -2194,37 +2194,38 @@ canonical_snapshot_files_match() {
   shift
   [[ $# -gt 0 ]] || return 2
   python3 - "$actual_snapshot" "$@" <<'PY'
-import copy
+import hashlib
 import json
 import re
 import sys
 
 
-UUID_RE = re.compile(
-    r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])"
+ASSET_URL_RE = re.compile(
+    r"(/(?:api/v1/)?assets/templates/)([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?=[\"'\s<>)?#]|$)",
+    re.IGNORECASE,
 )
 
 
 def asset_maps(actual, expected):
     actual_assets = actual.get("assets", []) if isinstance(actual, dict) else []
     expected_assets = expected.get("assets", []) if isinstance(expected, dict) else []
-    expected_by_digest = {
-        asset.get("contentDigest"): asset
-        for asset in expected_assets
-        if isinstance(asset, dict) and asset.get("contentDigest")
-    }
+    # Reproduce the seed's canonical-to-runtime mapping. UUIDs and object keys
+    # are local identities; content bytes and all asset metadata remain checked.
+    actual_by_digest = {asset["contentDigest"]: asset for asset in actual_assets}
+    if len(actual_by_digest) != len(actual_assets):
+        raise ValueError("duplicate runtime asset digest")
+    if len({asset["contentDigest"] for asset in expected_assets}) != len(expected_assets):
+        raise ValueError("duplicate canonical asset digest")
     id_map = {}
     storage_map = {}
-    for asset in actual_assets:
-        if not isinstance(asset, dict):
+    for asset in expected_assets:
+        runtime_asset = actual_by_digest.get(asset.get("contentDigest"))
+        if not runtime_asset:
             continue
-        expected_asset = expected_by_digest.get(asset.get("contentDigest"))
-        if not expected_asset:
-            continue
-        if asset.get("id") and expected_asset.get("id"):
-            id_map[asset["id"]] = expected_asset["id"]
-        if asset.get("storageKey") and expected_asset.get("storageKey"):
-            storage_map[asset["storageKey"]] = expected_asset["storageKey"]
+        if asset.get("id") and runtime_asset.get("id"):
+            id_map[asset["id"]] = runtime_asset["id"]
+        if asset.get("storageKey") and runtime_asset.get("storageKey"):
+            storage_map[asset["storageKey"]] = runtime_asset["storageKey"]
     return id_map, storage_map
 
 
@@ -2234,7 +2235,9 @@ def normalize_asset_references(value, id_map, storage_map):
             return id_map[value]
         if value in storage_map:
             return storage_map[value]
-        return UUID_RE.sub(lambda match: id_map.get(match.group(1), match.group(1)), value)
+        return ASSET_URL_RE.sub(
+            lambda match: match.group(1) + id_map.get(match.group(2), match.group(2)), value
+        )
     if isinstance(value, list):
         return [normalize_asset_references(item, id_map, storage_map) for item in value]
     if isinstance(value, dict):
@@ -2243,6 +2246,28 @@ def normalize_asset_references(value, id_map, storage_map):
             for key, item in value.items()
         }
     return value
+
+
+def mapped_snapshot(expected, id_map, storage_map):
+    mapped = normalize_asset_references(expected, id_map, storage_map)
+    if not isinstance(mapped, dict):
+        return mapped
+    if isinstance(mapped.get("assets"), list):
+        # The exporter orders assets by each environment's UUID.
+        mapped["assets"].sort(key=lambda asset: asset["id"])
+    template = mapped.get("template") or {}
+    original_template = expected.get("template") or {}
+    pairs = [(original_template.get(key), template.get(key)) for key in ("draft", "version")]
+    pairs.extend(zip(original_template.get("publishedVersions", []), template.get("publishedVersions", [])))
+    for original, remapped in pairs:
+        if original and remapped and original.get("definition") != remapped.get("definition"):
+            # seed.ts hashes the remapped definition when inserting a new version.
+            payload = json.dumps(remapped["definition"], ensure_ascii=False, separators=(",", ":"))
+            remapped["contentDigest"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    for original, remapped in zip(original_template.get("htmlDocuments", []), template.get("htmlDocuments", [])):
+        if original.get("sanitizedHtml") != remapped.get("sanitizedHtml"):
+            remapped["sanitizedDigest"] = hashlib.sha256(remapped["sanitizedHtml"].encode("utf-8")).hexdigest()
+    return mapped
 
 
 def load_snapshot(file_name):
@@ -2260,16 +2285,16 @@ def load_snapshot(file_name):
 try:
     actual = load_snapshot(sys.argv[1])
     expected = [load_snapshot(file_name) for file_name in sys.argv[2:]]
-except (OSError, UnicodeError, json.JSONDecodeError):
+    if isinstance(actual, dict) and isinstance(actual.get("assets"), list):
+        actual["assets"].sort(key=lambda asset: asset["id"])
+    for candidate in expected:
+        id_map, storage_map = asset_maps(actual, candidate)
+        if actual == mapped_snapshot(candidate, id_map, storage_map):
+            raise SystemExit(0)
+except (OSError, UnicodeError, ValueError, TypeError, KeyError):
     raise SystemExit(2)
 
-for candidate in expected:
-    id_map, storage_map = asset_maps(actual, candidate)
-    normalized_actual = normalize_asset_references(copy.deepcopy(actual), id_map, storage_map)
-    if normalized_actual == candidate:
-        raise SystemExit(0)
-
-raise SystemExit(0 if actual in expected else 1)
+raise SystemExit(1)
 PY
 }
 
@@ -3874,8 +3899,9 @@ import json
 import re
 import sys
 
-UUID_RE = re.compile(
-    r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])"
+ASSET_URL_RE = re.compile(
+    r"(/(?:api/v1/)?assets/templates/)([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?=[\"'\s<>)?#]|$)",
+    re.IGNORECASE,
 )
 
 
@@ -3887,21 +3913,21 @@ def asset_id_map(actual_snapshot, expected_snapshot):
         for asset in expected_assets
         if isinstance(asset, dict) and asset.get("contentDigest")
     }
-    return {
-        asset["id"]: expected_asset["id"]
-        for asset in actual_assets
-        if isinstance(asset, dict)
-        and asset.get("id")
-        and (expected_asset := expected_by_digest.get(asset.get("contentDigest")))
-        and expected_asset.get("id")
-    }
+    result = {}
+    for asset in actual_assets:
+        expected_asset = expected_by_digest.get(asset.get("contentDigest"))
+        if expected_asset and asset.get("id") and expected_asset.get("id"):
+            result[asset["id"]] = expected_asset["id"]
+    return result
 
 
 def normalize_asset_ids(value, id_map):
     if isinstance(value, str):
         if value in id_map:
             return id_map[value]
-        return UUID_RE.sub(lambda match: id_map.get(match.group(1), match.group(1)), value)
+        return ASSET_URL_RE.sub(
+            lambda match: match.group(1) + id_map.get(match.group(2), match.group(2)), value
+        )
     if isinstance(value, list):
         return [normalize_asset_ids(item, id_map) for item in value]
     if isinstance(value, dict):
