@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import BatchOrderPanel from '../components/registration/BatchOrderPanel.vue';
+import BatchReviewPanel from '../components/registration/BatchReviewPanel.vue';
+import RegistrationRefundPanel from '../components/registration/RegistrationRefundPanel.vue';
 import { computed, nextTick, reactive, ref, watch } from 'vue';
 import type { AdminRegistrationOperationsDetail, EventId } from '@conference/contracts';
 import { useRoute } from 'vue-router';
@@ -18,6 +21,9 @@ const operationMessage = ref('');
 const reviewReason = ref('');
 const reviewPending = ref(false);
 const refundFormOpen = ref(false);
+const closeFormOpen = ref(false);
+const closePending = ref(false);
+const closeReason = ref('');
 const refundPending = ref(false);
 const refundAmountInput = ref<HTMLInputElement>();
 const attendeeEditOpen = ref(false);
@@ -77,29 +83,25 @@ const invoicePresentation = computed(() =>
 );
 const refundableAmount = computed(() => commerce.value?.totals.refundableAmount ?? 0);
 const canStartRefund = computed(
-  () => detail.value?.capabilities.refund_order?.allowed === true && refundableAmount.value > 0,
+  () => detail.value?.capabilities.refund_order?.allowed === true && refundableAmount.value > 0 && order.value?.modelVersion !== 2,
+);
+const canCloseOrder = computed(
+  () => detail.value?.capabilities.close_unpaid_order?.allowed === true,
 );
 const canReview = computed(
   () =>
     detail.value?.capabilities.review_registration?.allowed === true &&
-    registration.value?.status === 'pending_review',
+    registration.value?.status === 'pending_review' && order.value?.modelVersion !== 2 && !detail.value?.batchReview,
 );
 const canManageInvoice = computed(
   () => detail.value?.capabilities.manage_invoice?.allowed === true,
 );
 const refundAmount = computed(() => Math.round(Number(refundForm.amountYuan || 0) * 100));
 const fullRefundGuardReason = computed(() =>
-  fullRefundBlockedReason(
-    registration.value?.status,
-    detail.value?.fulfillment.ticket?.status,
-  ),
+  fullRefundBlockedReason(registration.value?.status, detail.value?.fulfillment.ticket?.status),
 );
 const blockedFullRefund = computed(() =>
-  isBlockedFullRefund(
-    fullRefundGuardReason.value,
-    refundAmount.value,
-    refundableAmount.value,
-  ),
+  isBlockedFullRefund(fullRefundGuardReason.value, refundAmount.value, refundableAmount.value),
 );
 const refundInvoiceImpact = computed(() => {
   if (!invoiceRequest.value || refundAmount.value <= 0) return '本次退款不涉及已存在的发票申请。';
@@ -123,7 +125,7 @@ const refundDisabledReason = computed(() => {
       order_unavailable: '订单不可用或没有订单查看权限',
       order_state_not_refundable: '当前订单状态不可退款',
       no_refundable_balance: '订单已无可退余额',
-      wechat_refund_unavailable: '微信支付退款通道暂未启用，请通过线下流程处理',
+      wechat_refund_unavailable: '请在支付设置中完成退款配置，再启用活动退款',
     }[code ?? ''] ?? '当前订单暂不可退款'
   );
 });
@@ -363,6 +365,7 @@ async function saveAttendee() {
           city: attendeeForm.city,
         },
         reason: attendeeForm.reason,
+        expectedUpdatedAt: registration.value.updatedAt,
       },
       eventId.value,
     );
@@ -384,6 +387,40 @@ async function openRefundForm() {
   clearMessages();
   await nextTick();
   refundAmountInput.value?.focus();
+}
+
+async function closeUnpaidOrder() {
+  if (!canCloseOrder.value || !order.value || !eventId.value || closePending.value) return;
+  const reason = closeReason.value.trim();
+  if (reason.length < 2 || reason.length > 240) {
+    errorMessage.value = '请填写 2 到 240 字的关闭原因。';
+    return;
+  }
+  if (
+    !window.confirm(
+      `确认关闭订单 ${order.value.orderNo}（${money(order.value.amount)}）？系统将先核实支付结果，确认未付款后关闭订单并释放名额。`,
+    )
+  )
+    return;
+  closePending.value = true;
+  clearMessages();
+  try {
+    await conferenceApi.closeUnpaidOrder(
+      order.value.id,
+      { reason, expectedExpiresAt: order.value.expiresAt },
+      eventId.value,
+    );
+    closeFormOpen.value = false;
+    closeReason.value = '';
+    await load({ quiet: true });
+    operationMessage.value = '订单已关闭，名额已释放。用户可返回报名页重新提交并支付。';
+  } catch (error) {
+    await load({ quiet: true });
+    errorMessage.value =
+      error instanceof Error ? error.message : '关闭订单失败，请刷新支付结果后重试';
+  } finally {
+    closePending.value = false;
+  }
 }
 
 async function submitRefund() {
@@ -651,6 +688,8 @@ watch([registrationId, eventId], () => void load(), { immediate: true });
             </div>
           </section>
 
+          <BatchOrderPanel v-if="order?.modelVersion === 2" :order-id="order.id" :event-id="eventId ?? undefined" @changed="load({ quiet: true })" />
+          <BatchReviewPanel v-else-if="detail.batchReview" :review="detail.batchReview" :event-id="eventId!" @changed="load({ quiet: true })" />
           <section id="attendee" class="operation-card" aria-labelledby="attendee-title">
             <header class="operation-card-head">
               <div>
@@ -707,7 +746,10 @@ watch([registrationId, eventId], () => void load(), { immediate: true });
               </div>
               <div>
                 <dt>购票人</dt>
-                <dd>{{ registration.purchaserName || '未填写姓名' }} · {{ registration.purchaserMobile }}</dd>
+                <dd>
+                  {{ registration.purchaserName || '未填写姓名' }} ·
+                  {{ registration.purchaserMobile }}
+                </dd>
               </div>
               <div>
                 <dt>购买关系</dt>
@@ -730,9 +772,18 @@ watch([registrationId, eventId], () => void load(), { immediate: true });
               >
                 发起退款
               </button>
-              <span v-else-if="commerce && !canStartRefund" class="operation-hint">{{
-                refundDisabledReason
-              }}</span>
+              <button
+                v-else-if="canCloseOrder && !closeFormOpen"
+                class="button danger compact"
+                type="button"
+                @click="closeFormOpen = true"
+              >
+                关闭未支付订单
+              </button>
+              <span
+                v-else-if="commerce && !canStartRefund && !canCloseOrder"
+                class="operation-hint"
+              >{{ refundDisabledReason }}</span>
             </header>
             <div v-if="detail.commerce.access === 'restricted'" class="permission-empty">
               <strong>订单信息受权限保护</strong>
@@ -766,6 +817,40 @@ watch([registrationId, eventId], () => void load(), { immediate: true });
                 </div>
               </dl>
               <div v-else class="section-empty">当前报名没有关联订单。</div>
+
+              <form
+                v-if="closeFormOpen && canCloseOrder"
+                class="refund-preview close-order-form"
+                @submit.prevent="closeUnpaidOrder"
+              >
+                <div class="refund-preview-head">
+                  <div><span>关闭未支付订单</span><strong>核实支付结果后释放名额</strong></div>
+                  <button
+                    class="text-action"
+                    type="button"
+                    :disabled="closePending"
+                    @click="closeFormOpen = false"
+                  >
+                    收起
+                  </button>
+                </div>
+                <p>
+                  关闭成功后，用户可重新报名支付。已付款、正在付款或支付结果未确认的订单会保留，并提示处理结果。
+                </p>
+                <div class="close-order-fields">
+                  <label><span>关闭原因</span><input
+                    v-model="closeReason"
+                    minlength="2"
+                    maxlength="240"
+                    required
+                    placeholder="例如：用户支付异常，申请重新报名"
+                    :disabled="closePending"
+                  /></label>
+                </div>
+                <button class="button danger" type="submit" :disabled="closePending">
+                  {{ closePending ? '正在核实支付并关闭…' : '确认关闭未支付订单' }}
+                </button>
+              </form>
 
               <form
                 v-if="refundFormOpen && order"
@@ -872,6 +957,13 @@ watch([registrationId, eventId], () => void load(), { immediate: true });
               </section>
             </template>
           </section>
+
+          <RegistrationRefundPanel
+            v-if="order && commerce && eventId"
+            :event-id="eventId"
+            :order-id="order.id"
+            @changed="load({ quiet: true })"
+          />
 
           <RegistrationInvoicePanel
             :context="detail.invoice"
@@ -1635,6 +1727,17 @@ watch([registrationId, eventId], () => void load(), { immediate: true });
   padding: 17px 18px;
   background: #fff8f5;
   border-bottom: 1px solid #efd9d3;
+}
+.close-order-form {
+  display: grid;
+  gap: 12px;
+}
+.close-order-form .refund-preview-head,
+.close-order-form p {
+  margin: 0;
+}
+.close-order-form > .button {
+  justify-self: start;
 }
 .refund-preview-head {
   display: flex;

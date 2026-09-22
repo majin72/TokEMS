@@ -1,5 +1,9 @@
+import { syncLegacyOrderItemState } from '@conference/database';
+import { findExpiredInventoryOrders } from '@conference/database';
+import { invalidateInvoiceFileAccess } from '@conference/database';
 import { createHash } from 'node:crypto';
-import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Optional } from '@nestjs/common';
+import { RefundWorkflowService } from './refund-workflow.service.js';
 import {
   API_ERROR_CODES,
   type EventId,
@@ -18,15 +22,18 @@ import {
   orderStateLogs,
   outboxEvents,
   payments,
+  paymentNotificationInbox,
   refunds,
+  refundRequests,
   registrations,
   tickets,
   ticketTypes,
   waitlistEntries,
 } from '@conference/database';
-import { and, count, eq, gt, inArray, isNull, lt, sql, sum } from 'drizzle-orm';
+import { and, count, eq, gt, inArray, isNull, sql, sum } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { DatabaseService } from './database.service.js';
+import { OrderItemsService } from './order-items.service.js';
 import { DomainError } from './domain-error.js';
 import { withPostgresTransactionRetry } from './transaction-retry.js';
 
@@ -48,7 +55,12 @@ export function fullRefundAttendanceConflict(input: {
 
 @Injectable()
 export class CommerceOperationsService {
-  constructor(@Inject(DatabaseService) private readonly database: DatabaseService) {}
+  constructor(
+    @Inject(DatabaseService) private readonly database: DatabaseService,
+    @Optional()
+    @Inject(RefundWorkflowService)
+    private readonly refundWorkflow?: RefundWorkflowService,
+  ) {}
 
   private db(): Database {
     if (!this.database.db) {
@@ -86,256 +98,297 @@ export class CommerceOperationsService {
     input: RefundRequest,
   ): Promise<Refund> {
     const db = this.db();
+    if (this.refundWorkflow) {
+      const [wechatPayment] = await db
+        .select({ id: payments.id })
+        .from(payments)
+        .innerJoin(orders, eq(orders.id, payments.orderId))
+        .where(
+          and(
+            eq(orders.id, orderId),
+            eq(orders.organizationId, organizationId),
+            eq(payments.provider, 'wechatpay'),
+            inArray(payments.status, ['succeeded', 'refunded']),
+          ),
+        )
+        .limit(1);
+      if (wechatPayment)
+        return this.refundWorkflow.createAdmin(
+          organizationId,
+          orderId,
+          actorId,
+          idempotencyKey,
+          input,
+        );
+    }
     const requestHash = this.hash({ organizationId, orderId, ...input });
     const scopedIdempotencyKey = this.hash({ organizationId, idempotencyKey });
 
     return withPostgresTransactionRetry(() =>
       db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`refund:${scopedIdempotencyKey}`}, 0))`,
-      );
-      const [cached] = await tx
-        .select()
-        .from(refunds)
-        .where(
-          and(
-            eq(refunds.organizationId, organizationId),
-            inArray(refunds.idempotencyKey, [scopedIdempotencyKey, idempotencyKey]),
-          ),
-        )
-        .limit(1);
-      if (cached) {
-        const payload = cached.providerPayload as { requestHash?: string };
-        if (payload.requestHash !== requestHash) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`refund:${scopedIdempotencyKey}`}, 0))`,
+        );
+        const [cached] = await tx
+          .select()
+          .from(refunds)
+          .where(
+            and(
+              eq(refunds.organizationId, organizationId),
+              inArray(refunds.idempotencyKey, [scopedIdempotencyKey, idempotencyKey]),
+            ),
+          )
+          .limit(1);
+        if (cached) {
+          const payload = cached.providerPayload as { requestHash?: string };
+          if (payload.requestHash !== requestHash) {
+            throw new DomainError(
+              API_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+              '相同幂等键对应了不同的退款内容',
+              HttpStatus.CONFLICT,
+            );
+          }
+          return this.refundFromRow(cached);
+        }
+
+        const [order] = await tx
+          .select()
+          .from(orders)
+          .where(and(eq(orders.id, orderId), eq(orders.organizationId, organizationId)))
+          .for('update')
+          .limit(1);
+        if (!order) {
           throw new DomainError(
-            API_ERROR_CODES.IDEMPOTENCY_CONFLICT,
-            '相同幂等键对应了不同的退款内容',
+            API_ERROR_CODES.NOT_FOUND,
+            '订单不存在或无权访问',
+            HttpStatus.NOT_FOUND,
+          );
+        }
+        if (order.modelVersion === 2 || !order.registrationId) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION, '请通过名额退款申请处理该订单；免费名额请使用取消操作', HttpStatus.CONFLICT);
+        const [ticket] = await tx
+          .select()
+          .from(tickets)
+          .where(
+            and(
+              eq(tickets.registrationId, order.registrationId),
+              eq(tickets.eventId, order.eventId),
+            ),
+          )
+          .for('update')
+          .limit(1);
+        const [registration] = await tx
+          .select()
+          .from(registrations)
+          .where(
+            and(
+              eq(registrations.id, order.registrationId),
+              eq(registrations.organizationId, order.organizationId),
+              eq(registrations.eventId, order.eventId),
+            ),
+          )
+          .for('update')
+          .limit(1);
+        if (!registration) {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '订单缺少有效的报名记录，无法退款',
             HttpStatus.CONFLICT,
           );
         }
-        return this.refundFromRow(cached);
-      }
+        const [activeRequest] = await tx
+          .select({ id: refundRequests.id })
+          .from(refundRequests)
+          .where(and(eq(refundRequests.orderId, order.id), isNull(refundRequests.terminatedAt)))
+          .limit(1);
+        if (activeRequest || order.refundExecutionMode === 'external_hold') {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '订单已有退款申请或正在核验外部退款',
+            HttpStatus.CONFLICT,
+          );
+        }
+        if (!['paid', 'partially_refunded'].includes(order.status)) {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '当前订单状态不允许退款',
+            HttpStatus.CONFLICT,
+          );
+        }
 
-      const [order] = await tx
-        .select()
-        .from(orders)
-        .where(and(eq(orders.id, orderId), eq(orders.organizationId, organizationId)))
-        .for('update')
-        .limit(1);
-      if (!order) {
-        throw new DomainError(
-          API_ERROR_CODES.NOT_FOUND,
-          '订单不存在或无权访问',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      const [ticket] = await tx
-        .select()
-        .from(tickets)
-        .where(
-          and(
-            eq(tickets.registrationId, order.registrationId),
-            eq(tickets.eventId, order.eventId),
-          ),
-        )
-        .for('update')
-        .limit(1);
-      const [registration] = await tx
-        .select()
-        .from(registrations)
-        .where(
-          and(
-            eq(registrations.id, order.registrationId),
-            eq(registrations.organizationId, order.organizationId),
-            eq(registrations.eventId, order.eventId),
-          ),
-        )
-        .for('update')
-        .limit(1);
-      if (!registration) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '订单缺少有效的报名记录，无法退款',
-          HttpStatus.CONFLICT,
-        );
-      }
-      if (!['paid', 'partially_refunded'].includes(order.status)) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '当前订单状态不允许退款',
-          HttpStatus.CONFLICT,
-        );
-      }
+        const totals = await tx
+          .select({ amount: sum(refunds.amount) })
+          .from(refunds)
+          .where(and(eq(refunds.orderId, order.id), eq(refunds.status, 'succeeded')));
+        const payment = await tx
+          .select()
+          .from(payments)
+          .where(and(eq(payments.orderId, order.id), eq(payments.status, 'succeeded')))
+          .limit(1);
+        const refunded = Number(totals[0]?.amount ?? 0);
+        const remaining = order.amount - refunded;
+        if (!payment[0]) {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '订单缺少已成功的支付记录，无法发起退款',
+            HttpStatus.CONFLICT,
+          );
+        }
+        if (payment[0].provider === 'wechatpay') {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '微信支付退款通道尚未接入，订单与资金状态均未修改',
+            HttpStatus.CONFLICT,
+          );
+        }
+        if (input.amount > remaining) {
+          throw new DomainError(
+            API_ERROR_CODES.VALIDATION_ERROR,
+            `退款金额超过可退余额 ${remaining}`,
+            HttpStatus.BAD_REQUEST,
+          );
+        }
 
-      const totals = await tx
-        .select({ amount: sum(refunds.amount) })
-        .from(refunds)
-        .where(and(eq(refunds.orderId, order.id), eq(refunds.status, 'succeeded')));
-      const payment = await tx
-        .select()
-        .from(payments)
-        .where(and(eq(payments.orderId, order.id), eq(payments.status, 'succeeded')))
-        .limit(1);
-      const refunded = Number(totals[0]?.amount ?? 0);
-      const remaining = order.amount - refunded;
-      if (!payment[0]) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '订单缺少已成功的支付记录，无法发起退款',
-          HttpStatus.CONFLICT,
-        );
-      }
-      if (payment[0].provider === 'wechatpay') {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '微信支付退款通道尚未接入，订单与资金状态均未修改',
-          HttpStatus.CONFLICT,
-        );
-      }
-      if (input.amount > remaining) {
-        throw new DomainError(
-          API_ERROR_CODES.VALIDATION_ERROR,
-          `退款金额超过可退余额 ${remaining}`,
-          HttpStatus.BAD_REQUEST,
-        );
-      }
+        const fullRefund = input.amount === remaining;
+        if (
+          fullRefundAttendanceConflict({
+            refundAmount: input.amount,
+            refundableAmount: remaining,
+            ticketStatus: ticket?.status,
+            registrationStatus: registration?.status,
+          })
+        ) {
+          throw new DomainError(
+            API_ERROR_CODES.INVALID_STATE_TRANSITION,
+            '参会人已签到或电子票已使用，不允许全额退款',
+            HttpStatus.CONFLICT,
+          );
+        }
+        const now = new Date();
+        const [refund] = await tx
+          .insert(refunds)
+          .values({
+            organizationId,
+            eventId: order.eventId,
+            orderId: order.id,
+            paymentId: payment[0].id,
+            refundNo: `RF${now.getFullYear()}${nanoid(12).toUpperCase()}`,
+            status: 'succeeded',
+            source: 'manual',
+            succeededAt: now,
+            amount: input.amount,
+            currency: order.currency,
+            reason: input.reason,
+            idempotencyKey: scopedIdempotencyKey,
+            providerPayload: {
+              provider: payment[0].provider,
+              requestHash,
+              processedAt: now.toISOString(),
+            },
+            createdBy: actorId,
+          })
+          .returning();
+        const nextStatus = fullRefund ? 'refunded' : 'partially_refunded';
+        await tx
+          .update(orders)
+          .set({ status: nextStatus, updatedAt: now })
+          .where(eq(orders.id, order.id));
+        await tx.insert(orderStateLogs).values({
+          orderId: order.id,
+          fromStatus: order.status,
+          toStatus: nextStatus,
+          reason: input.reason,
+          actorId,
+          metadata: { refundId: refund!.id, amount: input.amount },
+        });
 
-      const fullRefund = input.amount === remaining;
-      if (
-        fullRefundAttendanceConflict({
-          refundAmount: input.amount,
-          refundableAmount: remaining,
-          ticketStatus: ticket?.status,
-          registrationStatus: registration?.status,
-        })
-      ) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '参会人已签到或电子票已使用，不允许全额退款',
-          HttpStatus.CONFLICT,
-        );
-      }
-      const now = new Date();
-      const [refund] = await tx
-        .insert(refunds)
-        .values({
+        if (fullRefund) {
+          if (payment[0]) {
+            await tx
+              .update(payments)
+              .set({ status: 'refunded', updatedAt: now })
+              .where(eq(payments.id, payment[0].id));
+          }
+          await tx
+            .update(tickets)
+            .set({ status: 'cancelled', updatedAt: now })
+            .where(eq(tickets.registrationId, order.registrationId));
+          await tx
+            .update(registrations)
+            .set({ status: 'cancelled', updatedAt: now })
+            .where(eq(registrations.id, order.registrationId));
+          await syncLegacyOrderItemState(tx, order, 'cancelled', now);
+          if (ticket?.status === 'valid' && registration.status !== 'cancelled') {
+            await tx
+              .update(ticketTypes)
+              .set({ sold: sql`greatest(${ticketTypes.sold} - 1, 0)`, updatedAt: now })
+              .where(eq(ticketTypes.id, registration.ticketTypeId));
+          }
+        }
+
+        const [invoice] = await tx
+          .select()
+          .from(invoiceRequests)
+          .where(eq(invoiceRequests.orderId, order.id))
+          .for('update')
+          .limit(1);
+        if (invoice) {
+          const nextNetPaidAmount = Math.max(0, remaining - input.amount);
+          const nextInvoiceStatus =
+            invoice.status === 'issued'
+              ? 'adjustment_required'
+              : nextNetPaidAmount === 0 &&
+                  !['voided', 'cancelled', 'adjustment_required'].includes(invoice.status)
+                ? 'cancelled'
+                : invoice.status;
+          await tx
+            .update(invoiceRequests)
+            .set({
+              netPaidAmount: nextNetPaidAmount,
+              amount: nextNetPaidAmount > 0 ? Math.min(invoice.amount, nextNetPaidAmount) : 0,
+              status: nextInvoiceStatus,
+              updatedAt: now,
+            })
+            .where(eq(invoiceRequests.id, invoice.id));
+          if (nextInvoiceStatus !== invoice.status) await invalidateInvoiceFileAccess(tx, invoice.id);
+          if (nextInvoiceStatus !== invoice.status) {
+            await tx.insert(invoiceStateLogs).values({
+              invoiceRequestId: invoice.id,
+              fromStatus: invoice.status,
+              toStatus: nextInvoiceStatus,
+              reason:
+                nextInvoiceStatus === 'adjustment_required'
+                  ? '订单退款后，已开具发票需要调整'
+                  : '订单已全额退款，发票申请已取消',
+              actorId,
+              metadata: { refundId: refund!.id, amount: input.amount },
+            });
+          }
+        }
+
+        await tx.insert(outboxEvents).values({
           organizationId,
           eventId: order.eventId,
-          orderId: order.id,
-          paymentId: payment[0].id,
-          refundNo: `RF${now.getFullYear()}${nanoid(12).toUpperCase()}`,
-          amount: input.amount,
-          currency: order.currency,
-          reason: input.reason,
-          idempotencyKey: scopedIdempotencyKey,
-          providerPayload: {
-            provider: payment[0].provider,
-            requestHash,
-            processedAt: now.toISOString(),
+          eventType: 'RefundSucceeded',
+          correlationId: idempotencyKey,
+          payload: {
+            refundId: refund!.id,
+            orderId: order.id,
+            amount: input.amount,
+            fullRefund,
+            recipientRole: 'purchaser',
           },
-          createdBy: actorId,
-        })
-        .returning();
-      const nextStatus = fullRefund ? 'refunded' : 'partially_refunded';
-      await tx
-        .update(orders)
-        .set({ status: nextStatus, updatedAt: now })
-        .where(eq(orders.id, order.id));
-      await tx.insert(orderStateLogs).values({
-        orderId: order.id,
-        fromStatus: order.status,
-        toStatus: nextStatus,
-        reason: input.reason,
-        actorId,
-        metadata: { refundId: refund!.id, amount: input.amount },
-      });
-
-      if (fullRefund) {
-        if (payment[0]) {
-          await tx
-            .update(payments)
-            .set({ status: 'refunded', updatedAt: now })
-            .where(eq(payments.id, payment[0].id));
-        }
-        await tx
-          .update(tickets)
-          .set({ status: 'cancelled', updatedAt: now })
-          .where(eq(tickets.registrationId, order.registrationId));
-        await tx
-          .update(registrations)
-          .set({ status: 'cancelled', updatedAt: now })
-          .where(eq(registrations.id, order.registrationId));
-        if (ticket?.status === 'valid' && registration.status !== 'cancelled') {
-          await tx
-            .update(ticketTypes)
-            .set({ sold: sql`greatest(${ticketTypes.sold} - 1, 0)`, updatedAt: now })
-            .where(eq(ticketTypes.id, registration.ticketTypeId));
-        }
-      }
-
-      const [invoice] = await tx
-        .select()
-        .from(invoiceRequests)
-        .where(eq(invoiceRequests.orderId, order.id))
-        .for('update')
-        .limit(1);
-      if (invoice) {
-        const nextNetPaidAmount = Math.max(0, remaining - input.amount);
-        const nextInvoiceStatus =
-          invoice.status === 'issued'
-            ? 'adjustment_required'
-            : nextNetPaidAmount === 0 &&
-                !['voided', 'cancelled', 'adjustment_required'].includes(invoice.status)
-              ? 'cancelled'
-              : invoice.status;
-        await tx
-          .update(invoiceRequests)
-          .set({
-            netPaidAmount: nextNetPaidAmount,
-            amount: nextNetPaidAmount > 0 ? Math.min(invoice.amount, nextNetPaidAmount) : 0,
-            status: nextInvoiceStatus,
-            updatedAt: now,
-          })
-          .where(eq(invoiceRequests.id, invoice.id));
-        if (nextInvoiceStatus !== invoice.status) {
-          await tx.insert(invoiceStateLogs).values({
-            invoiceRequestId: invoice.id,
-            fromStatus: invoice.status,
-            toStatus: nextInvoiceStatus,
-            reason:
-              nextInvoiceStatus === 'adjustment_required'
-                ? '订单退款后，已开具发票需要调整'
-                : '订单已全额退款，发票申请已取消',
-            actorId,
-            metadata: { refundId: refund!.id, amount: input.amount },
-          });
-        }
-      }
-
-      await tx.insert(outboxEvents).values({
-        organizationId,
-        eventId: order.eventId,
-        eventType: 'RefundSucceeded',
-        correlationId: idempotencyKey,
-        payload: {
-          refundId: refund!.id,
-          orderId: order.id,
-          amount: input.amount,
-          fullRefund,
-          recipientRole: 'purchaser',
-        },
-      });
-      await tx.insert(auditLogs).values({
-        organizationId,
-        eventId: order.eventId,
-        actorId,
-        action: 'order.refund',
-        resourceType: 'refund',
-        resourceId: refund!.id,
-        before: { orderStatus: order.status, refundableAmount: remaining },
-        after: { orderStatus: nextStatus, amount: input.amount, reason: input.reason },
-        traceId: idempotencyKey,
-      });
+        });
+        await tx.insert(auditLogs).values({
+          organizationId,
+          eventId: order.eventId,
+          actorId,
+          action: 'order.refund',
+          resourceType: 'refund',
+          resourceId: refund!.id,
+          before: { orderStatus: order.status, refundableAmount: remaining },
+          after: { orderStatus: nextStatus, amount: input.amount, reason: input.reason },
+          traceId: idempotencyKey,
+        });
         return this.refundFromRow(refund!);
       }),
     );
@@ -354,36 +407,18 @@ export class CommerceOperationsService {
 
   async releaseExpiredReservations(limit = 100) {
     const db = this.db();
-    const candidates = await db
-      .select({ reservation: inventoryReservations, order: orders })
-      .from(inventoryReservations)
-      .innerJoin(orders, eq(orders.id, inventoryReservations.orderId))
-      .leftJoin(
-        payments,
-        and(
-          eq(payments.orderId, orders.id),
-          eq(payments.provider, 'wechatpay'),
-          inArray(payments.status, [...ACTIVE_WECHAT_PAYMENT_STATUSES]),
-        ),
-      )
-      .where(
-        and(
-          isNull(inventoryReservations.releasedAt),
-          isNull(inventoryReservations.convertedAt),
-          isNull(payments.id),
-          lt(inventoryReservations.expiresAt, new Date()),
-          eq(orders.status, 'pending_payment'),
-        ),
-      )
-      .limit(Math.min(Math.max(limit, 1), 500));
+    const candidates = await findExpiredInventoryOrders(db, new Date(), limit);
     if (!candidates.length) return { released: 0, orderIds: [] as string[] };
 
     const releasedOrderIds: string[] = [];
     for (const candidate of candidates) {
+      if (releasedOrderIds.includes(candidate.order.id)) continue;
       const released = await db.transaction(async (tx) => {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`wechatpay:prepare:${candidate.order.id}`}, 0))`,
         );
+        const [currentOrder] = await tx.select().from(orders).where(eq(orders.id, candidate.order.id)).for('update').limit(1);
+        if (!currentOrder || !['pending_payment', 'pending_review'].includes(currentOrder.status) || currentOrder.expiresAt > new Date()) return false;
         const [activeWeChatPayment] = await tx
           .select({ id: payments.id })
           .from(payments)
@@ -396,6 +431,16 @@ export class CommerceOperationsService {
           )
           .limit(1);
         if (activeWeChatPayment) return false;
+        const [unsettled] = await tx.select({ id: paymentNotificationInbox.id }).from(paymentNotificationInbox).where(and(eq(paymentNotificationInbox.orderId, currentOrder.id), sql`${paymentNotificationInbox.status} <> 'processed'`)).limit(1);
+        const [receivedMoney] = await tx.select({ id: payments.id }).from(payments).where(and(eq(payments.orderId, currentOrder.id), sql`(${payments.succeededAt} is not null or ${payments.status} in ('succeeded','refunded'))`)).limit(1);
+        if (unsettled || receivedMoney || currentOrder.entitlementsOnHold || currentOrder.refundExecutionMode === 'external_hold' || currentOrder.settledPaymentId) return false;
+
+        if (currentOrder.modelVersion === 2) {
+          await new OrderItemsService(this.database).cancelUnpaidItems(tx, currentOrder);
+          await tx.insert(orderStateLogs).values({ orderId: currentOrder.id, fromStatus: currentOrder.status, toStatus: 'closed', reason: currentOrder.status === 'pending_review' ? '整单审核期限已结束，名额已释放' : '整单支付期限已结束，名额已释放' });
+          if (currentOrder.status === 'pending_review') await tx.insert(outboxEvents).values({ organizationId: currentOrder.organizationId, eventId: currentOrder.eventId, eventType: 'BatchOrderReviewExpired', correlationId: `batch:review-expired:${currentOrder.id}`, payload: { orderId: currentOrder.id, quantity: currentOrder.quantity, recipientRole: 'purchaser' } });
+          return true;
+        }
 
         const [reservation] = await tx
           .update(inventoryReservations)
@@ -416,10 +461,12 @@ export class CommerceOperationsService {
           .where(and(eq(orders.id, candidate.order.id), eq(orders.status, 'pending_payment')))
           .returning();
         if (!order) return false;
+        if (!order.registrationId) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION, '订单报名关系需要核验', HttpStatus.CONFLICT);
         await tx
           .update(registrations)
           .set({ status: 'cancelled', updatedAt: new Date() })
           .where(eq(registrations.id, order.registrationId));
+        await syncLegacyOrderItemState(tx, order, 'cancelled', new Date());
         await tx.insert(orderStateLogs).values({
           orderId: order.id,
           fromStatus: 'pending_payment',

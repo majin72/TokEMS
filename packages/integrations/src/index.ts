@@ -1,3 +1,4 @@
+import { InvoiceSmsPolicySchema, type InvoiceSmsPolicy } from '@conference/contracts';
 import { createRequire } from 'node:module';
 import type {
   QuerySendDetailsRequest,
@@ -64,15 +65,18 @@ function runtimeOptions() {
 export const ALIYUN_SMS_TEMPLATE_KEYS = [
   'customerOtp',
   'registrationSubmitted',
+  'registrationSuccess',
   'registrationApproved',
   'registrationRejected',
   'paymentSucceeded',
   'ticketIssued',
   'refundSucceeded',
+  'refundReviewed',
   'waitlistAvailable',
   'invoiceDetailsRequested',
   'invoiceReady',
   'eventReminder',
+  'partnerInvitation',
 ] as const;
 
 export type AliyunSmsTemplateKey = (typeof ALIYUN_SMS_TEMPLATE_KEYS)[number];
@@ -86,6 +90,7 @@ export const ALIYUN_SMS_TEMPLATE_META: Record<
     label: '报名已提交',
     variables: ['eventName', 'url', 'expiresAt'],
   },
+  registrationSuccess: { label: '报名成功提醒', variables: [] },
   registrationApproved: {
     label: '报名审核通过',
     variables: ['eventName', 'url'],
@@ -102,6 +107,7 @@ export const ALIYUN_SMS_TEMPLATE_META: Record<
     label: '电子票已签发',
     variables: ['eventName', 'url'],
   },
+  refundReviewed: { label: '退款审核结果', variables: ['eventName', 'orderNo', 'result'] },
   refundSucceeded: {
     label: '退款成功',
     variables: ['eventName', 'orderNo', 'amount'],
@@ -115,16 +121,21 @@ export const ALIYUN_SMS_TEMPLATE_META: Record<
     variables: ['eventName', 'expiresAt', 'url'],
   },
   invoiceReady: {
-    label: '电子发票已开具',
-    variables: ['eventName', 'expiresAt', 'url'],
+    label: '发票短信通知',
+    variables: ['fileToken'],
   },
   eventReminder: {
     label: '大会提醒',
     variables: ['eventName', 'startsAt', 'venue'],
   },
+  partnerInvitation: {
+    label: '合作伙伴资格开通',
+    variables: ['eventName', 'url'],
+  },
 };
 
 export type AliyunSmsStoredConfiguration = {
+  invoiceSms: InvoiceSmsPolicy;
   enabled: boolean;
   signName: string;
   endpoint: typeof ALIYUN_SMS_ENDPOINT;
@@ -142,6 +153,7 @@ export type AliyunSmsStoredConfiguration = {
 
 export function emptyAliyunSmsConfiguration(): AliyunSmsStoredConfiguration {
   return {
+    invoiceSms: InvoiceSmsPolicySchema.parse({}),
     enabled: false,
     signName: '',
     endpoint: ALIYUN_SMS_ENDPOINT,
@@ -169,6 +181,7 @@ export function readAliyunSmsConfiguration(
       ? (value.templates as Record<string, unknown>)
       : {};
   return {
+    invoiceSms: InvoiceSmsPolicySchema.parse(value.invoiceSms ?? {}),
     enabled: value.enabled === true,
     signName: typeof value.signName === 'string' ? value.signName : '',
     endpoint: ALIYUN_SMS_ENDPOINT,
@@ -251,7 +264,9 @@ export class AliyunSmsClient {
         phoneNumbers: aliyunDomesticPhone(input.phoneNumber),
         signName: input.signName,
         templateCode: input.templateCode,
-        templateParam: JSON.stringify(input.templateParameters),
+        ...(Object.keys(input.templateParameters).length > 0
+          ? { templateParam: JSON.stringify(input.templateParameters) }
+          : {}),
         outId: input.outId,
       }),
       runtimeOptions(),

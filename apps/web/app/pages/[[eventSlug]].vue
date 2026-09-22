@@ -18,6 +18,7 @@ import {
   type PublicAttendeeNeedList,
   type PublicEvent,
   type PublicEventMemberList,
+  type PublicPartnerSummary,
   type Session,
 } from '@conference/contracts';
 import { resolveEventExperience } from '~/composables/useEventExperience';
@@ -39,13 +40,10 @@ import {
   resolveAttendeeNeedsSectionState,
   type AttendeeNeedsLastSuccess,
 } from '~/utils/attendee-needs';
-import { buildPartnershipOrganizationGroups } from '~/utils/partnership-organizations';
+import { visiblePartnerLogos } from '~/utils/partner-logos';
 import { useCustomerSession } from '~/composables/useCustomerSession';
 import { readOrderAccessToken } from '~/composables/useOrderAccessToken';
-import {
-  resolveHomeRegistrationCta,
-  resolveSelfRegistrationState,
-} from '~/utils/purchase-journey';
+import { resolveHomeRegistrationCta, resolveSelfRegistrationState } from '~/utils/purchase-journey';
 import {
   createPublicViewRecorder,
   formatTrackingStartDate,
@@ -96,6 +94,11 @@ if (eventLoadError.value) {
   });
 }
 if (loadedEvent.value) event.value = loadedEvent.value;
+const { data: featuredPartners } = await useAsyncData<{ items: PublicPartnerSummary[] }>(
+  `conference-partners-${eventRouteKey.value}`,
+  () => api.getEventPartners(event.value.slug, 24, 'homepage').catch(() => ({ items: [], nextCursor: null })),
+  { deep: false, watch: [eventRouteKey] },
+);
 const livePublicMetrics = ref({ ...event.value.publicMetrics });
 const activeDay = ref(1);
 const openFaq = ref<number | null>(null);
@@ -200,7 +203,6 @@ const homeBlock = (nodeKey: string) =>
   homeBlocks.value.find((block) => block.nodeKey === nodeKey) ??
   defaultHomeBlocks.find((block) => block.nodeKey === nodeKey);
 const blockEnabled = (nodeKey: string) => homeBlock(nodeKey)?.enabled ?? true;
-const cooperationBlockEnabled = computed(() => blockEnabled('home.cooperation'));
 const blockStyle = (nodeKey: string) => {
   const eventOrder = homeBlocks.value.findIndex((block) => block.nodeKey === nodeKey);
   const defaultOrder = defaultHomeBlocks.findIndex((block) => block.nodeKey === nodeKey);
@@ -497,23 +499,6 @@ const {
   },
   { watch: [eventRouteKey, membersBlockEnabled, membersPage, membersIndustry] },
 );
-const { data: partnershipMemberDirectory } = await useAsyncData(
-  () => `conference-partnership-members-${event.value.slug}`,
-  async () => {
-    if (!cooperationBlockEnabled.value) return emptyMemberList();
-    const slug = event.value.slug;
-    const snapshotKey = `${slug}:1:`;
-    const snapshot = memberDirectorySnapshots.get(snapshotKey);
-    if (snapshot) return snapshot;
-    const result = await loadMemberDirectoryWithFallback(
-      () => api.getEventMembers(slug, 1),
-      emptyMemberList(),
-    );
-    memberDirectorySnapshots.set(snapshotKey, result);
-    return result;
-  },
-  { watch: [eventRouteKey, cooperationBlockEnabled] },
-);
 const membersInitialLoading = computed(() =>
   isMemberDirectoryInitialLoading(membersPending.value, Boolean(memberDirectory.value)),
 );
@@ -541,22 +526,17 @@ const memberDirectoryState = computed(() =>
     memberDirectory.value?.total ?? 0,
   ),
 );
-const partnershipOrganizationGroups = computed(() =>
-  buildPartnershipOrganizationGroups(
-    event.value.speakers,
-    partnershipMemberDirectory.value?.items ?? [],
-    homeBlock('home.cooperation')?.content.organizationGroups,
-  ),
+const partnerLogos = computed(() =>
+  visiblePartnerLogos(homeBlock('home.cooperation')?.content.logoWall),
 );
-const partnershipOrganizationCount = computed(() =>
-  partnershipOrganizationGroups.value.reduce(
-    (total, group) => total + group.organizations.length,
-    0,
-  ),
+const partnerLogoUrl = (assetId: string) =>
+  `${String(runtimeConfig.public.apiBase).replace(/\/$/, '')}/assets/templates/${assetId}`;
+const failedPartnerAssets = ref(new Set<string>());
+const renderedPartnerLogos = computed(() =>
+  partnerLogos.value.filter((logo) => !failedPartnerAssets.value.has(logo.assetId)),
 );
-const partnershipOrganizationNameClass = (name: string) => ({
-  'is-long': Array.from(name).length > 8,
-  'is-extra-long': Array.from(name).length > 12,
+watch(partnerLogos, () => {
+  failedPartnerAssets.value = new Set();
 });
 const heroPrimaryAction = computed(() =>
   registrationAction.value.kind === 'register'
@@ -989,6 +969,7 @@ onBeforeUnmount(() => {
           <a v-if="memberDirectoryState.visible" href="#members">{{
             blockCopy('home.navigation', 'membersLabel', '会员')
           }}</a>
+          <a v-if="featuredPartners?.items.length" href="#event-partners">合作伙伴</a>
           <a v-if="blockEnabled('home.tickets')" href="#tickets">{{
             blockCopy('home.navigation', 'ticketsLabel', '门票')
           }}</a>
@@ -1657,6 +1638,38 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
+    <section v-if="featuredPartners?.items.length" id="event-partners" class="event-partners">
+      <div class="wrap">
+        <div class="sec-head reveal event-partners__head">
+          <div>
+            <span class="kicker">EVENT PARTNERS</span>
+            <h2 class="sec-title">与大会同行的合作伙伴</h2>
+            <p class="sec-sub">认识他们的专业背景与合作方向，也可以通过专属入口完成报名。</p>
+          </div>
+          <NuxtLink :to="publicEventScopedPath('/partners', event.slug)">查看全部 <span>→</span></NuxtLink>
+        </div>
+        <div class="event-partners__grid">
+          <NuxtLink
+            v-for="item in featuredPartners.items"
+            :key="item.publicSlug"
+            class="event-partner-card reveal"
+            :to="publicEventScopedPath(`/partners/${encodeURIComponent(item.publicSlug)}`, event.slug)"
+          >
+            <span class="event-partner-card__avatar">
+              <img v-if="item.avatarUrl" :src="item.avatarUrl" :alt="`${item.displayName}的头像`" loading="lazy">
+              <b v-else>{{ attendeeAvatarInitial(item.displayName) }}</b>
+            </span>
+            <span class="event-partner-card__copy">
+              <small>{{ item.industry || 'PARTNER' }}</small>
+              <strong>{{ item.displayName }}</strong>
+              <em>{{ [item.company, item.title].filter(Boolean).join(' · ') }}</em>
+            </span>
+            <span aria-hidden="true">↗</span>
+          </NuxtLink>
+        </div>
+      </div>
+    </section>
+
     <!-- ── HOSTS ── -->
     <section
       v-if="blockEnabled('home.organizer')"
@@ -1696,61 +1709,31 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- ── PARTNERSHIP ORGANIZATIONS ── -->
     <section
-      v-if="blockEnabled('home.cooperation') && partnershipOrganizationGroups.length"
+      v-if="blockEnabled('home.cooperation') && renderedPartnerLogos.length"
       id="partner-wall"
+      aria-labelledby="partner-wall-title"
       :style="blockStyle('home.cooperation')"
     >
-      <div class="wrap partner-wall reveal">
-        <div class="partner-wall__head">
-          <div>
-            <span class="kicker">{{
-              blockCopy('home.cooperation', 'wallKicker', 'ECOSYSTEM')
-            }}</span>
-            <h2 class="sec-title">
-              {{ blockCopy('home.cooperation', 'wallTitle', '与大会同行的机构') }}
-            </h2>
-          </div>
-          <div class="partner-wall__intro">
-            <p>
-              {{
-                blockCopy(
-                  'home.cooperation',
-                  'wallSubtitle',
-                  '汇集演讲嘉宾所属机构、媒体机构与主动公开公司信息的参会会员，名单随大会进展持续更新。',
-                )
-              }}
-            </p>
-            <span><b>{{ partnershipOrganizationCount }}</b> 家机构已收录</span>
-          </div>
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <span class="kicker">OUR NETWORK</span>
+          <h2 id="partner-wall-title" class="sec-title">与大会同行的机构</h2>
         </div>
-
-        <div class="partner-wall__groups">
-          <section
-            v-for="group in partnershipOrganizationGroups"
-            :key="group.key"
-            class="partner-wall__group"
-            :aria-labelledby="`partner-wall-${group.key}`"
-          >
-            <header class="partner-wall__group-head">
-              <span aria-hidden="true">{{ group.index }}</span>
-              <div>
-                <h3 :id="`partner-wall-${group.key}`">{{ group.label }}</h3>
-                <p>{{ group.meta }} · {{ group.organizations.length }}</p>
-              </div>
-            </header>
-            <ul class="partner-wall__logos">
-              <li
-                v-for="organization in group.organizations"
-                :key="organization"
-                :class="partnershipOrganizationNameClass(organization)"
-              >
-                <strong>{{ organization }}</strong>
-              </li>
-            </ul>
-          </section>
-        </div>
+        <ul class="partner-wall__logos">
+          <li v-for="logo in renderedPartnerLogos" :key="logo.id">
+            <div class="partner-wall__image" :class="{ 'is-dark': logo.background === 'dark' }">
+              <img
+                :src="partnerLogoUrl(logo.assetId)"
+                :alt="logo.name"
+                :style="{ '--logo-scale': logo.scale }"
+                loading="lazy"
+                decoding="async"
+                @error="failedPartnerAssets.add(logo.assetId)"
+              />
+            </div>
+          </li>
+        </ul>
       </div>
     </section>
 

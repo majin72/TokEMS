@@ -127,9 +127,9 @@ describe('ConferenceRepository in-memory operational loop', () => {
     expect(second.order.id).toBe(first.order.id);
     expect(second.registration.id).toBe(first.registration.id);
     expect(second.orderAccessToken).not.toBe(first.orderAccessToken);
-    await expect(repository.getOrder(second.order.id, second.orderAccessToken!)).resolves.toMatchObject(
-      { id: second.order.id, status: 'pending_payment' },
-    );
+    await expect(
+      repository.getOrder(second.order.id, second.orderAccessToken!),
+    ).resolves.toMatchObject({ id: second.order.id, status: 'pending_payment' });
     expect(after.tickets[0]!.remaining).toBe(before.tickets[0]!.remaining - 1);
   });
 
@@ -170,6 +170,74 @@ describe('ConferenceRepository in-memory operational loop', () => {
     expect(checkout.registration.formAnswers).not.toHaveProperty('title');
     expect(checkout.registration.formAnswers).not.toHaveProperty('city');
   });
+
+  it('never restores a disabled email from the customer profile or submitted answers', async () => {
+    const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
+    demoEvent.registrationForm!.fields = [
+      { key: 'mobile', label: '手机号', type: 'tel', required: true },
+      { key: 'email', label: '邮箱', type: 'email', required: true, enabled: false },
+    ];
+    const input = { ...registrationInput(), formAnswers: { email: 'hidden@example.com' } };
+    input.attendee.email = '';
+    const actor = customerActor();
+    actor.profile.email = 'profile@example.com';
+    const checkout = await repository.createCheckout(input, 'disabled-email-checkout', actor);
+    expect(checkout.registration.attendee.email).toBe('');
+    expect(checkout.registration.formAnswers).toEqual({ mobile: actor.mobile });
+  });
+
+  it('preserves blank optional fields after the attendee clears prefilled profile values', async () => {
+    const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
+    demoEvent.registrationForm!.fields = demoEvent.registrationForm!.fields.map((field) => ({
+      ...field,
+      enabled: true,
+      required: field.key === 'mobile',
+    }));
+    const input = registrationInput();
+    input.attendee = {
+      name: '',
+      email: '',
+      company: '',
+      title: '',
+      city: '',
+      mobile: input.attendee.mobile,
+    };
+    const checkout = await repository.createCheckout(
+      input,
+      'blank-optional-fields',
+      customerActor(),
+    );
+    expect(checkout.registration.attendee).toEqual({
+      ...input.attendee,
+      mobile: customerActor().mobile,
+    });
+    expect(checkout.registration.formAnswers).toMatchObject({ email: '', name: '', company: '' });
+  });
+
+  it.each([false, true])(
+    'uses the phone for waitlist contact with email enabled=%s and submitted blank',
+    async (enabled) => {
+      const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
+      demoEvent.tickets[0]!.remaining = 0;
+      demoEvent.registrationForm!.fields = [
+        { key: 'mobile', label: '手机号', type: 'tel', required: true },
+        { key: 'email', label: '邮箱', type: 'email', required: false, enabled },
+      ];
+      const actor = customerActor();
+      const entry = await repository.joinWaitlist(
+        {
+          eventId: demoEvent.id,
+          ticketTypeId: demoEvent.tickets[0]!.id,
+          name: '隐藏姓名',
+          email: enabled ? '' : 'hidden@example.com',
+          mobile: actor.mobile,
+        },
+        'waitlist-hidden-email',
+        actor,
+      );
+      expect(entry).toMatchObject({ name: '', email: '', mobile: actor.mobile });
+    },
+  );
 
   it('keeps one registration per logged-in customer and event across idempotency keys', async () => {
     const before = await repository.getPublicEvent();
@@ -273,7 +341,7 @@ describe('ConferenceRepository in-memory operational loop', () => {
       payload: expect.objectContaining({
         registrationId: otherCheckout.registration.id,
         recipientRole: 'attendee',
-        recipient: 'chen@example.com',
+        recipient: '+8613900139000',
         sealedAttendeeClaimToken: expect.any(String),
       }),
     });
@@ -338,6 +406,8 @@ describe('ConferenceRepository in-memory operational loop', () => {
   });
 
   it('enforces the additional-purchase flag, one pending order, waitlist scope, and seat cap', async () => {
+    const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
+    demoEvent.registration.additionalPurchaseEnabled = false;
     const otherInput = (mobile: string, intent: string) => ({
       ...registrationInput(),
       purchaseFor: 'other' as const,
@@ -354,7 +424,6 @@ describe('ConferenceRepository in-memory operational loop', () => {
       ),
     ).rejects.toMatchObject({ status: 409 });
 
-    const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
     demoEvent.registration.additionalPurchaseEnabled = true;
     const selfCheckout = await repository.createCheckout(
       registrationInput(),
@@ -562,6 +631,8 @@ describe('ConferenceRepository in-memory operational loop', () => {
   });
 
   it('counts a failed purchase intent once while throttling the eleventh distinct attempt', async () => {
+    const demoEvent = Reflect.get(repository, 'demoEvent') as PublicEvent;
+    demoEvent.registration.additionalPurchaseEnabled = false;
     const failedInput = (intent: string) => ({
       ...registrationInput(),
       purchaseFor: 'other' as const,
@@ -994,6 +1065,8 @@ describe('ConferenceRepository in-memory operational loop', () => {
       paidSeats: 6,
       confirmedAttendees: 6,
       purchasers: 6,
+      refundedOrders: 0,
+      refundedAmount: 0,
       conversionRate: 60,
     });
     expect(dashboard.metrics.revenue).toBeGreaterThan(0);
@@ -1239,7 +1312,7 @@ describe('registration review transaction retry', () => {
     const deadlock = Object.assign(new Error('deadlock detected'), { code: '40P01' });
     const transaction = vi.fn<() => Promise<never>>().mockRejectedValue(deadlock);
     const repository = new ConferenceRepository({
-      db: { transaction },
+      db: { transaction, select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }) },
     } as unknown as DatabaseService);
 
     await expect(

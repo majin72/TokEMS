@@ -70,6 +70,9 @@ x-app-environment: &app-environment
   ADMIN_WEB_URL: ${ADMIN_ORIGIN}
   PUBLIC_SITE_URL: ${PUBLIC_ORIGIN}
   PUBLIC_API_URL: ${PUBLIC_ORIGIN}
+  PARTNER_ATTRIBUTION_SECRET: ${PARTNER_ATTRIBUTION_SECRET:-}
+  PARTNER_PAYOUT_DATA_SECRET: ${PARTNER_PAYOUT_DATA_SECRET:-}
+  PAYOUT_PUBLIC_URL: ${PAYOUT_PUBLIC_URL:-${PUBLIC_ORIGIN}}
   TRUST_PROXY: ${TRUST_PROXY:-127.0.0.1,::1,172.16.0.0/12}
   API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-5000}
   PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-}
@@ -137,7 +140,7 @@ services:
     logging: *default-logging
 
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: [server, /data, --console-address, ':9001']
     restart: unless-stopped
     environment:
@@ -157,7 +160,7 @@ services:
     logging: *default-logging
 
   minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     restart: 'no'
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-conference}
@@ -260,6 +263,7 @@ services:
         VITE_API_BASE: /api/v1
     environment:
       <<: *app-environment
+      BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}
       API_PORT: 4100
       API_BIND_ADDRESS: 0.0.0.0
       API_INTERNAL_CONTAINER: 'true'

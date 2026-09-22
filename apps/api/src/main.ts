@@ -6,7 +6,7 @@ import { Logger, RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { isLoopbackHostname, resolveDeploymentOrigins } from '@conference/security';
+import { isLoopbackHostname, resolveDeploymentOrigins, redactInvoiceFilePath } from '@conference/security';
 import type { FastifyRequest } from 'fastify';
 import { AppModule } from './app.module.js';
 import { HttpExceptionFilter } from './common/http-exception.filter.js';
@@ -43,7 +43,7 @@ async function bootstrap() {
               req(request: FastifyRequest) {
                 return {
                   method: request.method,
-                  url: String(request.url).split('?')[0] ?? '/',
+                  url: redactInvoiceFilePath(String(request.url)),
                   remoteAddress: request.ip,
                 };
               },
@@ -83,6 +83,7 @@ async function bootstrap() {
       'X-Payment-Timestamp',
       'X-Payment-Signature',
       'X-CSRF-Token',
+      'X-Consent-Confirmation',
       'X-Wechat-OAuth-Session',
       'X-Payment-Channel',
     ],

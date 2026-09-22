@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "webPages": 16,
-  "adminViews": 38,
-  "migrations": 60,
-  "latestMigration": "0059_green_rictor.sql",
-  "databaseTables": 80,
-  "apiControllers": 32,
-  "apiOperations": 274,
-  "testFiles": 167
+  "webPages": 23,
+  "adminViews": 41,
+  "migrations": 73,
+  "latestMigration": "0072_absent_skaar.sql",
+  "databaseTables": 105,
+  "apiControllers": 46,
+  "apiOperations": 365,
+  "testFiles": 231
 }

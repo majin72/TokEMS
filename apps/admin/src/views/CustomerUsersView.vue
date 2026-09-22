@@ -22,6 +22,7 @@ type DirectoryKind = 'customers' | 'administrators';
 type CreateAccountKind = 'customer' | 'administrator';
 
 const items = ref<CustomerAdminSummary[]>([]);
+const selectedPartnerUserIds = ref<number[]>([]);
 const selected = ref<CustomerAdminDetail>();
 const deleteTarget = ref<CustomerAdminSummary>();
 const detailDialog = ref<HTMLDialogElement>();
@@ -108,6 +109,12 @@ const canManage = computed(() => session.can('customer.manage'));
 const canManageStatus = computed(() => session.can('customer.status.manage'));
 const canDelete = computed(() => session.can('customer.delete'));
 const canExport = computed(() => session.canAll(['customer.read', 'customer.export']));
+const canManagePartners = computed(() => session.can('event.partner.manage'));
+const allVisiblePartnerUsersSelected = computed(
+  () =>
+    items.value.length > 0 &&
+    items.value.every((item) => selectedPartnerUserIds.value.includes(item.id)),
+);
 const canReadAdministrators = computed(() => session.can('org.member.read'));
 const isSuperAdministrator = computed(
   () => session.identity.value?.membership.isSuperAdministrator === true,
@@ -304,6 +311,7 @@ async function load(targetPage = 1, reuseAppliedFilters = false) {
     });
     if (requestId !== loadRequestId) return;
     items.value = result.items;
+    selectedPartnerUserIds.value = [];
     total.value = result.total;
     page.value = result.page;
     totalPages.value = result.totalPages;
@@ -605,7 +613,10 @@ function toggleMenu(item: CustomerAdminSummary, event: MouseEvent) {
   const rect = trigger.getBoundingClientRect();
   const menuWidth = window.innerWidth <= 700 ? 180 : 132;
   const menuItemCount =
-    1 + Number(canManage.value && canManageStatus.value) + Number(canDelete.value);
+    1 +
+    Number(canManage.value && canManageStatus.value) +
+    Number(canManagePartners.value) +
+    Number(canDelete.value);
   const menuHeight = 8 + menuItemCount * 36;
   const openUpward = window.innerHeight - rect.bottom < menuHeight + 12 && rect.top > menuHeight;
   menuPosition.top = openUpward ? rect.top - menuHeight - 6 : rect.bottom + 6;
@@ -642,6 +653,63 @@ async function copyUserId(item: CustomerAdminSummary) {
     closeMenu(true);
   } catch {
     errorMessage.value = '用户 ID 复制失败，请稍后重试。';
+  }
+}
+
+async function enablePartner(item: CustomerAdminSummary) {
+  const activeEventId = session.activeEventId.value;
+  if (!activeEventId) {
+    errorMessage.value = '请先在大会工作区选择要开通合作伙伴权限的大会。';
+    closeMenu(true);
+    return;
+  }
+  try {
+    await conferenceApi.enableEventPartner(
+      {
+        customerPublicUserId: item.id,
+        personalRateBps: null,
+        sortOrder: 0,
+        internalNote: '从组织用户列表快速开通',
+        sendInvitation: true,
+      },
+      activeEventId,
+    );
+    message.value = `已为“${item.displayName}”开通当前大会的合作伙伴权限。`;
+    errorMessage.value = '';
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '合作伙伴权限开通失败';
+  } finally {
+    closeMenu(true);
+  }
+}
+
+function toggleVisiblePartnerUsers() {
+  selectedPartnerUserIds.value = allVisiblePartnerUsersSelected.value
+    ? []
+    : items.value.map((item) => item.id);
+}
+
+async function batchEnablePartners() {
+  const activeEventId = session.activeEventId.value;
+  if (!activeEventId) {
+    errorMessage.value = '请先在大会工作区选择要开通合作伙伴权限的大会。';
+    return;
+  }
+  if (!selectedPartnerUserIds.value.length) return;
+  try {
+    const result = await conferenceApi.batchEnableEventPartners(
+      {
+        customerPublicUserIds: selectedPartnerUserIds.value,
+        personalRateBps: null,
+        sendInvitation: true,
+      },
+      activeEventId,
+    );
+    message.value = `已为 ${result.count} 位用户开通当前大会的合作伙伴权限。`;
+    errorMessage.value = '';
+    selectedPartnerUserIds.value = [];
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '批量开通合作伙伴权限失败';
   }
 }
 
@@ -949,6 +1017,14 @@ onBeforeUnmount(() => {
           </button>
         </form>
         <button
+          v-if="canManagePartners && selectedPartnerUserIds.length"
+          class="button secondary compact"
+          type="button"
+          @click="batchEnablePartners"
+        >
+          批量开通合作伙伴（{{ selectedPartnerUserIds.length }}）
+        </button>
+        <button
           v-if="canExport"
           class="button secondary compact customer-export-button"
           type="button"
@@ -990,6 +1066,14 @@ onBeforeUnmount(() => {
         </caption>
         <thead>
           <tr>
+            <th v-if="canManagePartners" class="customer-partner-select-column">
+              <input
+                type="checkbox"
+                :checked="allVisiblePartnerUsersSelected"
+                aria-label="选择本页全部用户"
+                @change="toggleVisiblePartnerUsers"
+              >
+            </th>
             <th class="customer-id-column">用户 ID</th>
             <th class="customer-mobile-column">手机号</th>
             <th class="customer-name-column">姓名</th>
@@ -1004,6 +1088,14 @@ onBeforeUnmount(() => {
         </thead>
         <tbody>
           <tr v-for="item in items" :key="item.id">
+            <td v-if="canManagePartners" class="customer-partner-select-column" data-label="批量选择">
+              <input
+                v-model="selectedPartnerUserIds"
+                type="checkbox"
+                :value="item.id"
+                :aria-label="`选择${item.displayName}`"
+              >
+            </td>
             <td class="customer-id-cell customer-id-column" data-label="用户 ID">
               <button
                 class="customer-copy-value"
@@ -1105,6 +1197,13 @@ onBeforeUnmount(() => {
                     </button>
                     <button type="button" @click="copyUserId(item)">复制用户 ID</button>
                     <button
+                      v-if="canManagePartners"
+                      type="button"
+                      @click="enablePartner(item)"
+                    >
+                      开通合作伙伴
+                    </button>
+                    <button
                       v-if="canDelete"
                       class="danger"
                       type="button"
@@ -1118,7 +1217,7 @@ onBeforeUnmount(() => {
             </td>
           </tr>
           <tr v-if="!items.length" class="customer-empty-row">
-            <td colspan="10" class="admin-empty">当前筛选条件下没有普通用户。</td>
+            <td :colspan="canManagePartners ? 11 : 10" class="admin-empty">当前筛选条件下没有普通用户。</td>
           </tr>
         </tbody>
       </table>
@@ -2203,6 +2302,17 @@ onBeforeUnmount(() => {
 .customer-table th,
 .customer-table td {
   padding-inline: 12px;
+}
+
+.customer-partner-select-column {
+  width: 44px;
+  text-align: center;
+}
+
+.customer-partner-select-column input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--blue);
 }
 
 .customer-id-cell,

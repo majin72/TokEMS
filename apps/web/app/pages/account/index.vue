@@ -8,14 +8,15 @@ import type {
   CustomerRegistrationSummary,
   CustomerServiceHubItem,
   EventPurchaseContext,
+  PartnerRelationshipView,
 } from '@conference/contracts';
-import { publicEventHomePath } from '@conference/contracts';
+import { publicEventHomePath, publicEventScopedPath } from '@conference/contracts';
 import { nextTick, watch } from 'vue';
 import { useCustomerSession } from '~/composables/useCustomerSession';
 import {
   canRestartSelfOrder,
   canResumePendingOrder,
-  createRegistrationIntent,
+  canResumeRegistrationPayment,
   shouldRefreshPurchasedOrder,
 } from '~/utils/purchase-journey';
 import { resolveAttendeeNeedsAccountState } from '~/utils/attendee-needs';
@@ -47,6 +48,7 @@ const organizerCopyStatus = ref('');
 const latestServiceHubRequestByRegistration = new Map<string, number>();
 let serviceHubRequestSequence = 0;
 const invoiceHighlights = ref<CustomerInvoiceCenterItem[]>([]);
+const partnerships = ref<PartnerRelationshipView[]>([]);
 const invoiceCounts = ref<CustomerInvoiceCenterCounts>({
   all: 0,
   eligible: 0,
@@ -63,6 +65,8 @@ const nextOrdersCursor = ref<string | null>(null);
 const editingOrderId = ref('');
 const attendeeSaving = ref(false);
 const resumingOrderId = ref('');
+let pageActive = true;
+let paymentContextRevision = 0;
 const refreshingPurchaseContexts = ref(false);
 const attendeeEdit = reactive({ name: '', mobile: '' });
 const errorMessage = ref('');
@@ -158,6 +162,9 @@ const statusLabels: Record<string, string> = {
   rejected: '已驳回',
   adjustment_required: '待调整',
   voided: '已作废',
+  pending_confirmation: '待确认规则',
+  active: '合作中',
+  paused: '已暂停',
 };
 const statusLabel = (value: string) => statusLabels[value] ?? value;
 const serviceStateLabels: Record<CustomerServiceHubItem['state'], string> = {
@@ -227,7 +234,7 @@ const primaryRegistrationAction = (
       to: `/ticket/${encodeURIComponent(item.ticketCode)}?event=${encodeURIComponent(item.eventSlug)}`,
     };
   }
-  if (item.registrationStatus === 'pending_payment') {
+  if (canResumeRegistrationPayment(item)) {
     if (['preparing', 'processing', 'query_pending'].includes(latestPaymentStatus ?? '')) {
       return { label: '查看支付进度', to: `/account/registrations/${item.id}` };
     }
@@ -235,6 +242,9 @@ const primaryRegistrationAction = (
       return { label: '重新支付', to: `/account/registrations/${item.id}` };
     }
     return { label: '继续支付', to: `/account/registrations/${item.id}` };
+  }
+  if (item.canManageOrder && item.orderStatus === 'processing') {
+    return { label: '查看支付进度', to: `/account/registrations/${item.id}` };
   }
   if (item.registrationStatus === 'pending_review') {
     return { label: '查看审核进度', to: `/account/registrations/${item.id}` };
@@ -346,6 +356,7 @@ function serviceHubActionLabel(item: CustomerServiceHubItem) {
 
 function serviceHubActionDisabled(item: CustomerServiceHubItem) {
   return (
+    (item.code === 'ticket' && Boolean(resumingOrderId.value)) ||
     (item.code === 'organizer_contact' && item.state === 'unavailable') ||
     (item.code === 'invoice' && !featuredRegistration.value?.canManageOrder)
   );
@@ -354,6 +365,10 @@ function serviceHubActionDisabled(item: CustomerServiceHubItem) {
 async function openServiceHubItem(item: CustomerServiceHubItem) {
   const registration = featuredRegistration.value;
   if (!registration || serviceHubActionDisabled(item)) return;
+  if (item.code === 'ticket' && canResumeRegistrationPayment(registration)) {
+    await resumeRegistrationPayment(registration);
+    return;
+  }
   if (item.code === 'organizer_contact') {
     await revealOrganizerPanel();
     return;
@@ -416,14 +431,14 @@ function closeMobileNavigationFromOutside(event: PointerEvent) {
   }
 }
 
-async function loadServiceHub(registrationId: string) {
+async function loadServiceHub(registrationId: string, isCurrent: () => boolean = () => true) {
   const requestSequence = ++serviceHubRequestSequence;
   latestServiceHubRequestByRegistration.set(registrationId, requestSequence);
   serviceHubPending.value = true;
   serviceHubError.value = false;
   try {
     const result = await customer.attendeeServiceHub(registrationId);
-    if (latestServiceHubRequestByRegistration.get(registrationId) !== requestSequence) return;
+    if (!isCurrent() || latestServiceHubRequestByRegistration.get(registrationId) !== requestSequence) return;
     serviceHubs.value = { ...serviceHubs.value, [registrationId]: result };
     if (
       shouldRevealOrganizerContact(route.query.service, route.query.registration, registrationId)
@@ -431,9 +446,9 @@ async function loadServiceHub(registrationId: string) {
       await revealOrganizerPanel();
     }
   } catch {
-    if (requestSequence === serviceHubRequestSequence) serviceHubError.value = true;
+    if (isCurrent() && requestSequence === serviceHubRequestSequence) serviceHubError.value = true;
   } finally {
-    if (requestSequence === serviceHubRequestSequence) serviceHubPending.value = false;
+    if (isCurrent() && requestSequence === serviceHubRequestSequence) serviceHubPending.value = false;
   }
 }
 
@@ -493,20 +508,41 @@ async function saveAttendee(order: CustomerPurchasedOrder) {
   }
 }
 
-async function resumeOrder(order: CustomerPurchasedOrder) {
+type PaymentResumeOrder = Pick<CustomerPurchasedOrder, 'id' | 'eventId' | 'eventSlug'>;
+
+async function resumeRegistrationPayment(registration: CustomerRegistrationSummary) {
+  if (!canResumeRegistrationPayment(registration)) return;
+  await resumeOrder({
+    id: registration.orderId,
+    eventId: registration.eventId,
+    eventSlug: registration.eventSlug,
+  });
+}
+
+async function resumeOrder(order: PaymentResumeOrder) {
+  if (resumingOrderId.value) return;
   resumingOrderId.value = order.id;
   errorMessage.value = '';
+  const revision = paymentContextRevision;
+  const owner = customer.session.value?.customer.id;
+  const isCurrent = () =>
+    pageActive &&
+    revision === paymentContextRevision &&
+    customer.session.value?.customer.id === owner;
   try {
     const access = await customer.createOrderPaymentAccess(order.id);
+    if (!isCurrent()) return;
     window.location.assign(
       api.resolvePaymentCheckoutUrl(order.id, order.eventSlug, access.orderAccessToken),
     );
   } catch (error) {
-    await refreshOrderPurchaseState(order);
+    if (!isCurrent()) return;
+    await refreshOrderPurchaseState(order, isCurrent);
+    if (!isCurrent()) return;
     const value = error as { data?: { message?: string } };
     errorMessage.value = value.data?.message ?? '支付入口恢复失败，请稍后重试。';
   } finally {
-    resumingOrderId.value = '';
+    if (isCurrent()) resumingOrderId.value = '';
   }
 }
 
@@ -517,13 +553,23 @@ function mergePurchasedOrder(order: CustomerPurchasedOrder | undefined) {
   );
 }
 
-async function refreshOrderPurchaseState(order: CustomerPurchasedOrder) {
+async function refreshOrderPurchaseState(order: PaymentResumeOrder, isCurrent: () => boolean = () => true) {
   refreshingPurchaseContexts.value = true;
   try {
-    const [orderResult, contextResult] = await Promise.all([
+    const registration = registrations.value.find((item) => item.orderId === order.id);
+    const [orderResult, contextResult, registrationResult] = await Promise.all([
       customer.purchasedOrders(undefined, 1, order.id).catch(() => null),
       customer.purchaseContext(order.eventId).catch(() => null),
+      registration ? customer.registration(registration.id).catch(() => null) : null,
     ]);
+    if (!isCurrent()) return;
+    if (registrationResult) {
+      registrations.value = registrations.value.map((item) =>
+        item.id === registrationResult.id ? registrationResult : item,
+      );
+      await loadServiceHub(registrationResult.id, isCurrent);
+      if (!isCurrent()) return;
+    }
     mergePurchasedOrder(orderResult?.items[0]);
     purchaseContextErrors.value = {
       ...purchaseContextErrors.value,
@@ -536,7 +582,7 @@ async function refreshOrderPurchaseState(order: CustomerPurchasedOrder) {
       };
     }
   } finally {
-    refreshingPurchaseContexts.value = false;
+    if (isCurrent()) refreshingPurchaseContexts.value = false;
   }
 }
 
@@ -613,8 +659,8 @@ function additionalPurchase(order: CustomerPurchasedOrder) {
     path: '/register',
     query: {
       event: order.eventSlug,
-      intent: createRegistrationIntent(),
       purchaseFor: 'other',
+      restart: '1',
     },
   });
 }
@@ -624,8 +670,8 @@ function restartClosedSelfOrder(order: CustomerPurchasedOrder) {
     path: '/register',
     query: {
       event: order.eventSlug,
-      intent: createRegistrationIntent(),
       purchaseFor: 'self',
+      restart: '1',
     },
   });
 }
@@ -748,6 +794,11 @@ async function loadInvoiceSummary() {
   invoiceCounts.value = result.counts;
 }
 
+async function loadPartnerships() {
+  const result = await customer.partnerships();
+  partnerships.value = result.items;
+}
+
 async function initialize() {
   loading.value = true;
   errorMessage.value = '';
@@ -755,7 +806,12 @@ async function initialize() {
     await customer.refresh();
     if (customer.session.value) {
       syncProfile();
-      await Promise.all([loadRegistrations(), loadPurchasedOrders(), loadInvoiceSummary()]);
+      await Promise.all([
+        loadRegistrations(),
+        loadPurchasedOrders(),
+        loadInvoiceSummary(),
+        loadPartnerships(),
+      ]);
       await loadRequestedRegistration();
     }
   } catch {
@@ -848,11 +904,23 @@ onMounted(() => {
   }, 30_000);
 });
 onBeforeUnmount(() => {
+  pageActive = false;
+  paymentContextRevision += 1;
   if (purchaseContextRefreshTimer) clearInterval(purchaseContextRefreshTimer);
   if (organizerCopyStatusTimer) clearTimeout(organizerCopyStatusTimer);
   accountSectionObserver?.disconnect();
   document.removeEventListener('pointerdown', closeMobileNavigationFromOutside);
 });
+watch(
+  () => [route.fullPath, customer.session.value?.customer.id],
+  () => {
+    paymentContextRevision += 1;
+    resumingOrderId.value = '';
+    refreshingPurchaseContexts.value = false;
+    serviceHubPending.value = false;
+  },
+  { flush: 'sync' },
+);
 watch(
   () => [loading.value, customer.session.value?.customer.id] as const,
   () => void observeAccountSections(),
@@ -1066,6 +1134,25 @@ useHead({ title: '个人中心' });
                 </div>
               </div>
 
+              <div v-if="partnerships.length" class="partner-center-cards">
+                <NuxtLink
+                  v-for="item in partnerships"
+                  :key="item.id"
+                  :to="`/account/partnerships/${item.eventId}`"
+                  class="partner-center-card"
+                >
+                  <span>EVENT PARTNER</span>
+                  <div>
+                    <strong>{{ item.eventName }}合作伙伴中心</strong>
+                    <small>
+                      {{ statusLabel(item.qualificationStatus) }} · 可提现
+                      {{ money(item.balances.available, item.balances.currency) }}
+                    </small>
+                  </div>
+                  <b aria-hidden="true">→</b>
+                </NuxtLink>
+              </div>
+
               <article
                 v-if="featuredRegistration"
                 class="account-pass"
@@ -1091,7 +1178,25 @@ useHead({ title: '个人中心' });
                     {{ featuredRegistration.ticketTypeName }}
                   </p>
                   <div class="account-pass__actions">
+                    <button
+                      v-if="canResumeRegistrationPayment(featuredRegistration)"
+                      class="account-pass__primary"
+                      type="button"
+                      :disabled="Boolean(resumingOrderId)"
+                      @click="resumeRegistrationPayment(featuredRegistration)"
+                    >
+                      {{
+                        resumingOrderId === featuredRegistration.orderId
+                          ? '正在恢复支付…'
+                          : primaryRegistrationAction(
+                            featuredRegistration,
+                            featuredServiceHub?.latestPaymentStatus,
+                          ).label
+                      }}
+                      <span aria-hidden="true">→</span>
+                    </button>
                     <NuxtLink
+                      v-else
                       class="account-pass__primary"
                       :to="
                         primaryRegistrationAction(
@@ -1435,7 +1540,22 @@ useHead({ title: '个人中心' });
                         </div>
                       </dl>
                       <div class="registration-row__actions">
+                        <button
+                          v-if="canResumeRegistrationPayment(item)"
+                          class="registration-primary-action"
+                          type="button"
+                          :disabled="Boolean(resumingOrderId)"
+                          @click="resumeRegistrationPayment(item)"
+                        >
+                          {{
+                            resumingOrderId === item.orderId
+                              ? '正在恢复支付…'
+                              : primaryRegistrationAction(item).label
+                          }}
+                          <span aria-hidden="true">→</span>
+                        </button>
                         <NuxtLink
+                          v-else
                           class="registration-primary-action"
                           :to="primaryRegistrationAction(item).to"
                         >
@@ -1501,7 +1621,7 @@ useHead({ title: '个人中心' });
                       <h3>{{ orderItem.eventName }}</h3>
                       <p>
                         {{ orderItem.ticketTypeName }} ·
-                        {{ orderItem.isProxyPurchase ? '代购参会人' : '本人参会' }}
+                        {{ orderItem.modelVersion === 2 ? `${orderItem.quantity ?? 1} 个名额` : orderItem.isProxyPurchase ? '代购参会人' : '本人参会' }}
                         {{ orderItem.attendeeName }}
                       </p>
                     </div>
@@ -1512,7 +1632,13 @@ useHead({ title: '个人中心' });
                       <strong>{{ money(orderItem.amount, orderItem.currency) }}</strong>
                     </div>
                   </div>
-                  <dl class="registration-meta purchase-row__meta">
+                  <dl v-if="orderItem.modelVersion === 2" class="registration-meta purchase-row__meta">
+                    <div><dt>有效名额</dt><dd>{{ orderItem.activeSeatCount ?? 0 }} / {{ orderItem.quantity ?? 1 }}</dd></div>
+                    <div><dt>已支付</dt><dd>{{ money(orderItem.paidAmount ?? 0, orderItem.currency) }}</dd></div>
+                    <div><dt>已退款</dt><dd>{{ money(orderItem.refundedAmount ?? 0, orderItem.currency) }}</dd></div>
+                    <div><dt>支付净额</dt><dd>{{ money(orderItem.netAmount ?? 0, orderItem.currency) }}</dd></div>
+                  </dl>
+                  <dl v-if="orderItem.modelVersion !== 2" class="registration-meta purchase-row__meta">
                     <div>
                       <dt>参会手机号</dt>
                       <dd>{{ orderItem.attendeeMobile }}</dd>
@@ -1556,7 +1682,7 @@ useHead({ title: '个人中心' });
                   >
                     <label>
                       <span>参会人姓名</span>
-                      <input v-model="attendeeEdit.name" maxlength="120" required />
+                      <input v-model="attendeeEdit.name" maxlength="120" />
                     </label>
                     <label>
                       <span>参会手机号</span>
@@ -1575,6 +1701,7 @@ useHead({ title: '个人中心' });
                   </form>
 
                   <div v-else class="registration-row__actions">
+                    <NuxtLink v-if="orderItem.modelVersion === 2" class="registration-primary-action" :to="publicEventScopedPath(`/account/orders/${orderItem.id}`, orderItem.eventSlug)">查看全部名额</NuxtLink>
                     <button
                       v-if="canResumePendingOrder(orderItem, purchaseContexts[orderItem.eventId])"
                       class="registration-primary-action"
@@ -1620,8 +1747,14 @@ useHead({ title: '个人中心' });
                     >
                       {{ orderItem.invoiceId ? '查看发票' : '申请发票' }}
                     </NuxtLink>
+                    <NuxtLink
+                      v-if="['paid', 'partially_refunded', 'refunded'].includes(orderItem.status)"
+                      :to="orderItem.modelVersion === 2 ? publicEventScopedPath(`/account/orders/${orderItem.id}`, orderItem.eventSlug) : `/account/refunds/${orderItem.id}`"
+                    >
+                      退款申请与进度
+                    </NuxtLink>
                     <button
-                      v-if="orderItem.canEditAttendee"
+                      v-if="orderItem.modelVersion !== 2 && orderItem.canEditAttendee"
                       type="button"
                       @click="startAttendeeEdit(orderItem)"
                     >
@@ -1928,6 +2061,44 @@ useHead({ title: '个人中心' });
   --account-body: 13px;
   min-height: 100vh;
   background: var(--account-canvas);
+}
+
+.partner-center-cards {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.partner-center-card {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 17px 20px;
+  border: 1px solid #cddcf4;
+  border-radius: 12px;
+  background: #edf4ff;
+  color: #263851;
+}
+
+.partner-center-card > span {
+  color: #1d5cda;
+  font: 750 10px var(--conference-font-mono);
+  letter-spacing: 0.1em;
+}
+
+.partner-center-card div {
+  display: grid;
+  gap: 4px;
+}
+
+.partner-center-card small {
+  color: #64738a;
+}
+
+.partner-center-card b {
+  color: #1d5cda;
+  font-size: 18px;
 }
 
 .account-shell {

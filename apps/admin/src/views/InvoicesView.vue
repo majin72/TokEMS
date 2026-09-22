@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InvoiceSmsStatusPanel from '../components/InvoiceSmsStatusPanel.vue';
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import {
   type InvoiceBatchManifestItem,
@@ -30,7 +31,9 @@ const pending = ref(false);
 const errorMessage = ref('');
 const message = ref('');
 const query = ref(String(route.query.q ?? ''));
-const status = ref(String(route.query.status ?? ''));
+const status = ref(
+  route.query.worklist === 'actionable' ? 'actionable' : String(route.query.status ?? ''),
+);
 const eventId = computed(() => {
   const value = Array.isArray(route.params.eventId)
     ? route.params.eventId[0]
@@ -127,7 +130,11 @@ function money(value: number) {
 function currentFilters(): InvoiceListQuery {
   return {
     ...(query.value.trim() ? { q: query.value.trim() } : {}),
-    ...(status.value ? { status: status.value as InvoiceRequestStatus } : {}),
+    ...(status.value === 'actionable'
+      ? { worklist: 'actionable' as const }
+      : status.value
+        ? { status: status.value as InvoiceRequestStatus }
+        : {}),
     ...(fromDate.value ? { from: new Date(`${fromDate.value}T00:00:00+08:00`).toISOString() } : {}),
     ...(toDate.value ? { to: new Date(`${toDate.value}T23:59:59.999+08:00`).toISOString() } : {}),
     dateField: dateField.value,
@@ -137,7 +144,11 @@ function currentFilters(): InvoiceListQuery {
 function routeFilters() {
   return {
     ...(query.value ? { q: query.value } : {}),
-    ...(status.value ? { status: status.value } : {}),
+    ...(status.value === 'actionable'
+      ? { worklist: 'actionable' }
+      : status.value
+        ? { status: status.value }
+        : {}),
     ...(fromDate.value ? { fromDate: fromDate.value } : {}),
     ...(toDate.value ? { toDate: toDate.value } : {}),
     ...(dateField.value === 'issued' ? { dateField: 'issued' } : {}),
@@ -403,8 +414,8 @@ async function sendInvoice() {
   if (!detail.value) return;
   pending.value = true;
   try {
-    await conferenceApi.sendInvoice(detail.value.id, eventId.value);
-    message.value = `发票已加入发送队列，将发送至 ${detail.value.maskedEmail ?? '接收邮箱'}。`;
+    const result = await conferenceApi.sendInvoice(detail.value.id, eventId.value);
+    message.value = `发票已加入发送队列，将发送至 ${result.maskedRecipient}。`;
     await loadDetail();
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '发票发送失败';
@@ -541,12 +552,24 @@ watch([query, status, fromDate, toDate, dateField], (_values, _oldValues, onClea
   const timer = window.setTimeout(
     () => {
       resetPagination();
+      if (JSON.stringify(route.query) !== JSON.stringify(routeFilters()))
+        void router.replace({ query: routeFilters() });
       void load(1);
     },
     query.value ? 300 : 0,
   );
   onCleanup(() => window.clearTimeout(timer));
 });
+watch(
+  () => route.query,
+  (value) => {
+    query.value = String(value.q ?? '');
+    status.value = value.worklist === 'actionable' ? 'actionable' : String(value.status ?? '');
+    fromDate.value = String(value.fromDate ?? '');
+    toDate.value = String(value.toDate ?? '');
+    dateField.value = value.dateField === 'issued' ? 'issued' : 'requested';
+  },
+);
 watch(eventId, (nextEventId, previousEventId) => {
   if (!nextEventId || nextEventId === previousEventId) return;
   rows.value = [];
@@ -679,6 +702,7 @@ onMounted(() => {
         <span class="sr-only">状态</span>
         <select v-model="status" class="admin-select" aria-label="状态">
           <option value="">全部状态</option>
+          <option value="actionable">待处理：待审核、失败、退款调整</option>
           <option v-for="(label, key) in statusLabels" :key="key" :value="key">{{ label }}</option>
         </select>
       </label>
@@ -846,6 +870,12 @@ onMounted(() => {
           </div>
         </div>
 
+        <InvoiceSmsStatusPanel
+          :invoice="detail"
+          :event-id="detail.eventId"
+          :can-manage="canManage"
+          @refresh="loadDetail"
+        />
         <div class="invoice-detail-layout">
           <section class="invoice-detail-section">
             <header>
@@ -1074,7 +1104,7 @@ onMounted(() => {
             重新开具
           </button>
           <button
-            v-if="detail.status === 'issued'"
+            v-if="detail.status === 'issued' && !detail.smsNotification"
             class="button secondary"
             type="button"
             :disabled="pending"

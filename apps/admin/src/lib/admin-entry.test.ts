@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { EventContextOption, EventId } from '@conference/contracts';
 import {
+  hasGrant,
   adminEntryPreferenceNotice,
   clearLegacyEventPreference,
   createEventOptionsLoader,
@@ -52,6 +53,13 @@ describe('administrator entry resolution', () => {
       route: { name: 'event-invoices', params: { eventId: 101 } },
       reason: 'single_live',
     });
+  });
+
+  it('routes refund reviewers to the refund settings card', () => {
+    expect(eventLandingRouteName(['event.read', 'event.order.refund'])).toBe(
+      'event-settings-registration',
+    );
+    expect(hasEventWorkspaceLanding(['event.order.refund'])).toBe(true);
   });
 
   it('does not expose a workspace landing page for AI-only permissions', () => {
@@ -298,5 +306,13 @@ describe('administrator entry resolution', () => {
       city: '上海',
       registrationCount: 0,
     });
+  });
+
+  it('requires explicit grants for high-risk partner finance operations', () => {
+    expect(hasGrant(['event.*'], 'event.partner.manage')).toBe(true);
+    expect(hasGrant(['event.*'], 'event.commission.read')).toBe(true);
+    expect(hasGrant(['event.*'], 'event.commission.manage')).toBe(false);
+    expect(hasGrant(['event.*'], 'event.payout.execute')).toBe(false);
+    expect(hasGrant(['event.payout.execute'], 'event.payout.execute')).toBe(true);
   });
 });

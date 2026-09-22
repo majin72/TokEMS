@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -9,6 +10,10 @@ import test from 'node:test';
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const scriptPath = resolve(repositoryRoot, 'tooling/production-deploy.sh');
 const source = readFileSync(scriptPath, 'utf8');
+const descriptorVerifierSource = readFileSync(
+  resolve(repositoryRoot, 'tooling/release-descriptor.py'),
+  'utf8',
+);
 const workerSource = readFileSync(resolve(repositoryRoot, 'apps/worker/src/main.ts'), 'utf8');
 const dockerfileSource = readFileSync(resolve(repositoryRoot, 'Dockerfile'), 'utf8');
 
@@ -24,6 +29,7 @@ test('production deploy script has valid Bash syntax and a read-only help path',
   assert.match(help.stdout, /production-deploy\.sh recover-interrupted/);
   assert.match(help.stdout, /production-deploy\.sh resolve-recovery/);
   assert.match(help.stdout, /--resume-recovery/);
+  assert.match(help.stdout, /--build-on-host/);
   assert.match(help.stdout, /default canonical mode is automatic/);
 
   const modeHelp = spawnSync('bash', [scriptPath, 'check', '--help'], { encoding: 'utf8' });
@@ -46,6 +52,105 @@ test('production deploy script has valid Bash syntax and a read-only help path',
   }
 });
 
+test('prebuilt images are the default release path and host builds remain resource-gated', () => {
+  assert.match(source, /GHCR_TOKEN_FILE='\/etc\/tokems\/ghcr-read-token'/);
+  assert.match(source, /GHCR_PACKAGE='ghcr\.io\/yaojingang\/tokems-production-private'/);
+  assert.doesNotMatch(source, /GHCR_PACKAGE='ghcr\.io\/yaojingang\/tokems-production'/);
+  assert.doesNotMatch(source, /GHCR_PACKAGE='ghcr\.io\/yaojingang\/tokems'/);
+  assert.match(source, /package_name="\$\{GHCR_PACKAGE##\*\/\}"/);
+  assert.match(source, /packages\/container\/\$\{package_name\}/);
+  assert.match(
+    descriptorVerifierSource,
+    /EXPECTED_PACKAGE = "ghcr\.io\/yaojingang\/tokems-production-private"/,
+  );
+  assert.match(source, /verify_image_publish_gate/);
+  assert.match(source, /verify_release_descriptor/);
+  assert.match(source, /pull_prebuilt_images/);
+  assert.match(source, /activate_prebuilt_images/);
+  assert.match(source, /gh attestation verify/);
+  assert.match(source, /docker buildx imagetools inspect/);
+  assert.match(source, /GHCR network probe failed/);
+  assert.match(source, /GHCR read token file is missing/);
+  assert.match(source, /GHCR authentication failed; the read token may be expired or invalid/);
+  assert.match(source, /GHCR_LOGIN_TIMEOUT_SECONDS=45/);
+  assert.match(source, /GHCR_LOGIN_ATTEMPTS=3/);
+  assert.match(source, /GHCR authentication timed out after bounded retries/);
+  assert.match(source, /GHCR authentication transport failed after bounded retries/);
+  assert.equal(
+    source.match(/token="\$\(<"\$GHCR_TOKEN_FILE"\)"/g)?.length,
+    2,
+    'both GHCR consumers must accept a token file without a trailing newline',
+  );
+  assert.doesNotMatch(source, /IFS= read -r token <"\$GHCR_TOKEN_FILE"/);
+  assert.match(source, /timeout --foreground --kill-after=10s "\$\{GHCR_LOGIN_TIMEOUT_SECONDS\}s"/);
+  assert.match(source, /sys\.version_info >= \(3, 6\)/);
+  assert.match(source, /Python 3\.6 or newer is required for release verification/);
+  assert.match(source, /MIN_BUILDX_VERSION='0\.36\.1'/);
+  assert.match(
+    source,
+    /Docker Buildx \$\{MIN_BUILDX_VERSION\} or newer is required for release verification/,
+  );
+  assert.match(source, /prepare_release_source_bundle/);
+  assert.match(source, /verify-source-bundle/);
+  assert.match(source, /import-source-bundle/);
+  assert.match(source, /refs\/heads\/tokems-release-source/);
+  assert.match(descriptorVerifierSource, /refs\/tokems-deploy\/source-candidate/);
+  assert.match(descriptorVerifierSource, /EXPECTED_UPSTREAM_REF/);
+  assert.match(descriptorVerifierSource, /"update-ref",\s+EXPECTED_UPSTREAM_REF/);
+  assert.doesNotMatch(source, /git -C "\$APP_DIR" fetch --prune origin main/);
+  assert.match(source, /source_bundle_sha256=%s/);
+  assert.match(source, /descriptor_verifier_sha256=%s/);
+  const prepareDescriptor = source.slice(
+    source.indexOf('prepare_release_source_bundle() {'),
+    source.indexOf('\ndescriptor_image_ref() {'),
+  );
+  assert.ok(
+    prepareDescriptor.indexOf('--format \'{{.Manifest.Digest}}\' "$release_ref"') <
+      prepareDescriptor.indexOf("--format '{{json .Image.Config.Labels}}'"),
+    'the release tag must resolve to a digest before descriptor labels are read',
+  );
+  assert.match(prepareDescriptor, /"\$descriptor_ref" >"\$labels_file"/);
+  assert.doesNotMatch(
+    prepareDescriptor,
+    /--format '\{\{json \.Image\.Config\.Labels\}\}'[\s\\]*\n\s+"\$release_ref"/,
+  );
+
+  const main = source.slice(source.indexOf('\nmain() {'));
+  assert.match(
+    main,
+    /if \[\[ "\$build_on_host" == 'true' \]\]; then[\s\S]*?write_build_identity[\s\S]*?build_images[\s\S]*?else[\s\S]*?pull_prebuilt_images[\s\S]*?write_prebuilt_build_identity[\s\S]*?activate_prebuilt_images/,
+  );
+  assert.match(source, /if \[\[ "\$build_on_host" == 'true' \]\]; then\n\s+assert_build_capacity/);
+
+  const pull = source.slice(
+    source.indexOf('pull_prebuilt_images() {'),
+    source.indexOf('\nactivate_prebuilt_images() {'),
+  );
+  assert.doesNotMatch(pull, /:local/);
+  assert.doesNotMatch(pull, /docker (compose )?build/);
+  assert.match(pull, /registry_docker pull --platform "\$descriptor_platform" "\$image_ref"/);
+  const activate = source.slice(
+    source.indexOf('activate_prebuilt_images() {'),
+    source.indexOf('\nread_only_database_url() {'),
+  );
+  assert.match(activate, /images_changed='true'/);
+  assert.match(activate, /:local/);
+});
+
+test('production runtime gate accepts supported Buildx versions and rejects older clients', () => {
+  const match = source.match(
+    /assert_buildx_runtime\(\) \{[\s\S]*?python3 -c '\n([\s\S]*?)\n' "\$buildx_version" "\$MIN_BUILDX_VERSION"/,
+  );
+  assert.ok(match, 'Buildx runtime version parser was not found');
+  const runGate = (versionOutput) =>
+    spawnSync('python3', ['-c', match[1], versionOutput, '0.36.1'], { encoding: 'utf8' });
+
+  assert.equal(runGate('github.com/docker/buildx v0.36.1 abc123').status, 0);
+  assert.equal(runGate('github.com/docker/buildx v0.40.0-rc1 abc123').status, 0);
+  assert.notEqual(runGate('github.com/docker/buildx v0.14.0 abc123').status, 0);
+  assert.notEqual(runGate('unexpected output').status, 0);
+});
+
 test('forced canonical sync reuses a compatible runtime without building images', () => {
   const help = spawnSync('bash', [scriptPath, 'deploy', '--help'], { encoding: 'utf8' });
   assert.equal(help.status, 0, help.stderr);
@@ -55,10 +160,14 @@ test('forced canonical sync reuses a compatible runtime without building images'
     source.indexOf('run_full_preflight() {'),
     source.indexOf('\ncapture_business_snapshot() {'),
   );
+  assert.doesNotMatch(
+    preflight,
+    /verify_github_release_gate|verify_image_publish_gate|verify_release_descriptor/,
+  );
   assert.match(preflight, /canonical_repair_scope_is_compatible/);
   assert.match(
     preflight,
-    /if \[\[ "\$canonical_sync_required" == 'true' \]\] && canonical_repair_scope_is_compatible; then[\s\S]*?canonical_repair_mode='true'[\s\S]*?else[\s\S]*?assert_build_capacity/,
+    /if \[\[ "\$canonical_sync_required" == 'true' \]\] && canonical_repair_scope_is_compatible; then[\s\S]*?canonical_repair_mode='true'[\s\S]*?elif \[\[ "\$build_on_host" == 'true' \]\]; then[\s\S]*?assert_build_capacity/,
   );
 
   const repair = source.slice(
@@ -100,6 +209,7 @@ test('production deploy script pins the documented topology and release gates', 
     "readonly EXPECTED_ORIGIN='https://github.com/yaojingang/TokEMS.git'",
     "readonly EXPECTED_BRANCH='production'",
     "readonly EXPECTED_UPSTREAM='origin/main'",
+    "readonly EXPECTED_UPSTREAM_REF='refs/remotes/origin/main'",
     "readonly CANONICAL_ORGANIZATION_SLUG='geo-conference'",
     "readonly CANONICAL_EVENT_SLUG='tokems26'",
     'MIN_BUILD_CAPACITY_KIB=10485760',
@@ -109,7 +219,7 @@ test('production deploy script pins the documented topology and release gates', 
     'GIT_CONFIG_GLOBAL=/dev/null',
     "PRODUCTION_ENV_FILE='/etc/tokems/production.env'",
     'GIT_TERMINAL_PROMPT=0',
-    'GIT_FETCH_TIMEOUT_SECONDS=180',
+    'GIT_BUNDLE_IMPORT_TIMEOUT_SECONDS=180',
     'BUILD_TIMEOUT_SECONDS=3600',
     "LOCAL_DOCKER_HOST='unix:///var/run/docker.sock'",
     '--project-name "$COMPOSE_PROJECT"',
@@ -146,7 +256,7 @@ test('production deploy script pins the documented topology and release gates', 
     'assert_final_backup_capacity',
     'assert_release_verification_capacity',
     'assert_post_thaw_evidence_capacity',
-    'DATA_COMPARE_MAX_VIRTUAL_KIB=262144',
+    'DATA_COMPARE_MAX_VIRTUAL_KIB=524288',
     'assert_ordered_subsequence',
     'RECOVERY_REQUIRED',
     'arm_release_recovery_marker',
@@ -215,6 +325,8 @@ test('production deploy workflow creates recovery evidence before mutation and v
   assert.match(source, /canonical-homepage\.public\.before\.json/);
   assert.match(source, /business-counts-post-thaw\.csv/);
   assert.match(source, /compare_production_data post-thaw/);
+  assert.match(source, /assert_runtime_image_tags\n\s+assert_api_uses_compose_database/);
+  assert.match(source, /containers-after\.json/);
   assert.match(source, /write_pending_recovery_marker 'release-pre-write-armed'/);
   assert.doesNotMatch(source, /return \{tuple\(row\) for row/);
   assert.match(
@@ -412,6 +524,199 @@ test('canonical data comparison permits only snapshot-declared rows with zero ne
   }
 });
 
+test(
+  'canonical comparison reads the real snapshot with the production Python virtual-memory baseline',
+  { skip: process.platform !== 'linux' },
+  () => {
+    const budget = Number(source.match(/DATA_COMPARE_MAX_VIRTUAL_KIB=(\d+)/)[1]);
+    const result = spawnSync(
+      'python3',
+      [
+        '-',
+        String(budget),
+        resolve(repositoryRoot, 'packages/contracts/src/canonical-homepage.snapshot.json'),
+      ],
+      {
+        encoding: 'utf8',
+        input: `import json, mmap, resource, sys
+# Reserve address space without consuming physical memory, matching Alibaba Python 3.6.
+reserved = mmap.mmap(-1, 226 * 1024 * 1024)
+limit = int(sys.argv[1]) * 1024
+resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+with open(sys.argv[2], encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+assert snapshot["release"]["id"]
+print("canonical snapshot decoded under release limit")
+`,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /canonical snapshot decoded under release limit/);
+  },
+);
+
+test('read-only rollback pins both web services to image metadata and resets pins for forward recovery', () => {
+  const start = source.indexOf('write_read_only_compose_override() {');
+  const end = source.indexOf('\nenter_release_write_freeze() {', start);
+  assert.ok(start >= 0 && end > start, 'read-only override writer is required');
+  const writer = source.slice(start, end);
+  const directory = mkdtempSync(resolve(tmpdir(), 'tokems-rollback-web-'));
+  const override = resolve(directory, 'read-only.yml');
+  const base = resolve(directory, 'compose.yml');
+  try {
+    writeFileSync(
+      base,
+      `services:
+  api:
+    image: test-api
+    environment: {BUILD_MIGRATION: '0064_target.sql', BUILD_MIGRATION_HASH: '${'b'.repeat(64)}'}
+  worker:
+    image: test-worker
+    environment: {BUILD_MIGRATION: '0064_target.sql'}
+  web:
+    image: test-web
+    environment: {BUILD_MIGRATION: '0064_target.sql', BUILD_MIGRATION_HASH: '${'b'.repeat(64)}'}
+  payment-web:
+    image: test-web
+    environment: {BUILD_MIGRATION: '0064_target.sql', BUILD_MIGRATION_HASH: '${'b'.repeat(64)}'}
+`,
+    );
+    const run = (migration, hash) => {
+      const generated = spawnSync(
+        'bash',
+        [
+          '-c',
+          `set -Eeuo pipefail
+read_only_compose_file="$OVERRIDE"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+${writer}
+write_read_only_compose_override "$MIGRATION" "$HASH"
+`,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, OVERRIDE: override, MIGRATION: migration, HASH: hash },
+        },
+      );
+      assert.equal(generated.status, 0, generated.stderr);
+      const config = spawnSync(
+        'docker',
+        [
+          'compose',
+          '-p',
+          'tokems-rollback-test',
+          '-f',
+          base,
+          '-f',
+          override,
+          'config',
+          '--format',
+          'json',
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            TOKEMS_READ_ONLY_DATABASE_URL: 'postgresql://readonly@example.invalid/conference',
+          },
+        },
+      );
+      assert.equal(config.status, 0, config.stderr);
+      return JSON.parse(config.stdout).services;
+    };
+    const rollback = run('0062_previous.sql', 'a'.repeat(64));
+    for (const service of ['web', 'payment-web']) {
+      assert.equal(rollback[service].environment.BUILD_MIGRATION, '0062_previous.sql');
+      assert.equal(rollback[service].environment.BUILD_MIGRATION_HASH, 'a'.repeat(64));
+    }
+    assert.equal(rollback.api.environment.BUILD_MIGRATION, '0064_target.sql');
+    assert.equal(
+      rollback.api.environment.DATABASE_URL,
+      'postgresql://readonly@example.invalid/conference',
+    );
+    assert.deepEqual(rollback.worker.command, ['node', '-e', 'setInterval(() => {}, 1000)']);
+    const forward = run('', '');
+    for (const service of ['web', 'payment-web'])
+      assert.equal(forward[service].environment.BUILD_MIGRATION, '0064_target.sql');
+    assert.equal(forward.api.environment.DATABASE_URL, rollback.api.environment.DATABASE_URL);
+    assert.deepEqual(forward.worker.command, rollback.worker.command);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('failed read-only override writes preserve the prior complete recovery configuration', () => {
+  const writer = source.slice(
+    source.indexOf('write_read_only_compose_override() {'),
+    source.indexOf('\nenter_release_write_freeze() {'),
+  );
+  const directory = mkdtempSync(resolve(tmpdir(), 'tokems-rollback-write-'));
+  const override = resolve(directory, 'read-only.yml');
+  try {
+    for (const failedWrite of [1, 2]) {
+      writeFileSync(override, 'previous-complete-read-only-override\n');
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          `set +e
+read_only_compose_file="$OVERRIDE"
+writes=0
+cat() {
+  writes=$((writes + 1))
+  if [[ "$writes" == "$FAILED_WRITE" ]]; then
+    printf 'services:\\n  api:\\n'
+    return 1
+  fi
+  command cat "$@"
+}
+die() { exit 1; }
+${writer}
+write_read_only_compose_override 0062_previous.sql ${'a'.repeat(64)} || exit 23
+exit 0
+`,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, OVERRIDE: override, FAILED_WRITE: String(failedWrite) },
+        },
+      );
+      assert.equal(result.status, 23, result.stderr);
+      assert.equal(readFileSync(override, 'utf8'), 'previous-complete-read-only-override\n');
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('canonical snapshot capacity is checked before the protected write window', () => {
+  const preflight = source.slice(
+    source.indexOf('run_full_preflight() {'),
+    source.indexOf('\ncapture_business_snapshot() {'),
+  );
+  assert.match(preflight, /assert_canonical_comparison_capacity/);
+  const capacity = source.slice(
+    source.indexOf('assert_canonical_comparison_capacity() {'),
+    source.indexOf('\nrun_full_preflight() {'),
+  );
+  assert.match(capacity, /ulimit -v "\$DATA_COMPARE_MAX_VIRTUAL_KIB"/);
+  assert.match(capacity, /json.load/);
+  const recovery = source.slice(
+    source.indexOf('assert_pending_recovery_policy() {'),
+    source.indexOf('\nwrite_pending_recovery_marker() {'),
+  );
+  assert.match(recovery, /read_only_compose_file="\$session_env_file.read-only.yml"/);
+  assert.match(recovery, /write_read_only_compose_override/);
+  const rollback = source.slice(
+    source.indexOf('restore_application_rollback() {'),
+    source.indexOf('\non_exit() {'),
+  );
+  assert.match(
+    rollback,
+    /write_read_only_compose_override "\$release_baseline_code_migration" "\$release_baseline_code_migration_hash"/,
+  );
+});
+
 test('protected rollback blocks writes and persists recovery before database evidence queries', () => {
   const rollback = source.slice(
     source.indexOf('restore_application_rollback() {'),
@@ -449,7 +754,10 @@ test('worker publishes a persistent release identity only after startup maintena
   const finalStartupMaintenance = workerSource.indexOf('await maintainFeishuDigests()');
   assert.ok(finalStartupMaintenance >= 0 && finalStartupMaintenance < firstConsumerStart);
   assert.equal(workerSource.match(/autorun: false/g)?.length, 2);
-  assert.match(workerSource, /Promise\.all\(\[worker\.waitUntilReady\(\), htmlImportWorker\.waitUntilReady\(\)\]\)/);
+  assert.match(
+    workerSource,
+    /Promise\.all\(\[worker\.waitUntilReady\(\), htmlImportWorker\.waitUntilReady\(\)\]\)/,
+  );
   assert.match(workerSource, /rename\(workerReadyTempFile, workerReadyFile\)/);
   assert.match(workerSource, /unlink\(workerReadyFile\)/);
   assert.match(source, /fs\.readFileSync\('\/tmp\/tokems-worker-ready\.json'/);
@@ -476,17 +784,25 @@ test('rollback keeps the immutable pre-release identity after target verificatio
 
 test('target pinning is shared by every mode and recovery verifies the public API', () => {
   assert.ok(
-    source.match(/assert_target_selection "\$target_sha"/g)?.length >= 3,
-    'target selection must be rechecked by deploy, repair, and recovery modes',
+    source.match(/assert_github_main_unchanged/g)?.length >= 4,
+    'GitHub main must be rechecked by deploy, source sync, repair, and recovery modes',
   );
+  assert.match(source, /latest_sha="\$\(github_main_sha\)"/);
+  assert.match(source, /assert_target_selection "\$latest_sha"/);
   assert.match(source, /public-health-recovery-resolve\.json/);
-  assert.match(source, /assert_health_json <"\$pending_recovery_backup_dir\/public-health-recovery-resolve\.json"/);
+  assert.match(
+    source,
+    /assert_health_json <"\$pending_recovery_backup_dir\/public-health-recovery-resolve\.json"/,
+  );
 });
 
 test('root deployment pins Docker Compose and trusts only protected recovery paths', () => {
   assert.match(source, /umask 077/);
   assert.match(source, /export DOCKER_HOST="\$LOCAL_DOCKER_HOST"/);
-  assert.match(source, /unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES/);
+  assert.match(
+    source,
+    /unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES/,
+  );
   assert.match(source, /--project-name "\$COMPOSE_PROJECT"/);
   assert.match(source, /--project-directory "\$APP_DIR"/);
   assert.match(source, /--env-file "\$active_env_file"/);
@@ -499,7 +815,10 @@ test('root deployment pins Docker Compose and trusts only protected recovery pat
   assert.match(source, /Recovery evidence must be owned by root with mode 600/);
   assert.match(source, /Git replacement references are forbidden/);
   assert.match(source, /readlink -f \/proc\/\$\$\/fd\/9/);
-  assert.doesNotMatch(source, /TOKEMS_DEPLOY_LOCK_HELD|TOKEMS_DEPLOY_BOOTSTRAPPED|TOKEMS_RECOVERY_BOOTSTRAPPED/);
+  assert.doesNotMatch(
+    source,
+    /TOKEMS_DEPLOY_LOCK_HELD|TOKEMS_DEPLOY_BOOTSTRAPPED|TOKEMS_RECOVERY_BOOTSTRAPPED/,
+  );
   assert.doesNotMatch(source, /"\$APP_DIR\/\.env"|"\$\{APP_DIR\}\/\.env"/);
   for (const key of [
     'PUBLIC_ORIGIN',
@@ -512,35 +831,33 @@ test('root deployment pins Docker Compose and trusts only protected recovery pat
     'VITE_SIMPLE_AUTH',
     'ENABLE_LOCAL_PAYMENT_SIMULATION',
   ]) {
-    assert.match(source, new RegExp(`env_value ${key}`), `missing fixed production gate for ${key}`);
+    assert.match(
+      source,
+      new RegExp(`env_value ${key}`),
+      `missing fixed production gate for ${key}`,
+    );
   }
 });
 
 test('public release verification proves the deployed web bundle and document', () => {
   assert.match(source, /public-web-version-after\.json/);
-  assert.match(source, /build_fingerprint_from_stdin web <"\$backup_dir\/public-web-version-after\.json"/);
+  assert.match(
+    source,
+    /build_fingerprint_from_stdin web <"\$backup_dir\/public-web-version-after\.json"/,
+  );
   assert.match(source, /public-homepage-document-after\.html/);
   assert.match(source, /Public web bundle does not match/);
 });
 
 test('target-schema protected tables may be absent only from the pre-migration baseline', () => {
   assert.match(source, /:'capture_role' <> 'baseline' and namespace\.oid is null/);
-  assert.match(
-    source,
-    /retention-managed-ids-after\.csv" retention comparison/,
-  );
+  assert.match(source, /retention-managed-ids-after\.csv" retention comparison/);
 });
 
 test('agent terminal states expand only for post-thaw growth evidence', () => {
   assert.match(source, /:'capture_role' = 'growth_comparison'/);
-  assert.match(
-    source,
-    /protected-business-ids-post-thaw\.csv" stable growth_comparison/,
-  );
-  assert.match(
-    source,
-    /protected-business-ids-after\.csv" stable comparison/,
-  );
+  assert.match(source, /protected-business-ids-post-thaw\.csv" stable growth_comparison/);
+  assert.match(source, /protected-business-ids-after\.csv" stable comparison/);
 });
 
 test('a resumed write-freeze release never downgrades its persistent recovery phase', () => {
@@ -548,7 +865,7 @@ test('a resumed write-freeze release never downgrades its persistent recovery ph
     source.indexOf('create_backup_and_rollback_point() {'),
     source.indexOf('\nrefresh_pre_mutation_database_backup() {'),
   );
-  const inherited = backup.indexOf("if [[ \"$recovery_in_progress\" == 'true' ]]");
+  const inherited = backup.indexOf('if [[ "$recovery_in_progress" == \'true\' ]]');
   const writeFreeze = backup.indexOf("release_phase='write-freeze'", inherited);
   const preWrite = backup.indexOf("release_phase='pre-write'", inherited);
   assert.ok(inherited >= 0 && writeFreeze > inherited && preWrite > writeFreeze);
@@ -557,7 +874,10 @@ test('a resumed write-freeze release never downgrades its persistent recovery ph
 });
 
 test('the thaw watchdog remains active until protected exit recovery finishes', () => {
-  const exitHandler = source.slice(source.indexOf('on_exit() {'), source.indexOf('\non_signal() {'));
+  const exitHandler = source.slice(
+    source.indexOf('on_exit() {'),
+    source.indexOf('\non_signal() {'),
+  );
   const rollback = exitHandler.indexOf('restore_application_rollback');
   const stopWatchdog = exitHandler.lastIndexOf('stop_thaw_watchdog');
   assert.ok(rollback >= 0 && stopWatchdog > rollback);
@@ -621,14 +941,22 @@ test('recovery is versioned, offline-capable, and waits for detached database wo
   assert.match(source, /production-deploy\.recovery\.sh/);
   assert.match(source, /recovery_script_sha256/);
   assert.match(source, /bootstrap_recovery_script "\$@"/);
+  const baseRequirements = source.slice(
+    source.indexOf('require_root_and_base_commands() {'),
+    source.indexOf('\nassert_trusted_root_directory() {'),
+  );
+  assert.match(
+    baseRequirements,
+    /if \[\[ "\$mode" != 'recover-interrupted' \]\]; then\n\s+assert_buildx_runtime\n\s+fi/,
+  );
   const recover = source.slice(
     source.indexOf('recover_interrupted_release() {'),
     source.indexOf('\nresolve_pending_recovery() {'),
   );
   assert.doesNotMatch(recover, /git_fetch_origin_main|verify_github_release_gate/);
   const resume = source.slice(
-    source.indexOf("if [[ \"$mode\" == 'deploy' && \"$resume_recovery\" == 'true' ]]") ,
-    source.indexOf("if [[ \"$mode\" == 'resolve-recovery' ]]") ,
+    source.indexOf('if [[ "$mode" == \'deploy\' && "$resume_recovery" == \'true\' ]]'),
+    source.indexOf('if [[ "$mode" == \'resolve-recovery\' ]]'),
   );
   assert.match(resume, /wait_for_db_init_quiescence/);
   assert.match(resume, /pending_recovery_target_image_tag/);
@@ -642,7 +970,20 @@ test('release verifies public recovery projection and the full canonical backend
   assert.match(source, /canonical-homepage\.snapshot\.\$\{evidence_suffix\}\.json/);
   assert.match(source, /export-canonical-homepage\.js --stdout/);
   assert.match(source, /CANONICAL_EXPORT_TRUSTED_COMPOSE_INTERNAL=true/);
-  assert.match(source, /verify_canonical_full_snapshot \\\n\s+"\$resolved_full_snapshot" \\\n\s+recovery-resolve/);
+  assert.equal(
+    source.match(
+      /node --preserve-symlinks-main node_modules\/@conference\/database\/dist\/export-canonical-homepage\.js --stdout/g,
+    )?.length,
+    2,
+  );
+  assert.doesNotMatch(
+    source,
+    /\snode node_modules\/@conference\/database\/dist\/export-canonical-homepage\.js --stdout/,
+  );
+  assert.match(
+    source,
+    /verify_canonical_full_snapshot \\\n\s+"\$resolved_full_snapshot" \\\n\s+recovery-resolve/,
+  );
   assert.match(source, /homepage_projection=shared-by-previous-and-runtime/);
   assert.match(source, /alternate_full_snapshot/);
   assert.match(source, /backend settings differ from the verified target snapshot/);
@@ -653,12 +994,20 @@ test('automatic canonical sync repairs pre-existing production drift', () => {
     source.indexOf('determine_canonical_sync() {'),
     source.indexOf('\nassert_standard_release_scope() {'),
   );
+  const productionProbe = source.slice(
+    source.indexOf('production_canonical_snapshot_matches_target() {'),
+    source.indexOf('\ndetermine_canonical_sync() {'),
+  );
 
   assert.match(source, /production_canonical_snapshot_matches_target/);
   assert.match(source, /canonical-probe\.compose/);
   assert.match(source, /default_transaction_read_only=on/);
   assert.match(source, /read_only_compose_file="\$previous_read_only_compose_file"/);
   assert.match(source, /unset TOKEMS_READ_ONLY_DATABASE_URL/);
+  assert.match(
+    productionProbe,
+    /node --preserve-symlinks-main node_modules\/@conference\/database\/dist\/export-canonical-homepage\.js --stdout/,
+  );
   assert.match(decision, /production_canonical_snapshot_matches_target/);
   assert.match(decision, /canonical_sync_required='true'/);
   assert.match(decision, /Production canonical snapshot drift detected/);
@@ -726,6 +1075,278 @@ test('public homepage verifier treats an omitted binding revision as sanitized m
   }
 });
 
+for (const verifier of ['canonical_snapshot_files_match', 'verify_homepage_file']) {
+  test(`${verifier} accepts environment publication time and rejects registration content drift`, () => {
+    const match = source.match(
+      new RegExp(`${verifier}\\(\\) \\{[\\s\\S]*?<<'PY'\\n([\\s\\S]*?)\\nPY`),
+    );
+    assert.ok(match, `${verifier} Python program was not found`);
+    const directory = mkdtempSync(resolve(tmpdir(), 'tokems-form-publication-'));
+    const actualPath = resolve(directory, 'actual.json');
+    const expectedPath = resolve(directory, 'expected.json');
+    const expected = JSON.parse(
+      readFileSync(
+        resolve(repositoryRoot, 'packages/contracts/src/canonical-homepage.snapshot.json'),
+        'utf8',
+      ),
+    );
+    const actual = structuredClone(expected);
+    actual.publicEvent.registrationForm.publishedAt = '2026-09-04T13:49:07.481Z';
+    expected.publicEvent.registrationForm.publishedAt = '2026-09-04T06:46:07.380Z';
+    const run = () => {
+      writeFileSync(
+        actualPath,
+        JSON.stringify(verifier === 'verify_homepage_file' ? actual.publicEvent : actual),
+      );
+      const args = ['-', actualPath, expectedPath];
+      if (verifier === 'verify_homepage_file') args.push('tokems26');
+      return spawnSync('python3', args, {
+        encoding: 'utf8',
+        input: match[1],
+      });
+    };
+    try {
+      writeFileSync(expectedPath, JSON.stringify(expected));
+      const result = run();
+      assert.equal(result.status, 0, result.stderr);
+      for (const field of ['version', 'termsVersion', 'termsContent', 'fields']) {
+        const original = actual.publicEvent.registrationForm[field];
+        actual.publicEvent.registrationForm[field] = field === 'fields' ? [] : 'unexpected';
+        assert.equal(run().status, 1, `${verifier} must reject ${field} drift`);
+        actual.publicEvent.registrationForm[field] = original;
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test('standard release scope allows only the reviewed API batch switch addition', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'tokems-compose-scope-'));
+  const basePath = resolve(directory, 'base.yml');
+  const targetPath = resolve(directory, 'target.yml');
+  const flag = '      BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}\n';
+  const current = readFileSync(resolve(repositoryRoot, 'docker-compose.yml'), 'utf8');
+  assert.equal(current.split(flag).length, 2);
+  const baseline = current.replace(flag, '');
+  const gate = source.slice(
+    source.indexOf('assert_standard_release_scope() {'),
+    source.indexOf('\ncanonical_repair_scope_is_compatible() {'),
+  );
+  function run(base, target, failures = {}) {
+    writeFileSync(basePath, base);
+    writeFileSync(targetPath, target);
+    return spawnSync(
+      'bash',
+      [
+        '-c',
+        `
+set -Eeuo pipefail
+release_baseline_sha=baseline
+target_sha=target
+LOCK_DIR="$TEMP_DIR"
+log() { printf '%s\\n' "$*"; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+git_as_owner() {
+  case "$1:$2" in
+    diff:--quiet) if [ "\${FAIL_DIFF:-0}" != 0 ]; then return "$FAIL_DIFF"; fi; cmp -s "$BASE" "$TARGET" ;;
+    show:baseline:docker-compose.yml) cat "$BASE"; return "\${FAIL_BASE:-0}" ;;
+    show:target:docker-compose.yml) cat "$TARGET"; return "\${FAIL_TARGET:-0}" ;;
+    *) exit 2 ;;
+  esac
+}
+${gate}
+assert_standard_release_scope
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          BASE: basePath,
+          TARGET: targetPath,
+          TEMP_DIR: directory,
+          ...failures,
+        },
+      },
+    );
+  }
+  try {
+    for (const [name, base, target, allowed] of [
+      ['unchanged legacy compose', baseline, baseline, true],
+      ['unchanged current compose', current, current, true],
+      ['reviewed API switch', baseline, current, true],
+      [
+        'switch default altered',
+        baseline,
+        current.replace(
+          'BATCH_PURCHASE_CREATION_ENABLED:-true',
+          'BATCH_PURCHASE_CREATION_ENABLED:-false',
+        ),
+        false,
+      ],
+      [
+        'switch under worker',
+        baseline,
+        baseline.replace('  worker:\n', `  worker:\n    environment:\n${flag}`),
+        false,
+      ],
+      [
+        'switch plus API port change',
+        baseline,
+        current.replace('API_PORT: 4100', 'API_PORT: 4200'),
+        false,
+      ],
+      [
+        'switch plus volume change',
+        baseline,
+        current.replace('tokems-postgres', 'tokems-postgres-other'),
+        false,
+      ],
+      [
+        'switch plus another variable',
+        baseline,
+        current.replace(flag, `${flag}      EXTRA_SETTING: true\n`),
+        false,
+      ],
+      [
+        'switch plus new service',
+        baseline,
+        `${current}\n  unexpected-service:\n    image: example\n`,
+        false,
+      ],
+      ['switch removal', current, baseline, false],
+      [
+        'unknown baseline layout',
+        baseline.replace('  api:\n', '  different-api:\n'),
+        current,
+        false,
+      ],
+      ['missing baseline', '', current, false],
+      ['missing target', baseline, '', false],
+    ]) {
+      const result = run(base, target);
+      assert.equal(result.status, allowed ? 0 : 1, `${name}: ${result.stderr}`);
+    }
+    for (const failure of [{ FAIL_DIFF: '128' }, { FAIL_BASE: '128' }, { FAIL_TARGET: '128' }]) {
+      const result = run(baseline, current, failure);
+      assert.equal(result.status, 1, `Git failure with valid output: ${JSON.stringify(failure)}`);
+    }
+    const incomplete = run(
+      baseline.slice(0, baseline.indexOf('\n  worker:\n')),
+      current.slice(0, current.indexOf('\n  worker:\n')),
+      { FAIL_BASE: '128', FAIL_TARGET: '128' },
+    );
+    assert.equal(incomplete.status, 1, 'Partial Git output cannot prove unchanged infrastructure');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('standard release scope allows the reviewed partner and MinIO Compose migration', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'tokems-reviewed-compose-scope-'));
+  const basePath = resolve(directory, 'base.yml');
+  const targetPath = resolve(directory, 'target.yml');
+  const current = readFileSync(resolve(repositoryRoot, 'docker-compose.yml'), 'utf8');
+  const batchFlag =
+    '      BATCH_PURCHASE_CREATION_ENABLED: ${BATCH_PURCHASE_CREATION_ENABLED:-true}\n';
+  const partnerStart = current.indexOf('  PARTNER_ATTRIBUTION_SECRET:');
+  const partnerEnd = current.indexOf('  TRUST_PROXY:', partnerStart);
+  assert.ok(partnerStart >= 0 && partnerEnd > partnerStart);
+  const partnerBlockWithNewline = current.slice(partnerStart, partnerEnd);
+  const oldMinio =
+    'minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e';
+  const oldMc =
+    'minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727';
+  const baseline = current
+    .replace(partnerBlockWithNewline, '')
+    .replace(`quay.io/${oldMinio}`, oldMinio)
+    .replace(`quay.io/${oldMc}`, oldMc);
+  // Pin the full production fd2086f Compose bytes without depending on CI Git history.
+  assert.equal(
+    createHash('sha256').update(baseline).digest('hex'),
+    '9e62eda0625978a9d8c0e1a5283ece8bc4c876bdabfb4757f2e4689e2274fce9',
+  );
+  const gate = source.slice(
+    source.indexOf('assert_standard_release_scope() {'),
+    source.indexOf('\ncanonical_repair_scope_is_compatible() {'),
+  );
+  function run(base, target) {
+    writeFileSync(basePath, base);
+    writeFileSync(targetPath, target);
+    return spawnSync(
+      'bash',
+      [
+        '-c',
+        `
+set -Eeuo pipefail
+release_baseline_sha=baseline
+target_sha=target
+LOCK_DIR="$TEMP_DIR"
+log() { printf '%s\\n' "$*"; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+git_as_owner() {
+  case "$1:$2" in
+    diff:--quiet) cmp -s "$BASE" "$TARGET" ;;
+    show:baseline:docker-compose.yml) cat "$BASE" ;;
+    show:target:docker-compose.yml) cat "$TARGET" ;;
+    *) exit 2 ;;
+  esac
+}
+${gate}
+assert_standard_release_scope
+`,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, BASE: basePath, TARGET: targetPath, TEMP_DIR: directory },
+      },
+    );
+  }
+  try {
+    assert.equal(run(baseline, current).status, 0, 'production already contains the batch switch');
+    assert.equal(
+      run(baseline.replace(batchFlag, ''), current).status,
+      0,
+      'older release adds both',
+    );
+    for (const target of [
+      current.replace(batchFlag, ''),
+      current.replace(
+        'BATCH_PURCHASE_CREATION_ENABLED:-true',
+        'BATCH_PURCHASE_CREATION_ENABLED:-false',
+      ),
+      current.replace(batchFlag, `${batchFlag}${batchFlag}`),
+      current.replace(partnerBlockWithNewline, ''),
+      current.replace(`quay.io/${oldMinio}`, oldMinio),
+      current.replace(`quay.io/${oldMc}`, oldMc),
+      current.replace('sha256:14cea', 'sha256:24cea'),
+      current.replace('API_PORT: 4100', 'API_PORT: 4200'),
+      current.replace('tokems-postgres', 'tokems-postgres-other'),
+      `${current}\n  extra-service:\n    image: example\n`,
+    ]) {
+      assert.notEqual(target, current, 'negative case must change the target');
+      assert.equal(run(baseline, target).status, 1, 'unreviewed changes remain blocked');
+    }
+    assert.equal(
+      run(baseline, current.replace('quay.io/minio/mc:', 'quay.io/minio/changed:')).status,
+      1,
+    );
+    assert.equal(
+      run(
+        baseline,
+        current.replace(
+          'PAYOUT_PUBLIC_URL: ${PAYOUT_PUBLIC_URL:-${PUBLIC_ORIGIN}}',
+          'PAYOUT_PUBLIC_URL: https://example.test',
+        ),
+      ).status,
+      1,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('production network calls are bounded and infrastructure reconciliation is isolated', () => {
   assert.doesNotMatch(source, /curl\s+-f/);
   assert.match(source, /readonly -a CURL_ARGS=/);
@@ -772,5 +1393,164 @@ test('production deploy script excludes destructive recovery shortcuts', () => {
     /rm -rf/,
   ]) {
     assert.doesNotMatch(source, forbidden);
+  }
+});
+
+test('payment activity gate refuses unsettled payments and unreadable evidence', () => {
+  const start = source.indexOf('payment_activity_is_clear() {');
+  const end = source.indexOf('\nassert_payment_quiet_window() {', start);
+  assert.ok(start >= 0 && end > start, 'payment activity gate must exist');
+  const gate = source.slice(start, end);
+  const run = (result, status = 0) =>
+    spawnSync(
+      'bash',
+      [
+        '-c',
+        `
+    read_payment_activity() { printf '%s\\n' "$ACTIVITY"; return "$QUERY_STATUS"; }
+    log() { printf '%s\\n' "$*"; }
+    ${gate}
+    payment_activity_is_clear
+  `,
+      ],
+      { encoding: 'utf8', env: { ...process.env, ACTIVITY: result, QUERY_STATUS: String(status) } },
+    );
+  assert.equal(run('0,0,0').status, 0);
+  for (const activity of ['1,0,0', '0,1,0', '0,0,1']) {
+    const rejected = run(activity);
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stdout, /Payment activity/);
+  }
+  for (const activity of ['', 'garbled', '0,0', '0,0,0\n1,0,0']) {
+    assert.equal(run(activity).status, 2);
+  }
+  assert.equal(run('0,0,0', 1).status, 2);
+});
+
+test('every payment state holding inventory blocks the release and queries remain read-only', () => {
+  const query = source.slice(
+    source.indexOf('read_payment_activity() {'),
+    source.indexOf('\npayment_activity_is_clear() {'),
+  );
+  assert.match(query, /begin read only;/);
+  const schema = readFileSync(resolve(repositoryRoot, 'packages/database/src/schema.ts'), 'utf8');
+  const states = schema
+    .match(/ACTIVE_WECHAT_PAYMENT_STATUSES = \[([\s\S]*?)\] as const/)[1]
+    .match(/'[a-z_]+'/g);
+  for (const state of states) assert.ok(query.includes(state), `missing payment state ${state}`);
+  assert.match(query, /payment_notification_inbox/);
+  assert.match(query, /status <> 'processed'/);
+  assert.match(query, /not exists[\s\S]*tickets/);
+});
+
+test('release checks payments before stopping and resumes original services on a post-stop race', () => {
+  const freeze = source.slice(
+    source.indexOf('enter_release_write_freeze() {'),
+    source.indexOf('\nthaw_release_write_freeze() {'),
+  );
+  assert.ok(freeze.indexOf('assert_payment_quiet_window') >= 0);
+  assert.ok(
+    freeze.indexOf('assert_payment_quiet_window') < freeze.indexOf('stop --timeout 30 api worker'),
+  );
+  assert.ok(
+    freeze.indexOf('payment_activity_is_clear') > freeze.indexOf('assert_write_services_stopped'),
+  );
+  assert.match(freeze, /resume_original_services_before_database/);
+  const recovery = source.slice(
+    source.indexOf('resume_original_services_before_database() {'),
+    source.indexOf('\nenter_release_write_freeze() {'),
+  );
+  assert.match(recovery, /database_update_started.*false/);
+  assert.match(recovery, /target_writes_enabled.*false/);
+  assert.match(recovery, /start --wait --wait-timeout 300 api worker/);
+  assert.doesNotMatch(
+    recovery,
+    /--force-recreate|run_database_updates|run_canonical_database_sync/,
+  );
+  assert.ok(
+    recovery.indexOf('assert_operational_write_state normal') <
+      recovery.indexOf('clear_pending_recovery_marker'),
+  );
+});
+
+test('payment race cancellation executes original-container restart and preserves protection on failure', () => {
+  const start = source.indexOf('resume_original_services_before_database() {');
+  const end = source.indexOf('\nenter_release_write_freeze() {', start);
+  const resume = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  const directory = mkdtempSync(resolve(tmpdir(), 'tokems-payment-race-'));
+  try {
+    const run = (databaseStarted, verificationStatus) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          `
+      set -Eeuo pipefail
+      database_update_started="$DATABASE_STARTED"
+      canonical_update_started=false
+      target_writes_enabled=false
+      recovery_in_progress=false
+      release_baseline_migration_hash=baseline
+      release_baseline_sha=original
+      images_changed=true
+      rollback_tag=rollback-test
+      ROLLBACK_IMAGES=(tokems-api tokems-worker)
+      backup_dir="$EVIDENCE_DIR"
+      SERVICE_TRANSITION_TIMEOUT_SECONDS=360
+      CURL_ARGS=(--silent)
+      PUBLIC_ORIGIN=https://example.test
+      die() { printf '%s\\n' "$*"; exit 1; }
+      assert_write_services_stopped() { :; }
+      read_database_migration_hash() { printf baseline; }
+      docker() { printf 'docker %s\\n' "$*"; }
+      assert_thaw_watchdog_active() { printf 'watchdog active\\n'; }
+      compose_bounded() { printf 'compose %s\\n' "$*"; }
+      assert_runtime_image_tags() { :; }
+      assert_current_runtime_identity() { runtime_sha=original; }
+      assert_api_uses_compose_database() { :; }
+      assert_operational_write_state() { return "$VERIFICATION_STATUS"; }
+      wait_for_worker_ready() { printf 'worker ready\\n'; }
+      curl() { printf 'healthy\\n'; }
+      assert_health_json() { cat >/dev/null; }
+      set_write_service_restart_policy() { printf 'restart %s\\n' "$*"; }
+      clear_pending_recovery_marker() { printf 'marker cleared\\n'; }
+      stop_thaw_watchdog() { printf 'watchdog stopped\\n'; }
+      ${resume}
+      resume_original_services_before_database
+      printf 'final backup_ready=%s freeze=%s\\n' "$backup_ready" "$release_write_freeze"
+    `,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            DATABASE_STARTED: databaseStarted,
+            VERIFICATION_STATUS: String(verificationStatus),
+            EVIDENCE_DIR: directory,
+          },
+        },
+      );
+    const ok = run('false', 0);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /docker tag tokems-api:rollback-test tokems-api:local/);
+    assert.match(
+      readFileSync(resolve(directory, 'payment-race-resume.log'), 'utf8'),
+      /start --wait --wait-timeout 300 api worker/,
+    );
+    assert.ok(ok.stdout.indexOf('worker ready') < ok.stdout.indexOf('marker cleared'));
+    assert.match(ok.stdout, /final backup_ready=false freeze=false/);
+    assert.match(
+      readFileSync(resolve(directory, 'deployment-result.txt'), 'utf8'),
+      /cancelled-payment-activity/,
+    );
+    const unsafe = run('true', 0);
+    assert.equal(unsafe.status, 1);
+    assert.doesNotMatch(unsafe.stdout, /docker tag|marker cleared/);
+    const failed = run('false', 2);
+    assert.equal(failed.status, 2);
+    assert.doesNotMatch(failed.stdout, /marker cleared|watchdog stopped/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

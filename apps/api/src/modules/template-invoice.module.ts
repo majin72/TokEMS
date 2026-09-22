@@ -1,3 +1,4 @@
+import { InvoiceSmsSendSchema, InvoiceAccessRevokeSchema } from '@conference/contracts';
 import {
   Body,
   Controller,
@@ -98,6 +99,47 @@ function requireAccessToken(authorization: string | undefined) {
     );
   }
   return value;
+}
+
+function invoiceDocumentActionIdempotencyScope(
+  action: string,
+  organizationId: string,
+  eventId: EventId,
+  invoiceId: string,
+  documentId: string,
+) {
+  const identity = [organizationId, eventId, invoiceId, documentId].join(':');
+  return `invoice:document:${action}:${createHash('sha256').update(identity).digest('hex')}`;
+}
+
+export function invoiceDocumentReplaceIdempotencyScope(
+  organizationId: string,
+  eventId: EventId,
+  invoiceId: string,
+  documentId: string,
+) {
+  return invoiceDocumentActionIdempotencyScope(
+    'replace-file',
+    organizationId,
+    eventId,
+    invoiceId,
+    documentId,
+  );
+}
+
+export function invoiceDocumentVoidIdempotencyScope(
+  organizationId: string,
+  eventId: EventId,
+  invoiceId: string,
+  documentId: string,
+) {
+  return invoiceDocumentActionIdempotencyScope(
+    'void',
+    organizationId,
+    eventId,
+    invoiceId,
+    documentId,
+  );
 }
 
 const ArchiveSchema = z.object({ revision: z.number().int().nonnegative() });
@@ -1272,7 +1314,12 @@ class InvoiceController {
   ) {
     const input = parse(InvoiceActionSchema, body);
     return this.idempotency.execute(
-      `invoice:document:void:${request.user.organizationId}:${eventId}:${invoiceId}:${documentId}`,
+      invoiceDocumentVoidIdempotencyScope(
+        request.user.organizationId,
+        eventId,
+        invoiceId,
+        documentId,
+      ),
       requireIdempotencyKey(key),
       input,
       () =>
@@ -1299,7 +1346,12 @@ class InvoiceController {
   ) {
     const input = parse(ReplaceInvoiceDocumentFileSchema, body);
     return this.idempotency.execute(
-      `invoice:document:replace-file:${request.user.organizationId}:${eventId}:${invoiceId}:${documentId}`,
+      invoiceDocumentReplaceIdempotencyScope(
+        request.user.organizationId,
+        eventId,
+        invoiceId,
+        documentId,
+      ),
       requireIdempotencyKey(key),
       input,
       () =>
@@ -1316,18 +1368,22 @@ class InvoiceController {
 
   @Post(':invoiceId/send')
   @RequireAllGrants('event.read', 'org.invoice.manage')
-  send(
-    @Param('eventId', EventIdPipe) eventId: EventId,
-    @Param('invoiceId') invoiceId: string,
-    @Headers('idempotency-key') key: string | undefined,
-    @Req() request: AuthenticatedRequest,
-  ) {
-    return this.idempotency.execute(
-      `invoice:send:${request.user.organizationId}:${eventId}:${invoiceId}`,
-      requireIdempotencyKey(key),
-      { invoiceId },
-      () => this.invoices.send(request.user.organizationId, invoiceId, request.user.sub, eventId),
-    );
+  send(@Param('eventId', EventIdPipe) eventId:EventId,@Param('invoiceId') invoiceId:string,
+    @Headers('idempotency-key') key:string|undefined,@Req() request:AuthenticatedRequest,@Body() body:unknown) {
+    const input=parse(InvoiceSmsSendSchema,body??{});
+    const requestKey=requireIdempotencyKey(key);
+    return this.idempotency.execute(`invoice:send:${request.user.organizationId}:${eventId}:${invoiceId}`,requestKey,input,
+      () => this.invoices.send(request.user.organizationId,invoiceId,request.user.sub,eventId,{...input,requestKey}));
+  }
+
+  @Post(':invoiceId/revoke-access')
+  @RequireAllGrants('event.read','org.invoice.manage')
+  revokeAccess(@Param('eventId',EventIdPipe) eventId:EventId,@Param('invoiceId') invoiceId:string,
+    @Headers('idempotency-key') key:string|undefined,@Req() request:AuthenticatedRequest,@Body() body:unknown) {
+    const input=parse(InvoiceAccessRevokeSchema,body);
+    const requestKey=requireIdempotencyKey(key);
+    return this.idempotency.execute(`invoice:revoke:${request.user.organizationId}:${eventId}:${invoiceId}`,requestKey,input,
+      () => this.invoices.revokeAccess(request.user.organizationId,invoiceId,request.user.sub,eventId,input,requestKey));
   }
 
   @Post(':invoiceId/details-reminder')

@@ -4,6 +4,7 @@ import type {
   EventSettings,
   OrganizationSettings,
   PublicEvent,
+  PartnerProgramDraft,
   RegistrationField,
 } from './index.js';
 
@@ -100,6 +101,10 @@ export type CanonicalHomepageSnapshot = {
     changeSummary: string;
     changeScope: string;
     activationKind: string;
+  };
+  partnerDistribution: {
+    homepage: { enabled: boolean; limit: number };
+    programDraft: PartnerProgramDraft;
   };
   backend: {
     event: CanonicalJsonRecord & {

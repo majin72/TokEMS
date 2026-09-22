@@ -1,16 +1,33 @@
 # TokEMS 项目协作规则
 
+## 本地开发与预览
+
+- 主工作目录的 `main` 是本地集成分支。日常页面调整和连续小迭代默认在这里完成，无需每轮新建分支或工作树；本地提交与远端推送分别按用户授权执行。
+- 已在本地 `main` 完成的提交，远端推送使用 `HEAD:refs/heads/codex/<change-name>`，再通过 PR 合并到远端 `main`。用户授权推送后仍须遵守 PR 流程；禁止直接推送远端 `main` 或使用管理员权限跳过必需检查。
+- 用户已授权在本仓库默认以管理员身份合并 PR，无需等待审核者批准或再次确认。合并前仍须确认目标 PR、提交 SHA 和全部必需 CI 检查通过；管理员合并仅跳过审核者批准要求。
+- 需要并行隔离、较大实验或用户指定时才使用功能分支与独立工作树。完成并验证后及时合并到本地 `main`，再更新共享预览。
+- `http://127.0.0.1:8088/`、Compose 项目 `tokems` 和 `tokems-*:local` 镜像只用于主工作目录的共享预览。其他工作树不得构建、启动或替换这套共享服务。
+- 独立预览必须同时隔离 Compose 项目名、镜像标签、端口和数据卷；仅创建 Git 分支或工作树不能隔离运行环境。临时构建与测试优先使用不接管共享服务的验证方式。
+- 合并前检查所有工作树与未提交修改，只整合已完成的内容，保留正在进行的编辑。历史备份和仍在使用的工作树未经确认不得删除。
+- 更新共享预览前核对构建提交、当前运行版本与本地环境配置，保持已有数据库和素材。页面更新后验证实际运行版本和页面效果。
+
 ## 生产发布
 
 - 生产发布前必须阅读 `docs/production-deployment-runbook.md`。
 - 唯一上游仓库为 `https://github.com/yaojingang/TokEMS.git`，生产代码只允许来自已合并且 CI 通过的 `origin/main`。
+- 生产目标 SHA 必须等于一个以 `main` 为目标分支的已合并 PR 的 `merge_commit_sha`，并具有该 SHA 的成功主分支 CI 和完整镜像发布。确认提交已在远端 `main` 后，还须核对这三项证据才能给出可发布结论。
 - 生产服务器源码目录为 `/www/wwwroot/TokEMS`。宝塔站点目录 `/www/dk_project/wwwroot/hui.ailingdaoli.com` 只承载站点和反向代理配置，禁止在该目录拉取代码、构建镜像或执行数据库迁移。
 - 生产环境文件固定为 `/etc/tokems/production.env`，目录权限为 `root:root 0700`，文件权限为 `root:root 0600`。生产 Compose 和发布脚本禁止读取 Git 工作区中的实时 `.env`。
 - 服务器分支 `production` 跟踪 `origin/main`。发布前确认工作区干净，并确认服务器 `HEAD` 与 `origin/main` 完全一致。
 - 每次生产变更都要先创建数据库备份、记录当前提交和容器状态，并为当前应用镜像添加 `rollback-<时间戳>` 标签。
 - Docker 构建和运行必须使用同一组 `BUILD_SHA`、`BUILD_TIME`、`BUILD_MIGRATION`、`BUILD_MIGRATION_HASH`。任何值为 `unknown` 时禁止切换生产流量。
+- 标准生产发布只使用 `.github/workflows/publish-images.yml` 写入私有包 `ghcr.io/yaojingang/tokems-production-private` 的预构建镜像。历史包 `ghcr.io/yaojingang/tokems` 与 `ghcr.io/yaojingang/tokems-production` 禁止进入生产发布。`release-<SHA>` descriptor 必须最后发布，并固定目标平台、四项 `BUILD_*` 和六个服务 digest；生产机验证 GitHub provenance 后才能更新 `tokems-*:local`。
+- Release descriptor schema 2 同时携带目标提交的完整 Git Bundle 和 descriptor verifier，并固定两者 SHA-256。生产机只允许在 descriptor provenance、Bundle 目标 ref、目标 SHA 和 Fast-forward 历史全部通过后更新 `refs/remotes/origin/main`；标准发布不得依赖生产机直连 `github.com` Git Smart HTTP。
+- `/etc/tokems/ghcr-read-token` 仅保存 `read:packages` PAT classic，权限固定为 `root:root 0600`。临时 Docker 登录目录只允许位于 `/run/lock/tokems-production-deploy`，发布日志和证据不得包含 Token。
+- `--build-on-host` 只作为人工应急入口，继续执行 10 GiB 构建内存门禁。自动化受限入口不得传入该参数。
+- 普通发布必须在预检、停服前和停服后核验支付结清；存在进行中交易、待确认通知或已付款缺票时不得继续迁移。停服后发现竞态，只能在数据库尚未变更且原版本身份核验通过时恢复原容器并取消发布；不得借用 `--resume-recovery` 绕过普通发布门禁。
 - 常规发布固定使用 `SEED_DEMO_DATA=false`。只有已确认需要同步仓库规范模板时，才允许按 Runbook 的“规范模板同步”流程临时运行 `SEED_DEMO_DATA=true`。
-- 自动检测到规范漂移或显式执行 `deploy --sync-canonical` 时，目标规范快照与当前运行提交完全一致，且目标差异仅包含部署脚本、部署测试、协作文档或运维文档，脚本允许复用当前已验证镜像完成规范同步。该流程仍要执行数据库备份、写冻结、生产数据保护和完整验收；其余目标继续执行标准镜像构建与 10 GiB 内存门禁。
+- 自动检测到规范漂移或显式执行 `deploy --sync-canonical` 时，目标规范快照与当前运行提交完全一致，且目标差异仅包含部署脚本、部署测试、协作文档或运维文档，脚本允许复用当前已验证镜像完成规范同步。该流程仍要执行数据库备份、写冻结、生产数据保护和完整验收；其余目标使用通过证明的预构建镜像。
 - 自动发布预检必须以只读数据库连接导出生产完整规范快照并与目标提交比较；Git 快照变化或生产状态漂移时都要启用规范同步，`--skip-canonical` 不得跳过漂移修复。
 - 规范模板的组织 slug 为 `geo-conference`，大会 slug 为 `tokems26`。线上报名、订单、票、发票、库存销量和用户数据必须保留。
 - 本地 `http://127.0.0.1:8088/` 当前实际展示的 `geo-conference` / `tokems26` 是唯一规范大会模板。首页文案或关联后台设置发生任何变化后，推送 GitHub 前必须运行 `pnpm canonical:export`，并提交完整规范快照 `packages/contracts/src/canonical-homepage.snapshot.json` 及前台派生快照 `packages/contracts/src/canonical-homepage.public.json`。

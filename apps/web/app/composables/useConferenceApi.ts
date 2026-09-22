@@ -3,6 +3,10 @@ import {
   DEMO_EVENT,
   type CreateCooperationRequest,
   type CreateRegistration,
+  type CreateRegistrationBatch,
+  type RegistrationBatchCheckout,
+  type RegistrationBatchQuote,
+  type RegistrationBatchQuoteInput,
   type CustomerOrderAccess,
   type Order,
   type PublicSiteConfiguration,
@@ -12,6 +16,8 @@ import {
   type PublicEventMemberDetail,
   type PublicEventMemberList,
   type PublicEventSpeakerDetail,
+  type PublicPartnerDetail,
+  type PublicPartnerSummary,
   type PublicCooperationRequestResult,
   type RegistrationCheckout,
   type SubmitInvoiceDetails,
@@ -29,6 +35,7 @@ import {
 import { createLocalTicketIdentity } from '../utils/ticket-code';
 import { MEMBER_DIRECTORY_REQUEST_TIMEOUT_MS } from '../utils/member-directory-refresh';
 import { registrationIdempotencyKey } from '../utils/purchase-journey';
+import { browserSessionStorage, readBrowserSessionValue } from '../utils/browser-storage';
 
 type WebRegistrationCheckout = RegistrationCheckout & { ticket?: Ticket };
 export interface WebInvoiceAccess {
@@ -49,6 +56,7 @@ export function useConferenceApi() {
   const config = useRuntimeConfig();
   const baseURL = import.meta.server ? config.apiInternalBase : config.public.apiBase;
   const organizationSlug = config.public.organizationSlug;
+  const customerSession = useState<import('@conference/contracts').CustomerSession | null>('customer-session', () => null);
   const eventState = useState<PublicEvent>('conference.public-event', () =>
     structuredClone(DEMO_EVENT),
   );
@@ -56,6 +64,16 @@ export function useConferenceApi() {
   function publicApiResourceUrl(path: string | undefined) {
     if (!path || /^https?:\/\//i.test(path)) return path;
     return `${String(config.public.apiBase).replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+  }
+
+  function resolveEventResources(event: PublicEvent): PublicEvent {
+    return {
+      ...event,
+      speakers: event.speakers.map((speaker) => ({
+        ...speaker,
+        ...(speaker.avatarUrl ? { avatarUrl: publicApiResourceUrl(speaker.avatarUrl) } : {}),
+      })),
+    };
   }
 
   function isNetworkFailure(error: unknown) {
@@ -70,11 +88,12 @@ export function useConferenceApi() {
         timeout: 4_000,
         headers: { 'X-Organization-Slug': organizationSlug },
       });
-      saveEvent(event);
-      return event;
+      const resolved = resolveEventResources(event);
+      saveEvent(resolved);
+      return resolved;
     } catch (error) {
       if (import.meta.dev && isNetworkFailure(error)) {
-        const event = structuredClone(DEMO_EVENT);
+        const event = resolveEventResources(structuredClone(DEMO_EVENT));
         saveEvent(event);
         return event;
       }
@@ -89,8 +108,9 @@ export function useConferenceApi() {
         timeout: 4_000,
         headers: { 'X-Organization-Slug': organizationSlug },
       });
-      saveEvent(event);
-      return event;
+      const resolved = resolveEventResources(event);
+      saveEvent(resolved);
+      return resolved;
     } catch (error) {
       if (import.meta.dev && isNetworkFailure(error)) return getEvent(DEMO_EVENT.slug);
       throw error;
@@ -150,6 +170,54 @@ export function useConferenceApi() {
       ...result,
       ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
     };
+  }
+
+  async function getEventPartners(
+    slug: string,
+    limit = 24,
+    surface: 'directory' | 'homepage' = 'directory',
+  ) {
+    const result = await $fetch<{ items: PublicPartnerSummary[]; nextCursor: string | null }>(
+      `/events/${encodeURIComponent(slug)}/partners`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+        query: { limit, surface },
+      },
+    );
+    return {
+      ...result,
+      items: result.items.map((item) => ({
+        ...item,
+        ...(item.avatarUrl ? { avatarUrl: publicApiResourceUrl(item.avatarUrl) } : {}),
+      })),
+    };
+  }
+
+  async function getEventPartner(slug: string, publicSlug: string) {
+    const result = await $fetch<PublicPartnerDetail>(
+      `/events/${encodeURIComponent(slug)}/partners/${encodeURIComponent(publicSlug)}`,
+      {
+        baseURL,
+        headers: { 'X-Organization-Slug': organizationSlug },
+      },
+    );
+    return {
+      ...result,
+      ...(result.avatarUrl ? { avatarUrl: publicApiResourceUrl(result.avatarUrl) } : {}),
+      gallery: result.gallery.map((item) => ({
+        ...item,
+        url: publicApiResourceUrl(item.url) ?? item.url,
+      })),
+    };
+  }
+
+  function resolvePartnerReferral(code: string) {
+    return $fetch<{ destinationPath: string }>(`/r/${encodeURIComponent(code)}`, {
+      baseURL,
+      credentials: 'include',
+      headers: { 'X-Organization-Slug': organizationSlug },
+    });
   }
 
   async function getEventSpeaker(slug: string, speakerId: string) {
@@ -220,6 +288,7 @@ export function useConferenceApi() {
         headers: {
           'Idempotency-Key': key,
           'X-Organization-Slug': organizationSlug,
+          ...(customerSession.value?.csrfToken ? { 'X-CSRF-Token': customerSession.value.csrfToken } : {}),
         },
         body: input,
       });
@@ -227,6 +296,22 @@ export function useConferenceApi() {
       if (import.meta.dev && isNetworkFailure(error)) return createLocalCheckout(input);
       throw error;
     }
+  }
+
+  function quoteRegistrationBatch(input: RegistrationBatchQuoteInput) {
+    return $fetch<RegistrationBatchQuote>('/registration-batches/quote', {
+      method: 'POST', baseURL, credentials: 'include', retry: 0, timeout: 6_000,
+      headers: { 'X-Organization-Slug': organizationSlug, ...(customerSession.value?.csrfToken ? { 'X-CSRF-Token': customerSession.value.csrfToken } : {}) },
+      body: input,
+    });
+  }
+
+  function createRegistrationBatch(input: CreateRegistrationBatch, key = `batch-registration-${input.purchaseIntentId}`) {
+    return $fetch<RegistrationBatchCheckout>('/registration-batches', {
+      method: 'POST', baseURL, credentials: 'include', retry: 0, timeout: 15_000,
+      headers: { 'X-Organization-Slug': organizationSlug, 'Idempotency-Key': key, ...(customerSession.value?.csrfToken ? { 'X-CSRF-Token': customerSession.value.csrfToken } : {}) },
+      body: input,
+    });
   }
 
   async function createCooperationRequest(
@@ -288,7 +373,7 @@ export function useConferenceApi() {
 
   async function confirmPayment(
     order: Order,
-    registrationId: string,
+    registrationId: string | null,
     accessToken: string,
   ): Promise<PaymentResult> {
     try {
@@ -301,7 +386,7 @@ export function useConferenceApi() {
         },
       });
     } catch (error) {
-      if (!import.meta.dev || !isNetworkFailure(error)) throw error;
+      if (!import.meta.dev || !isNetworkFailure(error) || !registrationId || order.modelVersion === 2) throw error;
       const ticketIdentity = createLocalTicketIdentity(DEMO_EVENT.id);
       const checkout = readCheckout();
       const ticket: Ticket = {
@@ -428,11 +513,15 @@ export function useConferenceApi() {
     orderId: string,
     accessToken: string,
     channel: WeChatPaymentChannel,
+    oauthSessionToken?: string,
   ): Promise<WeChatPaymentSwitchResult> {
     return $fetch<WeChatPaymentSwitchResult>(`/payments/wechat/${orderId}/switch`, {
       method: 'POST',
       baseURL,
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(oauthSessionToken ? { 'X-WeChat-OAuth-Session': oauthSessionToken } : {}),
+      },
       body: { channel },
     });
   }
@@ -629,53 +718,52 @@ export function useConferenceApi() {
 
   function readCheckout(): WebRegistrationCheckout | undefined {
     if (!import.meta.client) return undefined;
-    const value = sessionStorage.getItem('conference.checkout');
-    return value ? (JSON.parse(value) as WebRegistrationCheckout) : undefined;
+    return readBrowserSessionValue<WebRegistrationCheckout>('conference.checkout');
   }
 
   function saveCheckout(checkout: WebRegistrationCheckout) {
-    if (import.meta.client) sessionStorage.setItem('conference.checkout', JSON.stringify(checkout));
+    if (import.meta.client)
+      browserSessionStorage.setItem('conference.checkout', JSON.stringify(checkout));
   }
 
   function readEvent(): PublicEvent | undefined {
     if (!import.meta.client) return eventState.value;
-    const value = sessionStorage.getItem('conference.event');
-    return value ? (JSON.parse(value) as PublicEvent) : eventState.value;
+    return readBrowserSessionValue<PublicEvent>('conference.event') ?? eventState.value;
   }
 
   function saveEvent(event: PublicEvent) {
     eventState.value = event;
-    if (import.meta.client) sessionStorage.setItem('conference.event', JSON.stringify(event));
+    if (import.meta.client)
+      browserSessionStorage.setItem('conference.event', JSON.stringify(event));
   }
 
   function readTicket(identifier: string): Ticket | undefined {
     if (!import.meta.client) return undefined;
-    const value = sessionStorage.getItem('conference.ticket');
-    if (!value) return undefined;
-    const ticket = JSON.parse(value) as Ticket;
+    const ticket = readBrowserSessionValue<Ticket>('conference.ticket');
+    if (!ticket) return undefined;
     return ticket.code === identifier || ticket.registrationId === identifier ? ticket : undefined;
   }
 
   function saveTicket(ticket: Ticket) {
-    if (import.meta.client) sessionStorage.setItem('conference.ticket', JSON.stringify(ticket));
+    if (import.meta.client)
+      browserSessionStorage.setItem('conference.ticket', JSON.stringify(ticket));
   }
 
   function readInvoiceAccess(invoiceId?: string): WebInvoiceAccess | undefined {
     if (!import.meta.client) return undefined;
-    const value = sessionStorage.getItem('conference.invoiceAccess');
-    if (!value) return undefined;
-    const access = JSON.parse(value) as WebInvoiceAccess;
+    const access = readBrowserSessionValue<WebInvoiceAccess>('conference.invoiceAccess');
+    if (!access) return undefined;
     return !invoiceId || access.id === invoiceId ? access : undefined;
   }
 
   function saveInvoiceAccess(access: WebInvoiceAccess) {
     if (import.meta.client) {
-      sessionStorage.setItem('conference.invoiceAccess', JSON.stringify(access));
+      browserSessionStorage.setItem('conference.invoiceAccess', JSON.stringify(access));
     }
   }
 
   function clearInvoiceAccess() {
-    if (import.meta.client) sessionStorage.removeItem('conference.invoiceAccess');
+    if (import.meta.client) browserSessionStorage.removeItem('conference.invoiceAccess');
   }
 
   function invoiceDownloadUrl(path: string) {
@@ -690,10 +778,15 @@ export function useConferenceApi() {
     getEventMembers,
     getEventAttendeeNeeds,
     getEventMember,
+    getEventPartners,
+    getEventPartner,
+    resolvePartnerReferral,
     getEventSpeaker,
     getSpeakerByCode,
     getSiteConfiguration,
     createRegistration,
+    quoteRegistrationBatch,
+    createRegistrationBatch,
     createCooperationRequest,
     joinWaitlist,
     confirmPayment,

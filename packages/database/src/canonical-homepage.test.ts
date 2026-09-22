@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalSpeakerRoutes,
   validateCanonicalExportTopology,
   validateCanonicalHomepageSnapshot,
 } from './export-canonical-homepage.js';
@@ -17,6 +18,67 @@ async function snapshot() {
 }
 
 describe('canonical homepage snapshot', () => {
+  it('selects current speaker routes without mutating the supplied mappings', async () => {
+    const value = await snapshot();
+    const backend = value.backend as {
+      speakers: Array<Record<string, unknown>>;
+      speakerRoutes: Array<Record<string, unknown>>;
+    };
+    const currentRoutes = structuredClone(backend.speakerRoutes);
+    const storedRoutes = [
+      ...currentRoutes,
+      { speakerId: randomUUID(), publicCode: 'zzzz' },
+    ];
+    backend.speakerRoutes = canonicalSpeakerRoutes(backend.speakers, storedRoutes);
+
+    expect(backend.speakerRoutes).toEqual(currentRoutes);
+    expect(storedRoutes).toHaveLength(currentRoutes.length + 1);
+    expect(() => validateCanonicalHomepageSnapshot(value)).not.toThrow();
+    expect(canonicalSpeakerRoutes([], storedRoutes)).toEqual([]);
+  });
+
+  it('continues rejecting missing or duplicate routes for current speakers', async () => {
+    const value = await snapshot();
+    const backend = value.backend as {
+      speakers: Array<Record<string, unknown>>;
+      speakerRoutes: Array<Record<string, unknown>>;
+    };
+    const currentRoutes = structuredClone(backend.speakerRoutes);
+    backend.speakerRoutes = canonicalSpeakerRoutes(backend.speakers, currentRoutes.slice(1));
+    expect(() => validateCanonicalHomepageSnapshot(value)).toThrow(/must have one public route/u);
+    backend.speakerRoutes = canonicalSpeakerRoutes(backend.speakers, [
+      ...currentRoutes,
+      currentRoutes[0]!,
+    ]);
+    expect(() => validateCanonicalHomepageSnapshot(value)).toThrow(/routes do not match/u);
+  });
+
+  it.each([null, ''])('accepts omitted optional session text stored as %j', async (empty) => {
+    const value = await snapshot();
+    const release = value.release as { snapshot: { sessions: Array<Record<string, unknown>> } };
+    const publicEvent = value.publicEvent as { sessions: Array<Record<string, unknown>> };
+    const session = release.snapshot.sessions[0]!;
+    const publicSession = publicEvent.sessions.find((item) => item.id === session.id)!;
+    session.summary = empty;
+    session.speaker = empty;
+    delete publicSession.summary;
+    delete publicSession.speaker;
+    expect(() => validateCanonicalHomepageSnapshot(value)).not.toThrow();
+
+    session.summary = 'This published session description must remain visible.';
+    expect(() => validateCanonicalHomepageSnapshot(value)).toThrow(/public session.*content/u);
+  });
+  it('rejects a saved form that differs from the active public form', async () => {
+    const value = await snapshot();
+    const backend = value.backend as Record<string, unknown>;
+    const release = value.release as { snapshot: { registrationForm: Record<string, unknown> } };
+    backend.registrationForm = structuredClone(release.snapshot.registrationForm);
+    expect(() => validateCanonicalHomepageSnapshot(value)).not.toThrow();
+    (backend.registrationForm as Record<string, unknown>).termsContent =
+      '后台已保存但前台未生效的条款。';
+    expect(() => validateCanonicalHomepageSnapshot(value, 'observation')).not.toThrow();
+    expect(() => validateCanonicalHomepageSnapshot(value)).toThrow(/registration form.*active/iu);
+  });
   it('limits the trusted production exporter to the read-only Compose topology', () => {
     const trusted = {
       databaseUrl:

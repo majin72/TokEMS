@@ -12,14 +12,25 @@ import {
   eventReleases,
   events,
   invoiceDocuments,
+  invoiceDocumentAccessLinks,
+  invoiceFileIdentity,
+  invoicePublicOrigin,
+  invoiceSmsFingerprint,
+  invoiceTokenHash,
   invoiceRequests,
   invoiceStateLogs,
+  lockInvoiceSmsScope,
+  notificationDeliveries,
+  orderItems,
   orders,
   orderAccessTokens,
   organizations,
+  organizationIntegrations,
   outboxEvents,
   payments,
+  prepareInvoiceFileLink,
   publicUserIds,
+  registrationForms,
   refunds,
   registrations,
   tickets,
@@ -34,6 +45,7 @@ import { CustomerAuthService } from './customer-auth.service.js';
 import { ConferenceRepository } from './conference.repository.js';
 import { DatabaseService } from './database.service.js';
 import { InvoiceOperationsService } from './invoice-operations.service.js';
+import { AdminRegistrationOperationsService } from './admin-registration-operations.service.js';
 import type { FastifyRequest } from 'fastify';
 
 const describePersistent = process.env.DATABASE_URL ? describe : describe.skip;
@@ -719,6 +731,21 @@ describePersistent('customer invoice center', () => {
         succeededAt: new Date(`2026-01-${String(index + 1).padStart(2, '0')}T00:00:30.123Z`),
       })),
     );
+    await db.insert(orderItems).values(
+      eventIds.map((eventId, index) => ({
+        id: orderIds[index]!,
+        orderId: orderIds[index]!,
+        registrationId: registrationIds[index]!,
+        organizationId,
+        eventId,
+        position: 1,
+        ticketTypeId: ticketTypeIds[index]!,
+        unitPrice: 39900,
+        allocatedAmount: 39900,
+        pricingSnapshot: { source: 'invoice-center-test' },
+        state: 'active' as const,
+      })),
+    );
     const [awaitingInvoice, issuedInvoice] = await db
       .insert(invoiceRequests)
       .values([
@@ -799,6 +826,14 @@ describePersistent('customer invoice center', () => {
 
   afterAll(async () => {
     const db = database.db!;
+    await db
+      .delete(notificationDeliveries)
+      .where(eq(notificationDeliveries.organizationId, organizationId));
+    await db
+      .delete(invoiceDocumentAccessLinks)
+      .where(eq(invoiceDocumentAccessLinks.organizationId, organizationId));
+    await db.delete(invoiceRequests).where(eq(invoiceRequests.organizationId, organizationId));
+    await db.delete(orderItems).where(eq(orderItems.organizationId, organizationId));
     await db.delete(organizations).where(eq(organizations.id, organizationId));
     await db.delete(users).where(eq(users.id, adminUserId));
     await database.onModuleDestroy();
@@ -862,10 +897,7 @@ describePersistent('customer invoice center', () => {
         .select({ scopes: orderAccessTokens.scopes })
         .from(orderAccessTokens)
         .where(
-          and(
-            eq(orderAccessTokens.orderId, orderId),
-            eq(orderAccessTokens.tokenHash, tokenHash),
-          ),
+          and(eq(orderAccessTokens.orderId, orderId), eq(orderAccessTokens.tokenHash, tokenHash)),
         )
         .limit(1);
       expect(storedToken?.scopes).toContain('order:read');
@@ -903,7 +935,6 @@ describePersistent('customer invoice center', () => {
     expect(result.items.find((item) => item.orderId === orderIds[2])?.availableActions).toEqual([
       'view',
       'download',
-      'resend',
     ]);
     await database
       .db!.update(invoiceRequests)
@@ -1514,6 +1545,19 @@ describePersistent('customer invoice center', () => {
       ticketTypeId: proxyTicketTypeId,
       code: `TOK-T-${randomUUID().replaceAll('-', '').slice(0, 16).toUpperCase()}`,
     });
+    await db.insert(orderItems).values({
+      id: proxyOrderId,
+      orderId: proxyOrderId,
+      registrationId: proxyRegistrationId,
+      organizationId,
+      eventId: proxyEvent!.id,
+      position: 1,
+      ticketTypeId: proxyTicketTypeId,
+      unitPrice: 39900,
+      allocatedAmount: 39900,
+      pricingSnapshot: {},
+      state: 'active',
+    });
     await db.insert(invoiceRequests).values({
       requestNo: `PROXY-INV-${proxyOrderId.slice(0, 8)}`,
       organizationId,
@@ -1568,6 +1612,69 @@ describePersistent('customer invoice center', () => {
           claimToken: rawClaimToken,
         }),
       ).rejects.toMatchObject({ status: 403 });
+
+      // Editing a purchased seat follows the form that applied when it was registered.
+      const requiredName = { key: 'name', label: '姓名', type: 'text' as const, required: true };
+      const optionalName = { ...requiredName, required: false };
+      const reviewActorId = randomUUID();
+      const adminOperations = new AdminRegistrationOperationsService(
+        database,
+        new ConferenceRepository(database),
+        invoices,
+      );
+      const originalAttendee = {
+        name: '原参会人',
+        mobile: '+8613980000066',
+        email: 'original-attendee@example.com',
+        company: '',
+        title: '',
+        city: '深圳',
+      };
+      const adminEdit = (name: string) =>
+        adminOperations.updateAttendee(
+          proxyEvent!.id,
+          proxyRegistrationId,
+          organizationId,
+          reviewActorId,
+          { attendee: { ...originalAttendee, name }, reason: '报名姓名约束回归验证' },
+        );
+      await db.insert(registrationForms).values({
+        eventId: proxyEvent!.id,
+        name: '历史必填表单',
+        version: 1,
+        status: 'archived',
+        fields: [requiredName],
+        termsVersion: '1',
+        termsContent: '验收条款',
+      });
+      for (const consentSnapshot of [{ fieldDefinitions: [requiredName] }, {}]) {
+        await db
+          .update(registrations)
+          .set({ consentSnapshot })
+          .where(eq(registrations.id, proxyRegistrationId));
+        await expect(
+          account.updatePurchasedOrderAttendee(purchaserSession, proxyOrderId, { name: '' }),
+        ).rejects.toMatchObject({ status: 400 });
+        await expect(adminEdit('')).rejects.toMatchObject({ status: 400 });
+      }
+      for (const fields of [[optionalName], [{ ...requiredName, enabled: false }], []]) {
+        await db
+          .update(registrations)
+          .set({ consentSnapshot: { fieldDefinitions: fields } })
+          .where(eq(registrations.id, proxyRegistrationId));
+        await expect(
+          account.updatePurchasedOrderAttendee(purchaserSession, proxyOrderId, { name: '' }),
+        ).resolves.toMatchObject({ id: proxyOrderId });
+        await adminEdit('原参会人');
+        await expect(adminEdit('')).resolves.toMatchObject({ attendee: { name: '' } });
+        await account.updatePurchasedOrderAttendee(purchaserSession, proxyOrderId, {
+          name: '原参会人',
+        });
+      }
+      await db
+        .update(registrations)
+        .set({ consentSnapshot: { fieldDefinitions: [requiredName] } })
+        .where(eq(registrations.id, proxyRegistrationId));
 
       await account.updatePurchasedOrderAttendee(purchaserSession, proxyOrderId, {
         name: '原参会人',
@@ -1710,6 +1817,8 @@ describePersistent('customer invoice center', () => {
     } finally {
       await db.delete(outboxEvents).where(eq(outboxEvents.eventId, proxyEvent!.id));
       await db.delete(auditLogs).where(eq(auditLogs.eventId, proxyEvent!.id));
+      await db.delete(invoiceRequests).where(eq(invoiceRequests.orderId, proxyOrderId));
+      await db.delete(orderItems).where(eq(orderItems.orderId, proxyOrderId));
       await db.delete(events).where(eq(events.id, proxyEvent!.id));
       await db
         .delete(customerUsers)
@@ -1788,13 +1897,14 @@ describePersistent('customer invoice center', () => {
   });
 
   it('atomically replaces and restores an invoice file for the customer frontend', async () => {
+    const db = database.db!;
     const before = await invoices.readCustomerOrderInvoice(
       organizationId,
       customerUserId,
       orderIds[2]!,
     );
     const document = before.documents[0]!;
-    const originalDownload = new URL(document.downloadUrl!, 'http://customer.test');
+    const originalToken = document.downloadUrl!.split('/').pop()!;
     const previousStorage = {
       endpoint: process.env.S3_ENDPOINT,
       publicEndpoint: process.env.S3_PUBLIC_ENDPOINT,
@@ -1845,31 +1955,14 @@ describePersistent('customer invoice center', () => {
       expect(customerAfterReplace.documents[0]).toMatchObject({
         id: document.id,
         contentDigest: replacementDigest,
-        downloadUrl: expect.stringContaining(`/invoice-documents/${document.id}/download`),
+        downloadUrl: expect.stringMatching(/\/invoice-files\/[A-Za-z][A-Za-z0-9]{23}$/),
       });
-      await expect(
-        invoices.resolveInvoiceDownload(
-          orderIds[2]!,
-          document.id,
-          Number(originalDownload.searchParams.get('expires')),
-          originalDownload.searchParams.get('signature')!,
-        ),
-      ).rejects.toMatchObject({ status: 401 });
-      const replacementDownload = new URL(
-        customerAfterReplace.documents[0]!.downloadUrl!,
-        'http://customer.test',
-      );
-      const replacementExpires = Number(replacementDownload.searchParams.get('expires'));
-      const replacementSignature = replacementDownload.searchParams.get('signature')!;
-      const resolvedReplacement = await invoices.resolveInvoiceDownload(
-        orderIds[2]!,
-        document.id,
-        replacementExpires,
-        replacementSignature,
-      );
-      expect(decodeURIComponent(new URL(resolvedReplacement).pathname)).toContain(
-        '/replacement-one.pdf',
-      );
+      const [originalLink] = await db
+        .select()
+        .from(invoiceDocumentAccessLinks)
+        .where(eq(invoiceDocumentAccessLinks.tokenHash, invoiceTokenHash(originalToken)))
+        .limit(1);
+      expect(originalLink?.revokedAt).not.toBeNull();
 
       const deleted = await invoices.voidDocument(
         organizationId,
@@ -1892,14 +1985,6 @@ describePersistent('customer invoice center', () => {
         id: document.id,
         downloadUrl: null,
       });
-      await expect(
-        invoices.resolveInvoiceDownload(
-          orderIds[2]!,
-          document.id,
-          replacementExpires,
-          replacementSignature,
-        ),
-      ).rejects.toMatchObject({ status: 404 });
 
       const restoredFile = new TextEncoder().encode('%PDF-1.7\nreplacement-two');
       const restoredDigest = createHash('sha256').update(restoredFile).digest('hex');
@@ -1936,28 +2021,7 @@ describePersistent('customer invoice center', () => {
         orderIds[2]!,
       );
       expect(customerAfterRestore.documents[0]?.downloadUrl).toContain(
-        `/invoice-documents/${document.id}/download`,
-      );
-      await expect(
-        invoices.resolveInvoiceDownload(
-          orderIds[2]!,
-          document.id,
-          replacementExpires,
-          replacementSignature,
-        ),
-      ).rejects.toMatchObject({ status: 401 });
-      const restoreDownload = new URL(
-        customerAfterRestore.documents[0]!.downloadUrl!,
-        'http://customer.test',
-      );
-      const resolvedRestore = await invoices.resolveInvoiceDownload(
-        orderIds[2]!,
-        document.id,
-        Number(restoreDownload.searchParams.get('expires')),
-        restoreDownload.searchParams.get('signature')!,
-      );
-      expect(decodeURIComponent(new URL(resolvedRestore).pathname)).toContain(
-        '/replacement-two.pdf',
+        '/invoice-files/',
       );
     } finally {
       fetchSpy.mockRestore();
@@ -1974,6 +2038,52 @@ describePersistent('customer invoice center', () => {
   });
 
   it('queues one customer resend request and treats a repeated click as idempotent', async () => {
+    const db = database.db!;
+    const [integration] = await db
+      .insert(organizationIntegrations)
+      .values({
+        organizationId,
+        provider: 'aliyun-sms',
+        status: 'verified',
+        encryptedCredentials: 'fixture-only-no-external-send',
+        config: {
+          enabled: true,
+          signName: '发票验收',
+          templates: { invoiceReady: { enabled: true, templateCode: 'SMS_INVOICE_TEST' } },
+          invoiceSms: { deliveryMode: 'direct_file_v1', activationRevision: 1 },
+        },
+      })
+      .returning();
+    const fingerprint = invoiceSmsFingerprint(integration!);
+    const [verification] = await db
+      .insert(notificationDeliveries)
+      .values({
+        organizationId,
+        channel: 'sms',
+        purpose: 'invoice_test',
+        recipient: session.customer.mobile,
+        subject: '测试短信送达凭据',
+        body: '测试夹具，未调用短信服务',
+        status: 'delivered',
+        fileReachable: true,
+        configurationFingerprint: fingerprint,
+      })
+      .returning();
+    await db
+      .update(organizationIntegrations)
+      .set({
+        config: {
+          ...integration!.config,
+          invoiceSms: {
+            deliveryMode: 'direct_file_v1',
+            activationRevision: 1,
+            testDeliveryId: verification!.id,
+            verifiedFingerprint: fingerprint,
+            verifiedOrigin: invoicePublicOrigin(),
+          },
+        },
+      })
+      .where(eq(organizationIntegrations.id, integration!.id));
     const beforeSend = await invoices.readCustomerOrderInvoice(
       organizationId,
       customerUserId,
@@ -1984,20 +2094,29 @@ describePersistent('customer invoice center', () => {
       customerUserId,
       orderIds[2]!,
     );
-    expect(first).toEqual({ queued: true, alreadyQueued: false, retryAfterSeconds: 0 });
+    expect(first).toMatchObject({
+      queued: true,
+      alreadyQueued: false,
+      retryAfterSeconds: 0,
+      maskedRecipient: '+86139****0021',
+    });
     const repeated = await invoices.sendCustomerOrderInvoice(
       organizationId,
       customerUserId,
       orderIds[2]!,
     );
-    expect(repeated).toEqual({ queued: true, alreadyQueued: true, retryAfterSeconds: 0 });
+    expect(repeated).toMatchObject({
+      queued: true,
+      alreadyQueued: true,
+      deliveryId: first.deliveryId,
+    });
     const [eventsCount] = await database
       .db!.select({ value: sql<number>`count(*)::int` })
       .from(outboxEvents)
       .where(
         and(
           eq(outboxEvents.organizationId, organizationId),
-          eq(outboxEvents.eventType, 'InvoiceDeliveryRequested'),
+          eq(outboxEvents.eventType, 'InvoiceSmsDeliveryRequested'),
         ),
       );
     expect(eventsCount?.value).toBe(1);
@@ -2007,16 +2126,45 @@ describePersistent('customer invoice center', () => {
       .where(
         and(
           eq(outboxEvents.organizationId, organizationId),
-          eq(outboxEvents.eventType, 'InvoiceDeliveryRequested'),
+          eq(outboxEvents.eventType, 'InvoiceSmsDeliveryRequested'),
         ),
       )
       .limit(1);
-    expect(deliveryEvent?.payload).toMatchObject({
-      documentId: beforeSend.documents[0]!.id,
-      storageKey: expect.any(String),
-      contentDigest: beforeSend.documents[0]!.contentDigest,
-      issuedAt: expect.stringMatching(/Z$/),
+    expect(deliveryEvent?.payload).toEqual({ deliveryId: first.deliveryId });
+    const [delivery] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, first.deliveryId!));
+    const [document] = await db
+      .select()
+      .from(invoiceDocuments)
+      .where(eq(invoiceDocuments.id, beforeSend.documents[0]!.id));
+    expect(delivery).toMatchObject({
+      invoiceRequestId: beforeSend.id,
+      invoiceDocumentId: document!.id,
+      documentIdentity: invoiceFileIdentity(document!),
+      recipient: '+8613980000021',
+      purpose: 'invoice_manual',
+      status: 'queued',
     });
+    const afterQueue = await invoices.readCustomerOrderInvoice(
+      organizationId,
+      customerUserId,
+      orderIds[2]!,
+    );
+    expect(afterQueue.updatedAt).toBe(beforeSend.updatedAt);
+    // Preparing the file link advances the confirmation version before the external send boundary.
+    const previousSecret = process.env.NOTIFICATION_PAYLOAD_ENCRYPTION_SECRET;
+    process.env.NOTIFICATION_PAYLOAD_ENCRYPTION_SECRET = 'invoice-center-test-secret-for-file-link';
+    try {
+      await db.transaction(async (tx) => {
+        await lockInvoiceSmsScope(tx, beforeSend.id);
+        await prepareInvoiceFileLink(tx, delivery!);
+      });
+    } finally {
+      if (previousSecret === undefined) delete process.env.NOTIFICATION_PAYLOAD_ENCRYPTION_SECRET;
+      else process.env.NOTIFICATION_PAYLOAD_ENCRYPTION_SECRET = previousSecret;
+    }
     await expect(
       invoices.voidDocument(
         organizationId,

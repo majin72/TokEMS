@@ -1,9 +1,4 @@
-import {
-  createCipheriv,
-  createSign,
-  generateKeyPairSync,
-  randomBytes,
-} from 'node:crypto';
+import { createCipheriv, createSign, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseService } from './database.service.js';
 import { RedisService } from './redis.service.js';
@@ -36,6 +31,130 @@ type RequestMethod = (
   },
 ) => Promise<Record<string, unknown>>;
 
+describe('payment channel conflict recovery signal', () => {
+  it.each(['native', undefined])(
+    'still closes an older channel or an explicit close request (%s)',
+    async (targetChannel) => {
+      const attempt = {
+        id: 'old-attempt',
+        channel: 'jsapi',
+        status: 'pending',
+        outTradeNo: 'OLDTRADE',
+        updatedAt: new Date(),
+      };
+      const query = { from: vi.fn(), where: vi.fn(), limit: vi.fn().mockResolvedValue([attempt]) };
+      query.from.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      const update = {
+        set: vi.fn(),
+        where: vi.fn(),
+        returning: vi.fn().mockResolvedValue([{ ...attempt, status: 'close_pending' }]),
+      };
+      update.set.mockReturnValue(update);
+      update.where.mockReturnValue(update);
+      const tx = { execute: vi.fn(), select: () => query, update: vi.fn().mockReturnValue(update) };
+      const database = {
+        db: { transaction: (callback: (value: typeof tx) => unknown) => callback(tx) },
+      } as unknown as DatabaseService;
+      const service = new WeChatPayService(database) as unknown as {
+        beginCloseAttempt: (id: string, targetChannel?: string) => Promise<unknown>;
+      };
+      await expect(
+        service.beginCloseAttempt('fixture-order', targetChannel),
+      ).resolves.toMatchObject({ id: 'old-attempt', status: 'close_pending' });
+      expect(tx.update).toHaveBeenCalledOnce();
+      expect(update.set).toHaveBeenCalledWith({
+        status: 'close_pending',
+        updatedAt: expect.any(Date),
+      });
+    },
+  );
+
+  it('preserves the target channel when another browser has already switched', async () => {
+    const attempt = {
+      id: 'new-attempt',
+      channel: 'native',
+      status: 'pending',
+      outTradeNo: 'NEWTRADE',
+      updatedAt: new Date(),
+    };
+    const query = { from: vi.fn(), where: vi.fn(), limit: vi.fn().mockResolvedValue([attempt]) };
+    query.from.mockReturnValue(query);
+    query.where.mockReturnValue(query);
+    const tx = { execute: vi.fn(), select: () => query, update: vi.fn() };
+    const database = {
+      db: { transaction: (callback: (value: typeof tx) => unknown) => callback(tx) },
+    } as unknown as DatabaseService;
+    const service = new WeChatPayService(database) as unknown as {
+      beginCloseAttempt: (id: string, targetChannel: string) => Promise<unknown>;
+    };
+    await expect(service.beginCloseAttempt('fixture-order', 'native')).resolves.toEqual({
+      sameChannel: true,
+    });
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it.each(['jsapi', 'h5'])(
+    'identifies an existing %s attempt without mutating it',
+    async (activeChannel) => {
+      const order = { status: 'pending_payment', expiresAt: new Date(Date.now() + 60_000) };
+      function selected(rows: unknown[]) {
+        const query = {
+          from: vi.fn(),
+          innerJoin: vi.fn(),
+          where: vi.fn(),
+          for: vi.fn(),
+          limit: vi.fn().mockResolvedValue(rows),
+        };
+        for (const method of [query.from, query.innerJoin, query.where, query.for])
+          method.mockReturnValue(query);
+        return query;
+      }
+      const tx = {
+        execute: vi.fn(),
+        select: vi
+          .fn()
+          .mockReturnValueOnce(selected([{ order, tokenScopes: ['order:read'] }]))
+          .mockReturnValueOnce(
+            selected([
+              { channel: activeChannel, status: 'pending', merchantId: 'fixture-merchant' },
+            ]),
+          ),
+        insert: vi.fn(),
+        update: vi.fn(),
+      };
+      const database = {
+        db: { transaction: (callback: (value: typeof tx) => unknown) => callback(tx) },
+      } as unknown as DatabaseService;
+      const service = new WeChatPayService(database) as unknown as {
+        claimAttempt: (
+          id: string,
+          channel: string,
+          order: object,
+          hash: string,
+          version: number,
+          merchantId: string,
+        ) => Promise<unknown>;
+      };
+      await expect(
+        service.claimAttempt(
+          'fixture-order',
+          'native',
+          order,
+          'fixture-hash',
+          1,
+          'fixture-merchant',
+        ),
+      ).rejects.toMatchObject({
+        code: 'INVALID_STATE_TRANSITION',
+        details: { reason: 'payment_channel_conflict', activeChannel, requestedChannel: 'native' },
+      });
+      expect(tx.insert).not.toHaveBeenCalled();
+      expect(tx.update).not.toHaveBeenCalled();
+    },
+  );
+});
+
 /**
  * Builds RSA key fixtures for merchant and platform signing tests.
  *
@@ -46,12 +165,8 @@ function createRsaFixtures() {
   const platformKeys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   return {
     platformPublicKeyId: 'PUB_KEY_ID_TEST_2026',
-    merchantPrivateKey: merchantKeys.privateKey
-      .export({ type: 'pkcs8', format: 'pem' })
-      .toString(),
-    platformPrivateKey: platformKeys.privateKey
-      .export({ type: 'pkcs8', format: 'pem' })
-      .toString(),
+    merchantPrivateKey: merchantKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    platformPrivateKey: platformKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     platformPublicKey: platformKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
   };
 }
@@ -153,7 +268,61 @@ describe('WeChatPayService signed requests', () => {
     expect(requestHeaders?.get('Authorization')).toContain('WECHATPAY2-SHA256-RSA2048');
   });
 
-  it('requires a verified integration before accepting payment notifications', async () => {
+  it.each(['signed', 'unsigned', 'tampered'])(
+    'only trusts a valid signed absence response (%s)',
+    async (kind) => {
+      const fixtures = createRsaFixtures();
+      const body = JSON.stringify({ code: 'ORDER_NOT_EXIST', message: 'absent' });
+      const headers = signWeChatResponse(
+        body,
+        fixtures.platformPrivateKey,
+        fixtures.platformPublicKeyId,
+      );
+      if (kind === 'tampered') headers['wechatpay-signature'] = 'invalid';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async () =>
+            new Response(body, { status: 404, headers: kind === 'unsigned' ? {} : headers }),
+        ),
+      );
+      const database = new DatabaseService();
+      try {
+        const service = new WeChatPayService(database);
+        const request = (service as unknown as { request: RequestMethod }).request.bind(service);
+        const result = request(
+          'GET',
+          '/v3/pay/transactions/out-trade-no/test?mchid=1234567890',
+          undefined,
+          {
+            enabled: true,
+            appId: 'test',
+            mchId: '1234567890',
+            merchantCertificateSerial: 'test',
+            platformPublicKeyId: fixtures.platformPublicKeyId,
+            oauthEnabled: false,
+            channels: { native: true, jsapi: false, h5: false },
+          },
+          {
+            merchantPrivateKey: fixtures.merchantPrivateKey,
+            apiV3Key: '12345678901234567890123456789012',
+            platformPublicKey: fixtures.platformPublicKey,
+          },
+        );
+        if (kind === 'tampered') await expect(result).rejects.toThrow('微信支付响应签名校验失败');
+        else
+          await expect(result).rejects.toMatchObject({
+            providerCode: 'ORDER_NOT_EXIST',
+            verified: kind === 'signed',
+            providerStatus: 404,
+          });
+      } finally {
+        await database.onModuleDestroy();
+      }
+    },
+  );
+
+  it('loads recovery credentials and still rejects invalid payment notification signatures', async () => {
     const service = new WeChatPayService(new DatabaseService(), new RedisService());
     const requiredIntegration = vi.fn(async () => ({
       row: { status: 'configured' },
@@ -183,7 +352,7 @@ describe('WeChatPayService signed requests', () => {
       }),
     ).rejects.toBeDefined();
     expect(requiredIntegration).toHaveBeenCalledWith('organization-test', {
-      requireVerified: true,
+      reconcileExisting: true,
     });
   });
 
@@ -212,12 +381,7 @@ describe('WeChatPayService signed requests', () => {
   });
 
   it('builds JSAPI RSA paySign message in WeChat canonical order', () => {
-    const message = buildJsapiSignMessage(
-      'wx-app',
-      '1710000000',
-      'nonce-abc',
-      'prepay_id=wx123',
-    );
+    const message = buildJsapiSignMessage('wx-app', '1710000000', 'nonce-abc', 'prepay_id=wx123');
     expect(message).toBe('wx-app\n1710000000\nnonce-abc\nprepay_id=wx123\n');
   });
 

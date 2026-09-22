@@ -1504,7 +1504,8 @@
       "method": "GET",
       "path": "/api/v1/admin/events/:eventId/feishu-digest",
       "requiredGrants": [
-        "org.settings.read"
+        "org.settings.read",
+        "event.dashboard.read"
       ],
       "agentScopes": [
         "tokems:read",
@@ -1543,7 +1544,8 @@
       "method": "GET",
       "path": "/api/v1/admin/events/:eventId/feishu-digest/deliveries",
       "requiredGrants": [
-        "org.settings.read"
+        "org.settings.read",
+        "event.dashboard.read"
       ],
       "agentScopes": [
         "tokems:read",
@@ -1891,7 +1893,8 @@
       "actionId": null,
       "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
       "requiredAnyGrants": [
-        "event.read"
+        "event.read",
+        "event.order.refund"
       ],
       "requiredAllGrants": []
     },
@@ -1926,6 +1929,7 @@
       "requiredAnyGrants": [
         "event.read",
         "event.manage",
+        "event.order.refund",
         "event.registration.manage",
         "event.inventory.read",
         "event.inventory.manage",
@@ -2024,6 +2028,84 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/commission-inquiries",
+      "handler": "AdminPartnerController.inquiries",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/commissions",
+      "handler": "AdminPartnerController.commissions",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/overview",
+      "handler": "AdminPartnerController.overview",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.read",
+        "event.commission.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners",
+      "handler": "AdminPartnerController.list",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts",
+      "handler": "AdminPartnerController.payouts",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts/export",
+      "handler": "AdminPartnerController.exportPayouts",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.export"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/distribution/programs",
+      "handler": "AdminPartnerController.programs",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/admin/events/:eventId/experience",
       "handler": "TemplateController.experience",
       "actionId": null,
@@ -2039,10 +2121,11 @@
       "handler": "OrganizationEventsController.feishuDigestSubscription",
       "actionId": "communications.feishu-digest.get",
       "exclusion": null,
-      "requiredAnyGrants": [
-        "org.settings.read"
-      ],
-      "requiredAllGrants": []
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "org.settings.read",
+        "event.dashboard.read"
+      ]
     },
     {
       "method": "GET",
@@ -2050,10 +2133,23 @@
       "handler": "OrganizationEventsController.feishuDigestDeliveries",
       "actionId": "communications.feishu-digest.deliveries.list",
       "exclusion": null,
-      "requiredAnyGrants": [
-        "org.settings.read"
-      ],
-      "requiredAllGrants": []
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "org.settings.read",
+        "event.dashboard.read"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/feishu-digest/deliveries/:deliveryId",
+      "handler": "OrganizationEventsController.feishuDigestDeliveryDetail",
+      "actionId": null,
+      "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "org.settings.read",
+        "event.dashboard.read"
+      ]
     },
     {
       "method": "GET",
@@ -2169,6 +2265,63 @@
       "handler": "AdminController.orders",
       "actionId": "commerce.orders.list",
       "exclusion": null,
+      "requiredAnyGrants": [
+        "event.order.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/orders/:orderId/item-refund-context",
+      "handler": "AdminRefundController.itemContext",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/orders/:orderId/items",
+      "handler": "AdminBatchOrdersController.detail",
+      "actionId": null,
+      "exclusion": "Batch order operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/refund-exceptions",
+      "handler": "AdminRefundController.exceptions",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/refund-policy",
+      "handler": "AdminRefundController.policy",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.registration.read",
+        "event.manage",
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/events/:eventId/refund-requests",
+      "handler": "AdminRefundController.list",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
       "requiredAnyGrants": [
         "event.order.read"
       ],
@@ -2308,6 +2461,17 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/admin/integrations/aliyun-sms/invoice-ready/tests/:deliveryId",
+      "handler": "OrganizationEventsController.invoiceSmsTestStatus",
+      "actionId": null,
+      "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
+      "requiredAnyGrants": [
+        "org.settings.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/admin/integrations/feishu-bot",
       "handler": "OrganizationEventsController.feishuBotConfiguration",
       "actionId": "integrations.feishu.get",
@@ -2348,6 +2512,17 @@
       "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
       "requiredAnyGrants": [
         "org.settings.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/integrations/wechat-pay/refund-notifications",
+      "handler": "AdminRefundController.unmatched",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "org.settings.manage"
       ],
       "requiredAllGrants": []
     },
@@ -2403,6 +2578,17 @@
       "exclusion": null,
       "requiredAnyGrants": [
         "org.member.read"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/admin/organization/payout-settings",
+      "handler": "OrganizationPayoutSettingsController.get",
+      "actionId": null,
+      "exclusion": "Merchant transfer configuration is reserved for human operators",
+      "requiredAnyGrants": [
+        "org.payout.settings.read"
       ],
       "requiredAllGrants": []
     },
@@ -2610,7 +2796,8 @@
       "exclusion": null,
       "requiredAnyGrants": [
         "event.manage",
-        "event.registration.manage"
+        "event.registration.manage",
+        "event.order.refund"
       ],
       "requiredAllGrants": []
     },
@@ -2655,6 +2842,28 @@
       "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
       "requiredAnyGrants": [
         "event.registration.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners/:partnerId",
+      "handler": "AdminPartnerController.update",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners/:partnerId/details",
+      "handler": "AdminPartnerController.updateDetails",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
       ],
       "requiredAllGrants": []
     },
@@ -2799,6 +3008,17 @@
       "exclusion": null,
       "requiredAnyGrants": [
         "org.member.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/admin/organization/payout-settings",
+      "handler": "OrganizationPayoutSettingsController.update",
+      "actionId": null,
+      "exclusion": "Merchant transfer configuration is reserved for human operators",
+      "requiredAnyGrants": [
+        "org.payout.settings.manage"
       ],
       "requiredAllGrants": []
     },
@@ -2969,6 +3189,195 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/commission-adjustments",
+      "handler": "AdminPartnerController.adjustCommission",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/inquiries/:inquiryId/resolve",
+      "handler": "AdminPartnerController.resolveInquiry",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.commission.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners",
+      "handler": "AdminPartnerController.enable",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/partners/batch",
+      "handler": "AdminPartnerController.batchEnable",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-batches",
+      "handler": "AdminPartnerController.createBatch",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "event.payout.review",
+        "event.payout.execute"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-batches/:batchId/execute",
+      "handler": "AdminPartnerController.executeBatch",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-batches/:batchId/review",
+      "handler": "AdminPartnerController.reviewBatch",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-documents/confirmations",
+      "handler": "AdminPartnerController.confirmPayoutDocument",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-documents/uploads",
+      "handler": "AdminPartnerController.preparePayoutDocument",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payout-executions/:executionId/query",
+      "handler": "AdminPartnerController.queryExecution",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts/:requestId/manual-completion",
+      "handler": "AdminPartnerController.completeManual",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/payouts/:requestId/review",
+      "handler": "AdminPartnerController.reviewPayout",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/programs",
+      "handler": "AdminPartnerController.publishProgram",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.partner.rules.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/recipients/:recipientId/details",
+      "handler": "AdminPartnerController.recipientDetails",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review",
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/recipients/:recipientId/verify",
+      "handler": "AdminPartnerController.verifyRecipient",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.review"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/reconciliations",
+      "handler": "AdminPartnerController.createReconciliation",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/distribution/reconciliations/:reconciliationId/resolve",
+      "handler": "AdminPartnerController.resolveReconciliation",
+      "actionId": null,
+      "exclusion": "Partner financial administration is reserved for human operators",
+      "requiredAnyGrants": [
+        "event.payout.execute"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/admin/events/:eventId/experience/preview",
       "handler": "TemplateController.preview",
       "actionId": null,
@@ -2991,8 +3400,32 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/feishu-digest/deliveries/:deliveryId/regenerate",
+      "handler": "OrganizationEventsController.regenerateFeishuDigestDelivery",
+      "actionId": null,
+      "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "org.settings.manage",
+        "event.dashboard.read"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/admin/events/:eventId/feishu-digest/deliveries/:deliveryId/resend",
       "handler": "OrganizationEventsController.resendFeishuDigestDelivery",
+      "actionId": null,
+      "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "org.settings.manage",
+        "event.dashboard.read"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/feishu-digest/deliveries/:deliveryId/resolve",
+      "handler": "OrganizationEventsController.resolveFeishuDigestDelivery",
       "actionId": null,
       "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
       "requiredAnyGrants": [],
@@ -3135,6 +3568,18 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/invoices/:invoiceId/revoke-access",
+      "handler": "InvoiceController.revokeAccess",
+      "actionId": null,
+      "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
+      "requiredAnyGrants": [],
+      "requiredAllGrants": [
+        "event.read",
+        "org.invoice.manage"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/admin/events/:eventId/invoices/:invoiceId/send",
       "handler": "InvoiceController.send",
       "actionId": null,
@@ -3168,6 +3613,94 @@
         "event.read",
         "org.invoice.export"
       ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/orders/:orderId/close",
+      "handler": "AdminController.closeUnpaidOrder",
+      "actionId": null,
+      "exclusion": "Unlisted handlers remain human-only until added to the Agent catalog",
+      "requiredAnyGrants": [
+        "event.registration.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/orders/:orderId/item-refunds",
+      "handler": "AdminRefundController.createItems",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/orders/:orderId/review",
+      "handler": "AdminBatchOrdersController.review",
+      "actionId": null,
+      "exclusion": "Batch order operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.registration.manage"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/refund-requests/:requestId/approve",
+      "handler": "AdminRefundController.approve",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/refund-requests/:requestId/continue",
+      "handler": "AdminRefundController.continueRefund",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/refund-requests/:requestId/reconcile",
+      "handler": "AdminRefundController.reconcile",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/refund-requests/:requestId/reject",
+      "handler": "AdminRefundController.reject",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/events/:eventId/refund-requests/:requestId/retry",
+      "handler": "AdminRefundController.retry",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
     },
     {
       "method": "POST",
@@ -3366,6 +3899,28 @@
       "exclusion": null,
       "requiredAnyGrants": [
         "event.notification.send"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/orders/:orderId/external-refunds/verify",
+      "handler": "AdminRefundController.verify",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
+      ],
+      "requiredAllGrants": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/orders/:orderId/refund-execution-mode",
+      "handler": "AdminRefundController.mode",
+      "actionId": null,
+      "exclusion": "Refund workflow operations require human review until explicitly catalogued",
+      "requiredAnyGrants": [
+        "event.order.refund"
       ],
       "requiredAllGrants": []
     },

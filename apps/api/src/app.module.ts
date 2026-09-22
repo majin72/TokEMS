@@ -1,4 +1,7 @@
+import { InvoiceFileModule } from './modules/invoice-file.module.js';
 import { Module } from '@nestjs/common';
+import { BatchOrdersModule } from './modules/batch-orders.module.js';
+import { RefundModule } from './modules/refund.module.js';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
@@ -13,6 +16,7 @@ import { TemplateInvoiceModule } from './modules/template-invoice.module.js';
 import { CustomerModule } from './modules/customer.module.js';
 import { configuredSuperAdministratorId } from './common/staff-account.js';
 import { AgentModule } from './modules/agent.module.js';
+import { PartnerDistributionModule } from './modules/partner-distribution.module.js';
 import { AgentOperationInterceptor } from './common/agent-operation.interceptor.js';
 import {
   decodeAgentAccessSecret,
@@ -62,8 +66,12 @@ if (
     AdminModule,
     OperationsModule,
     TemplateInvoiceModule,
+    InvoiceFileModule,
     CustomerModule,
+    BatchOrdersModule,
+    RefundModule,
     AgentModule,
+    PartnerDistributionModule,
     HealthModule,
   ],
   providers: [

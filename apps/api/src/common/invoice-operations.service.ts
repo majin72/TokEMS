@@ -1,3 +1,16 @@
+import {
+  queueInvoiceSms,
+  invoiceRefundPending,
+  invoiceSmsSummary,
+  invalidateInvoiceFileAccess,
+  lockInvoiceSmsScope,
+  advanceInvoiceAccessVersion,
+  invoiceDocumentAccessLinks,
+  invoiceFileIdentity,
+  invoiceTokenHash,
+} from '@conference/database';
+import { INVOICE_ACTIONABLE_STATUSES } from '@conference/contracts';
+import { guardRefundWrite } from './refund-write-guard.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { HttpStatus, Inject, Injectable } from '@nestjs/common';
 import {
@@ -283,7 +296,7 @@ export class InvoiceOperationsService {
       .from(invoiceRequests)
       .innerJoin(events, eq(events.id, invoiceRequests.eventId))
       .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
-      .innerJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
+      .leftJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
       .where(and(...conditions))
       .limit(1);
     if (!row) {
@@ -595,7 +608,7 @@ export class InvoiceOperationsService {
       orderId: invoice.orderId,
       orderNo: row.orderNo,
       registrationId: invoice.registrationId,
-      attendeeName: row.attendeeName.name,
+      attendeeName: row.attendeeName?.name ?? '整单发票',
       buyerType:
         invoice.buyerType === 'individual' || invoice.buyerType === 'company'
           ? invoice.buyerType
@@ -632,6 +645,13 @@ export class InvoiceOperationsService {
   private listConditions(organizationId: string, query: InvoiceListQuery = {}): SQL[] {
     const conditions = [eq(invoiceRequests.organizationId, organizationId)];
     if (query.eventId) conditions.push(eq(invoiceRequests.eventId, query.eventId));
+    if (query.worklist === 'actionable')
+      conditions.push(
+        sql`${invoiceRequests.status} in (${sql.join(
+          INVOICE_ACTIONABLE_STATUSES.map((status) => sql`${status}`),
+          sql`, `,
+        )})`,
+      );
     if (query.status) conditions.push(eq(invoiceRequests.status, query.status));
     if (query.dateField === 'issued' && (query.from || query.to)) {
       const issuedConditions: SQL[] = [eq(invoiceDocuments.invoiceRequestId, invoiceRequests.id)];
@@ -677,7 +697,7 @@ export class InvoiceOperationsService {
       .from(invoiceRequests)
       .innerJoin(events, eq(events.id, invoiceRequests.eventId))
       .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
-      .innerJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
+      .leftJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
       .where(and(...conditions))
       .orderBy(desc(invoiceRequests.createdAt));
     return rows.map((row) => this.mapRequest(row, false));
@@ -701,10 +721,12 @@ export class InvoiceOperationsService {
           select max(${payments.amount}) from ${payments}
           where ${payments.orderId} = ${orders.id}
             and ${payments.status} in ('succeeded', 'refunded')
+            and (${orders.modelVersion} <> 2 or ${payments.id} = ${orders.settledPaymentId})
         ), 0)::int`,
         refundedAmount: sql<number>`coalesce((
           select sum(${refunds.amount}) from ${refunds}
           where ${refunds.orderId} = ${orders.id} and ${refunds.status} = 'succeeded'
+            and (${orders.modelVersion} <> 2 or ${refunds.paymentId} = ${orders.settledPaymentId})
         ), 0)::int`,
         invoiceAmount: invoiceRequests.netPaidAmount,
         currency: invoiceRequests.currency,
@@ -716,7 +738,7 @@ export class InvoiceOperationsService {
       .from(invoiceRequests)
       .innerJoin(events, eq(events.id, invoiceRequests.eventId))
       .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
-      .innerJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
+      .leftJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
       .leftJoin(
         invoiceDocuments,
         and(
@@ -728,10 +750,10 @@ export class InvoiceOperationsService {
       .orderBy(desc(invoiceRequests.createdAt));
     return rows.map((row) => ({
       requestNo: row.requestNo,
-      registrationCode: row.registrationCode,
+      registrationCode: row.registrationCode ?? '',
       eventName: row.eventName,
-      attendeeName: row.attendee.name,
-      mobile: row.attendee.mobile,
+      attendeeName: row.attendee?.name ?? '整单发票',
+      mobile: row.attendee?.mobile ?? '',
       title: row.title,
       taxId: row.taxId,
       email: row.email,
@@ -864,7 +886,7 @@ export class InvoiceOperationsService {
       .from(invoiceRequests)
       .innerJoin(events, eq(events.id, invoiceRequests.eventId))
       .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
-      .innerJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
+      .leftJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
       .where(and(...conditions))
       .orderBy(desc(invoiceRequests.createdAt), desc(invoiceRequests.id))
       .limit(limit + 1);
@@ -882,7 +904,7 @@ export class InvoiceOperationsService {
       .from(invoiceRequests)
       .innerJoin(events, eq(events.id, invoiceRequests.eventId))
       .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
-      .innerJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
+      .leftJoin(registrations, eq(registrations.id, invoiceRequests.registrationId))
       .where(and(...this.listConditions(organizationId, query)));
     return Number(result?.value ?? 0);
   }
@@ -1241,6 +1263,7 @@ export class InvoiceOperationsService {
     }
     return {
       ...this.mapRequest(row, includePrivate),
+      smsNotification: await invoiceSmsSummary(this.db(), invoiceId),
       documents: documents.map((document) => ({
         id: document.id,
         documentType:
@@ -1286,6 +1309,17 @@ export class InvoiceOperationsService {
   ) {
     const db = this.db();
     await db.transaction(async (tx) => {
+      const [refundScope] = await tx
+        .select({ orderId: invoiceRequests.orderId })
+        .from(invoiceRequests)
+        .where(
+          and(
+            eq(invoiceRequests.id, invoiceId),
+            eq(invoiceRequests.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+      if (refundScope) await guardRefundWrite(tx, refundScope.orderId, true);
       const conditions = [
         eq(invoiceRequests.id, invoiceId),
         eq(invoiceRequests.organizationId, organizationId),
@@ -1315,6 +1349,12 @@ export class InvoiceOperationsService {
           },
         );
       }
+      if (next === 'issuing' || next === 'issued') {
+        await guardRefundWrite(tx, current.orderId);
+        if (await invoiceRefundPending(tx,current.orderId,'application')) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION,'订单存在进行中的退款申请',HttpStatus.CONFLICT);
+      }
+      if (current.status === 'issued' && next !== 'issued')
+        await invalidateInvoiceFileAccess(tx, current.id);
       if (!canTransitionInvoice(current.status, next)) {
         throw new DomainError(
           API_ERROR_CODES.INVALID_STATE_TRANSITION,
@@ -1462,6 +1502,17 @@ export class InvoiceOperationsService {
     await this.assertStoredDocument(organizationId, invoiceId, input, eventId);
     const db = this.db();
     await db.transaction(async (tx) => {
+      const [refundScope] = await tx
+        .select({ orderId: invoiceRequests.orderId })
+        .from(invoiceRequests)
+        .where(
+          and(
+            eq(invoiceRequests.id, invoiceId),
+            eq(invoiceRequests.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+      if (refundScope) await guardRefundWrite(tx, refundScope.orderId, true);
       const conditions = [
         eq(invoiceRequests.id, invoiceId),
         eq(invoiceRequests.organizationId, organizationId),
@@ -1480,6 +1531,13 @@ export class InvoiceOperationsService {
           HttpStatus.NOT_FOUND,
         );
       }
+      await guardRefundWrite(tx, invoice.orderId);
+      if (await invoiceRefundPending(tx, invoice.orderId, 'application'))
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '订单存在进行中的退款申请',
+          HttpStatus.CONFLICT,
+        );
       if (invoice.status !== 'issuing') {
         throw new DomainError(
           API_ERROR_CODES.INVALID_STATE_TRANSITION,
@@ -1594,6 +1652,7 @@ export class InvoiceOperationsService {
           ...invoiceDocumentNotificationIdentity(document!),
         },
       });
+      await queueInvoiceSms(tx, invoice.id);
       await tx.insert(auditLogs).values({
         organizationId,
         eventId: invoice.eventId,
@@ -1618,6 +1677,17 @@ export class InvoiceOperationsService {
   ) {
     const db = this.db();
     await db.transaction(async (tx) => {
+      const [refundScope] = await tx
+        .select({ orderId: invoiceRequests.orderId })
+        .from(invoiceRequests)
+        .where(
+          and(
+            eq(invoiceRequests.id, invoiceId),
+            eq(invoiceRequests.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+      if (refundScope) await guardRefundWrite(tx, refundScope.orderId, true);
       const conditions = [
         eq(invoiceRequests.id, invoiceId),
         eq(invoiceRequests.organizationId, organizationId),
@@ -1680,6 +1750,7 @@ export class InvoiceOperationsService {
         .update(invoiceRequests)
         .set({ status: 'voided', updatedAt: new Date() })
         .where(eq(invoiceRequests.id, invoice.id));
+      await invalidateInvoiceFileAccess(tx, invoice.id);
       await tx.insert(invoiceStateLogs).values({
         invoiceRequestId: invoice.id,
         fromStatus: invoice.status,
@@ -1714,6 +1785,20 @@ export class InvoiceOperationsService {
     await this.assertStoredDocument(organizationId, invoiceId, input, eventId);
     const db = this.db();
     await db.transaction(async (tx) => {
+      const [refundScope] = await tx
+        .select({ orderId: invoiceRequests.orderId })
+        .from(invoiceRequests)
+        .where(
+          and(
+            eq(invoiceRequests.id, invoiceId),
+            eq(invoiceRequests.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+      if (refundScope) {
+        await guardRefundWrite(tx, refundScope.orderId);
+        if (await invoiceRefundPending(tx,refundScope.orderId,'application')) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION,'订单存在进行中的退款申请',HttpStatus.CONFLICT);
+      }
       const conditions = [
         eq(invoiceRequests.id, invoiceId),
         eq(invoiceRequests.organizationId, organizationId),
@@ -1770,6 +1855,31 @@ export class InvoiceOperationsService {
           HttpStatus.CONFLICT,
         );
       }
+      const [paidScope] = await tx
+        .select({ amount: orders.amount })
+        .from(orders)
+        .where(eq(orders.id, invoice.orderId))
+        .limit(1);
+      const [refundedScope] = await tx
+        .select({ amount: sql<number>`coalesce(sum(${refunds.amount}), 0)::int` })
+        .from(refunds)
+      .innerJoin(orders,eq(orders.id,refunds.orderId))
+        .where(and(eq(refunds.orderId, invoice.orderId), eq(refunds.status, 'succeeded'),sql`(${orders.modelVersion} <> 2 or ${refunds.paymentId} = ${orders.settledPaymentId})`));
+      const totalRefunded = refundedScope?.amount ?? 0;
+      const liveNet = Math.max(0, (paidScope?.amount ?? 0) - totalRefunded);
+      if (
+        invoice.amount <= 0 ||
+        liveNet <= 0 ||
+        invoice.amount > liveNet ||
+        invoice.netPaidAmount !== liveNet ||
+        (restoringDeletedDocument && totalRefunded > 0)
+      ) {
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '订单退款后请按当前净额重新开具发票，无法恢复原文件',
+          HttpStatus.CONFLICT,
+        );
+      }
       const [otherActiveDocument] = await tx
         .select({ id: invoiceDocuments.id })
         .from(invoiceDocuments)
@@ -1788,6 +1898,7 @@ export class InvoiceOperationsService {
           HttpStatus.CONFLICT,
         );
       }
+      await invalidateInvoiceFileAccess(tx, invoice.id);
       const replacedAt = new Date();
       await tx
         .update(invoiceDocuments)
@@ -1824,6 +1935,7 @@ export class InvoiceOperationsService {
           previousContentDigest: document.contentDigest,
         },
       });
+      await queueInvoiceSms(tx, invoice.id);
       await tx.insert(auditLogs).values({
         organizationId,
         eventId: invoice.eventId,
@@ -1851,75 +1963,77 @@ export class InvoiceOperationsService {
     return this.detail(organizationId, invoiceId, true, eventId);
   }
 
-  async send(organizationId: string, invoiceId: string, actorId: string, eventId?: EventId) {
-    await this.db().transaction(async (tx) => {
-      const conditions = [
-        eq(invoiceRequests.id, invoiceId),
-        eq(invoiceRequests.organizationId, organizationId),
-      ];
-      if (eventId) conditions.push(eq(invoiceRequests.eventId, eventId));
+  async send(
+    organizationId: string,
+    invoiceId: string,
+    actorId: string,
+    eventId?: EventId,
+    input: { forceAfterUncertain?: boolean; reason?: string; requestKey?: string } = {},
+  ) {
+    await this.scopedRequest(organizationId, invoiceId, eventId);
+    return this.db().transaction(async (tx) => {
+      const result = await queueInvoiceSms(tx, invoiceId, { manual: true, ...input });
+      await tx
+        .insert(auditLogs)
+        .values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'invoice.sms.send',
+          resourceType: 'invoice_request',
+          resourceId: invoiceId,
+          after: {
+            deliveryId: result.deliveryId,
+            forceAfterUncertain: input.forceAfterUncertain ?? false,
+            reason: input.reason ?? '',
+          },
+          traceId: crypto.randomUUID(),
+        });
+      return result;
+    });
+  }
+
+  async revokeAccess(
+    organizationId: string,
+    invoiceId: string,
+    actorId: string,
+    eventId: EventId,
+    input: { expectedUpdatedAt: string; reason: string; resend: boolean },
+    requestKey: string,
+  ) {
+    await this.scopedRequest(organizationId, invoiceId, eventId);
+    return this.db().transaction(async (tx) => {
+      await lockInvoiceSmsScope(tx, invoiceId);
       const [invoice] = await tx
         .select()
         .from(invoiceRequests)
-        .where(and(...conditions))
-        .for('update')
-        .limit(1);
-      if (!invoice) {
-        throw new DomainError(
-          API_ERROR_CODES.NOT_FOUND,
-          '发票申请不存在或无权访问',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-      const [activeDocument] = await tx
-        .select({
-          id: invoiceDocuments.id,
-          storageKey: invoiceDocuments.storageKey,
-          contentDigest: invoiceDocuments.contentDigest,
-          issuedAt: invoiceDocuments.issuedAt,
-        })
-        .from(invoiceDocuments)
-        .where(
-          and(eq(invoiceDocuments.invoiceRequestId, invoice.id), isNull(invoiceDocuments.voidedAt)),
-        )
-        .orderBy(desc(invoiceDocuments.issuedAt))
-        .limit(1);
-      if (invoice.status !== 'issued' || !activeDocument || !invoice.email) {
+        .where(eq(invoiceRequests.id, invoiceId));
+      if (!invoice || invoice.updatedAt.toISOString() !== input.expectedUpdatedAt)
         throw new DomainError(
           API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '已开具且接收邮箱完整时才能发送发票',
+          '发票已更新，请刷新后重试',
           HttpStatus.CONFLICT,
         );
-      }
-      await tx.insert(outboxEvents).values({
-        organizationId,
-        eventId: invoice.eventId,
-        eventType: 'InvoiceDeliveryRequested',
-        correlationId: `invoice:send:${invoiceId}:${crypto.randomUUID()}`,
-        payload: {
-          invoiceId,
-          recipientRole: 'purchaser',
-          ...invoiceDocumentNotificationIdentity(activeDocument),
-          recipient: invoice.email,
-          requestedBy: actorId,
-        },
-      });
+      await invalidateInvoiceFileAccess(tx, invoiceId, '管理员撤销了领取链接');
+      const result = input.resend
+        ? await queueInvoiceSms(tx, invoiceId, { manual: true, requestKey, reason: input.reason })
+        : { queued: false };
+      if (input.resend && ('alreadyQueued' in result && result.alreadyQueued)) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION,'前次短信结果尚未确认，请先核对渠道结果后再撤销并补发',HttpStatus.CONFLICT);
+      await advanceInvoiceAccessVersion(tx, invoiceId);
       await tx
-        .update(invoiceRequests)
-        .set({ deliveryStatus: 'queued', updatedAt: new Date() })
-        .where(eq(invoiceRequests.id, invoiceId));
-      await tx.insert(auditLogs).values({
-        organizationId,
-        eventId: invoice.eventId,
-        actorId,
-        action: 'invoice.send',
-        resourceType: 'invoice_request',
-        resourceId: invoiceId,
-        after: { documentId: activeDocument.id },
-        traceId: crypto.randomUUID(),
-      });
+        .insert(auditLogs)
+        .values({
+          organizationId,
+          eventId,
+          actorId,
+          action: 'invoice.access.revoke',
+          resourceType: 'invoice_request',
+          resourceId: invoiceId,
+          after: { reason: input.reason, resend: input.resend },
+          traceId: crypto.randomUUID(),
+        });
+      return result;
     });
-    return { queued: true };
   }
 
   async requestDetailsReminder(
@@ -1929,6 +2043,17 @@ export class InvoiceOperationsService {
     eventId?: EventId,
   ) {
     const queued = await this.db().transaction(async (tx) => {
+      const [refundScope] = await tx
+        .select({ orderId: invoiceRequests.orderId })
+        .from(invoiceRequests)
+        .where(
+          and(
+            eq(invoiceRequests.id, invoiceId),
+            eq(invoiceRequests.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+      if (refundScope) await guardRefundWrite(tx, refundScope.orderId, true);
       const conditions = [
         eq(invoiceRequests.id, invoiceId),
         eq(invoiceRequests.organizationId, organizationId),
@@ -2022,14 +2147,14 @@ export class InvoiceOperationsService {
         invoiceId: invoiceRequests.id,
       })
       .from(orders)
-      .innerJoin(registrations, eq(registrations.id, orders.registrationId))
+      .leftJoin(registrations, eq(registrations.id, orders.registrationId))
       .leftJoin(invoiceRequests, eq(invoiceRequests.orderId, orders.id))
       .where(eq(orders.orderNo, input.orderNo))
       .limit(1);
     const recoveryEmail =
       match?.order.purchaserSnapshot?.email ||
       (match?.order.purchaserCustomerUserId === null && match.order.purchaseIntentId === null
-        ? match.attendee.email
+        ? (match.attendee?.email ?? '')
         : '');
     if (!match || recoveryEmail.trim().toLowerCase() !== input.email.trim().toLowerCase()) {
       return generic;
@@ -2114,7 +2239,7 @@ export class InvoiceOperationsService {
     const [scope] = await this.db()
       .select({ order: orders, registration: registrations })
       .from(orders)
-      .innerJoin(registrations, eq(registrations.id, orders.registrationId))
+      .leftJoin(registrations, eq(registrations.id, orders.registrationId))
       .where(
         and(
           eq(orders.id, orderId),
@@ -2143,7 +2268,7 @@ export class InvoiceOperationsService {
         invoiceId: invoiceRequests.id,
       })
       .from(orders)
-      .innerJoin(registrations, eq(registrations.id, orders.registrationId))
+      .leftJoin(registrations, eq(registrations.id, orders.registrationId))
       .innerJoin(events, eq(events.id, orders.eventId))
       .leftJoin(invoiceRequests, eq(invoiceRequests.orderId, orders.id))
       .where(
@@ -2160,7 +2285,8 @@ export class InvoiceOperationsService {
     const [refundTotal] = await this.db()
       .select({ amount: sum(refunds.amount) })
       .from(refunds)
-      .where(and(eq(refunds.orderId, orderId), eq(refunds.status, 'succeeded')));
+      .innerJoin(orders,eq(orders.id,refunds.orderId))
+      .where(and(eq(refunds.orderId, orderId), eq(refunds.status, 'succeeded'),sql`(${orders.modelVersion} <> 2 or ${refunds.paymentId} = ${orders.settledPaymentId})`));
     const [successfulPayment] = await this.db()
       .select({ id: payments.id })
       .from(payments)
@@ -2168,6 +2294,7 @@ export class InvoiceOperationsService {
         and(
           eq(payments.orderId, orderId),
           inArray(payments.status, ['succeeded', 'refunded']),
+          ...(scope.order.modelVersion === 2 ? [eq(payments.id,scope.order.settledPaymentId ?? '00000000-0000-0000-0000-000000000000')] : []),
           isNotNull(payments.succeededAt),
         ),
       )
@@ -2217,7 +2344,12 @@ export class InvoiceOperationsService {
         HttpStatus.NOT_FOUND,
       );
     }
-    const detail = await this.customerInvoiceDetail(organizationId, orderId, invoice.id);
+    const detail = await this.customerInvoiceDetail(
+      organizationId,
+      orderId,
+      invoice.id,
+      customerUserId,
+    );
     await this.db().insert(auditLogs).values({
       organizationId,
       eventId: detail.eventId,
@@ -2232,17 +2364,34 @@ export class InvoiceOperationsService {
     return detail;
   }
 
-  private async customerInvoiceDetail(organizationId: string, orderId: string, invoiceId: string) {
+  private async customerInvoiceDetail(
+    organizationId: string,
+    orderId: string,
+    invoiceId: string,
+    customerUserId?: string,
+  ) {
     const detail = await this.detail(organizationId, invoiceId);
     const expires = Date.now() + 10 * 60_000;
-    return CustomerInvoiceDetailSchema.parse({
-      ...detail,
-      documents: detail.documents.map(({ storageKey, ...document }) => ({
+    const documents = await Promise.all(
+      detail.documents.map(async ({ storageKey, ...document }) => ({
         ...document,
         downloadUrl: document.voidedAt
           ? null
-          : `/orders/${encodeURIComponent(orderId)}/invoice-documents/${encodeURIComponent(document.id)}/download?expires=${expires}&signature=${this.downloadSignature(orderId, { ...document, storageKey }, expires)}`,
+          : customerUserId
+            ? await this.createCustomerInvoiceFileLink(
+                organizationId,
+                customerUserId,
+                orderId,
+                detail.eventId,
+                detail.id,
+                { ...document, storageKey },
+              )
+            : `/orders/${encodeURIComponent(orderId)}/invoice-documents/${encodeURIComponent(document.id)}/download?expires=${expires}&signature=${this.downloadSignature(orderId, { ...document, storageKey }, expires)}`,
       })),
+    );
+    return CustomerInvoiceDetailSchema.parse({
+      ...detail,
+      documents,
       timeline: detail.logs.map((log) => {
         const copy = CUSTOMER_INVOICE_STATUS_COPY[log.toStatus];
         const description =
@@ -2261,6 +2410,52 @@ export class InvoiceOperationsService {
         };
       }),
     });
+  }
+
+  private async createCustomerInvoiceFileLink(
+    organizationId: string,
+    customerUserId: string,
+    orderId: string,
+    eventId: EventId,
+    invoiceId: string,
+    document: Pick<
+      typeof invoiceDocuments.$inferSelect,
+      'id' | 'storageKey' | 'contentDigest'
+    > & { issuedAt: Date | string },
+  ) {
+    const identity = invoiceFileIdentity({ ...document, issuedAt: new Date(document.issuedAt) });
+    const bucket = Math.floor(Date.now() / 60_000);
+    const expiresAt = new Date((bucket + 10) * 60_000);
+    const secret =
+      process.env.INVOICE_DOWNLOAD_SIGNING_SECRET ??
+      process.env.JWT_SECRET ??
+      'conference-invoice-download-development-secret';
+    const tokenSuffix = createHmac('sha256', secret)
+      .update(
+        `account:${organizationId}:${customerUserId}:${invoiceId}:${document.id}:${identity}:${bucket}`,
+      )
+      .digest('base64url')
+      .replace(/[-_]/gu, 'A')
+      .slice(0, 23);
+    const token = `A${tokenSuffix}`;
+    await this.db().transaction(async (tx) => {
+      await tx
+        .insert(invoiceDocumentAccessLinks)
+        .values({
+          organizationId,
+          eventId,
+          orderId,
+          invoiceRequestId: invoiceId,
+          invoiceDocumentId: document.id,
+          documentIdentity: identity,
+          purpose: 'account',
+          recipientHash: invoiceTokenHash(`account:${customerUserId}`),
+          tokenHash: invoiceTokenHash(token),
+          expiresAt,
+        })
+        .onConflictDoNothing();
+    });
+    return `/invoice-files/${token}`;
   }
 
   private async applyInvoiceBuyer(
@@ -2365,10 +2560,10 @@ export class InvoiceOperationsService {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`customer-invoice:${orderId}`}, 0))`,
       );
-      const [scope] = await tx
-        .select({ order: orders, registration: registrations })
+      const [authorized] = await tx
+        .select({ id: orders.id })
         .from(orders)
-        .innerJoin(registrations, eq(registrations.id, orders.registrationId))
+        .leftJoin(registrations, eq(registrations.id, orders.registrationId))
         .where(
           and(
             eq(orders.id, orderId),
@@ -2376,7 +2571,28 @@ export class InvoiceOperationsService {
             this.customerPurchaserScope(customerUserId),
           ),
         )
-        .for('update')
+        .limit(1);
+      if (!authorized)
+        throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单不存在', HttpStatus.NOT_FOUND);
+      await guardRefundWrite(tx, orderId);
+      if (await invoiceRefundPending(tx, orderId, 'application'))
+        throw new DomainError(
+          API_ERROR_CODES.INVALID_STATE_TRANSITION,
+          '订单存在进行中的退款申请',
+          HttpStatus.CONFLICT,
+        );
+      const [scope] = await tx
+        .select({ order: orders, registration: registrations })
+        .from(orders)
+        .leftJoin(registrations, eq(registrations.id, orders.registrationId))
+        .where(
+          and(
+            eq(orders.id, orderId),
+            eq(orders.organizationId, organizationId),
+            this.customerPurchaserScope(customerUserId),
+          ),
+        )
+        .for('update', { of: orders })
         .limit(1);
       if (!scope) {
         throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单不存在', HttpStatus.NOT_FOUND);
@@ -2389,7 +2605,7 @@ export class InvoiceOperationsService {
               taxId: input.taxId.toUpperCase(),
               email: input.email,
               mobile:
-                scope.order.purchaserSnapshot?.mobile || scope.registration.attendee.mobile,
+                scope.order.purchaserSnapshot?.mobile || scope.registration?.attendee.mobile || '',
               content: '会务费',
             }
           : {
@@ -2403,7 +2619,8 @@ export class InvoiceOperationsService {
       const [refundTotal] = await tx
         .select({ amount: sum(refunds.amount) })
         .from(refunds)
-        .where(and(eq(refunds.orderId, orderId), eq(refunds.status, 'succeeded')));
+      .innerJoin(orders,eq(orders.id,refunds.orderId))
+        .where(and(eq(refunds.orderId, orderId), eq(refunds.status, 'succeeded'),sql`(${orders.modelVersion} <> 2 or ${refunds.paymentId} = ${orders.settledPaymentId})`));
       const [successfulPayment] = await tx
         .select({ id: payments.id })
         .from(payments)
@@ -2411,6 +2628,7 @@ export class InvoiceOperationsService {
           and(
             eq(payments.orderId, orderId),
             inArray(payments.status, ['succeeded', 'refunded']),
+          ...(scope.order.modelVersion === 2 ? [eq(payments.id,scope.order.settledPaymentId ?? '00000000-0000-0000-0000-000000000000')] : []),
             isNotNull(payments.succeededAt),
           ),
         )
@@ -2474,7 +2692,7 @@ export class InvoiceOperationsService {
             organizationId,
             eventId: scope.order.eventId,
             orderId,
-            registrationId: scope.registration.id,
+            registrationId: scope.order.registrationId,
             amount: netPaidAmount,
             netPaidAmount,
             currency: 'CNY',
@@ -2511,7 +2729,7 @@ export class InvoiceOperationsService {
       }
       return invoice!.id;
     });
-    return this.customerInvoiceDetail(organizationId, orderId, invoiceId);
+    return this.customerInvoiceDetail(organizationId, orderId, invoiceId, customerUserId);
   }
 
   async sendCustomerOrderInvoice(
@@ -2519,92 +2737,48 @@ export class InvoiceOperationsService {
     customerUserId: string,
     orderId: string,
   ): Promise<CustomerInvoiceSendResult> {
-    const db = this.db();
-    return db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`customer-invoice-send:${orderId}`}, 0))`,
-      );
-      const [scope] = await tx
-        .select({ invoice: invoiceRequests })
-        .from(invoiceRequests)
-        .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
-        .innerJoin(registrations, eq(registrations.id, orders.registrationId))
+    await this.customerOrderScope(organizationId, customerUserId, orderId);
+    const [invoice] = await this.db()
+      .select({ id: invoiceRequests.id })
+      .from(invoiceRequests)
+      .where(
+        and(
+          eq(invoiceRequests.orderId, orderId),
+          eq(invoiceRequests.organizationId, organizationId),
+        ),
+      )
+      .limit(1);
+    if (!invoice)
+      throw new DomainError(API_ERROR_CODES.NOT_FOUND, '发票申请不存在', HttpStatus.NOT_FOUND);
+    return this.db().transaction(async (tx) => {
+      await lockInvoiceSmsScope(tx, invoice.id);
+      const [authorized] = await tx
+        .select({ id: orders.id })
+        .from(orders)
+        .leftJoin(registrations, eq(registrations.id, orders.registrationId))
         .where(
           and(
-            eq(invoiceRequests.orderId, orderId),
-            eq(invoiceRequests.organizationId, organizationId),
+            eq(orders.id, orderId),
+            eq(orders.organizationId, organizationId),
             this.customerPurchaserScope(customerUserId),
           ),
-        )
-        .for('update')
-        .limit(1);
-      if (!scope) {
-        throw new DomainError(API_ERROR_CODES.NOT_FOUND, '发票申请不存在', HttpStatus.NOT_FOUND);
-      }
-      const invoice = scope.invoice;
-      const [activeDocument] = await tx
-        .select({
-          id: invoiceDocuments.id,
-          storageKey: invoiceDocuments.storageKey,
-          contentDigest: invoiceDocuments.contentDigest,
-          issuedAt: invoiceDocuments.issuedAt,
-        })
-        .from(invoiceDocuments)
-        .where(
-          and(eq(invoiceDocuments.invoiceRequestId, invoice.id), isNull(invoiceDocuments.voidedAt)),
-        )
-        .orderBy(desc(invoiceDocuments.issuedAt))
-        .limit(1);
-      if (invoice.status !== 'issued' || !activeDocument || !invoice.email) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          '已开具且接收邮箱完整时才能重新发送发票',
-          HttpStatus.CONFLICT,
         );
-      }
-      if (invoice.deliveryStatus === 'queued') {
-        return { queued: true, alreadyQueued: true, retryAfterSeconds: 0 };
-      }
-      const cooldownEndsAt = invoice.lastSentAt ? invoice.lastSentAt.getTime() + 10 * 60_000 : 0;
-      const retryAfterSeconds = Math.max(0, Math.ceil((cooldownEndsAt - Date.now()) / 1000));
-      if (retryAfterSeconds > 0) {
-        throw new DomainError(
-          API_ERROR_CODES.INVALID_STATE_TRANSITION,
-          `发票刚刚发送过，请在 ${Math.ceil(retryAfterSeconds / 60)} 分钟后重试`,
-          HttpStatus.TOO_MANY_REQUESTS,
-          { retryAfterSeconds },
-        );
-      }
-      await tx.insert(outboxEvents).values({
-        organizationId,
-        eventId: invoice.eventId,
-        eventType: 'InvoiceDeliveryRequested',
-        correlationId: `invoice:customer-send:${invoice.id}:${Date.now()}`,
-        payload: {
-          invoiceId: invoice.id,
-          recipientRole: 'purchaser',
-          ...invoiceDocumentNotificationIdentity(activeDocument),
-          recipient: invoice.email,
-          requestedBy: customerUserId,
-          requestedByType: 'customer',
-        },
-      });
+      if (!authorized)
+        throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单不存在', HttpStatus.NOT_FOUND);
+      const result = await queueInvoiceSms(tx, invoice.id, { manual: true });
       await tx
-        .update(invoiceRequests)
-        .set({ deliveryStatus: 'queued', updatedAt: new Date() })
-        .where(eq(invoiceRequests.id, invoice.id));
-      await tx.insert(auditLogs).values({
-        organizationId,
-        eventId: invoice.eventId,
-        actorId: customerUserId,
-        actorType: 'customer',
-        action: 'invoice.customer.send',
-        resourceType: 'invoice_request',
-        resourceId: invoice.id,
-        after: { documentId: activeDocument.id },
-        traceId: crypto.randomUUID(),
-      });
-      return { queued: true, alreadyQueued: false, retryAfterSeconds: 0 };
+        .insert(auditLogs)
+        .values({
+          organizationId,
+          actorId: customerUserId,
+          actorType: 'customer',
+          action: 'invoice.customer.sms.send',
+          resourceType: 'invoice_request',
+          resourceId: invoice.id,
+          after: { deliveryId: result.deliveryId },
+          traceId: crypto.randomUUID(),
+        });
+      return { ...result, queued: true as const };
     });
   }
 
@@ -2713,12 +2887,14 @@ export class InvoiceOperationsService {
           HttpStatus.UNAUTHORIZED,
         );
       }
+      await guardRefundWrite(tx, token.orderId);
+      if (await invoiceRefundPending(tx,token.orderId,'application')) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION,'订单存在进行中的退款申请',HttpStatus.CONFLICT);
       const [scope] = await tx
         .select({ invoice: invoiceRequests, order: orders })
         .from(invoiceRequests)
         .innerJoin(orders, eq(orders.id, invoiceRequests.orderId))
         .where(and(eq(invoiceRequests.id, invoiceId), eq(invoiceRequests.orderId, token.orderId)))
-        .for('update')
+        .for('update', { of: orders })
         .limit(1);
       if (!scope) {
         throw new DomainError(API_ERROR_CODES.NOT_FOUND, '发票申请不存在', HttpStatus.NOT_FOUND);
@@ -2726,7 +2902,8 @@ export class InvoiceOperationsService {
       const [refundTotal] = await tx
         .select({ amount: sum(refunds.amount) })
         .from(refunds)
-        .where(and(eq(refunds.orderId, token.orderId), eq(refunds.status, 'succeeded')));
+      .innerJoin(orders,eq(orders.id,refunds.orderId))
+        .where(and(eq(refunds.orderId, token.orderId), eq(refunds.status, 'succeeded'),sql`(${orders.modelVersion} <> 2 or ${refunds.paymentId} = ${orders.settledPaymentId})`));
       const [successfulPayment] = await tx
         .select({ id: payments.id })
         .from(payments)
@@ -2734,6 +2911,7 @@ export class InvoiceOperationsService {
           and(
             eq(payments.orderId, token.orderId),
             inArray(payments.status, ['succeeded', 'refunded']),
+          ...(scope.order.modelVersion === 2 ? [eq(payments.id,scope.order.settledPaymentId ?? '00000000-0000-0000-0000-000000000000')] : []),
             isNotNull(payments.succeededAt),
           ),
         )

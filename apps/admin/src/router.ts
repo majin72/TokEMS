@@ -200,6 +200,12 @@ export const router = createRouter({
               meta: { requiredGrants: ['org.settings.read'] },
             },
             {
+              path: 'feishu',
+              name: 'manage-settings-feishu',
+              component: () => import('./views/ManagementFeishuSettingsView.vue'),
+              meta: { requiredGrants: ['org.settings.read'] },
+            },
+            {
               path: 'sms',
               name: 'manage-settings-sms',
               component: () => import('./views/ManagementSmsSettingsView.vue'),
@@ -321,6 +327,7 @@ export const router = createRouter({
               'event.manage',
               'event.site.read',
               'event.registration.manage',
+              'event.order.refund',
               'event.inventory.read',
               'event.inventory.manage',
             ],
@@ -334,6 +341,16 @@ export const router = createRouter({
             title: '大会配置',
             code: 'FORM',
             requiredGrants: ['event.registration.manage'],
+          },
+        },
+        {
+          path: 'settings/feishu',
+          name: 'event-settings-feishu',
+          component: () => import('./views/EventFeishuSettingsView.vue'),
+          meta: {
+            title: '大会配置',
+            code: 'FEISHU',
+            requiredAllGrants: ['org.settings.read', 'event.dashboard.read'],
           },
         },
         {
@@ -382,6 +399,16 @@ export const router = createRouter({
             title: '嘉宾管理',
             code: 'SPEAKERS',
             requiredGrants: ['event.content.manage'],
+          },
+        },
+        {
+          path: 'distribution',
+          name: 'event-distribution',
+          component: () => import('./views/PartnerDistributionView.vue'),
+          meta: {
+            title: '合作伙伴与分销',
+            code: 'PARTNER DISTRIBUTION',
+            requiredGrants: ['event.partner.read', 'event.commission.read'],
           },
         },
         {

@@ -30,6 +30,23 @@ const maxCanonicalAssetCount = 500;
 const maxCanonicalAssetBytes = 8 * 1024 * 1024;
 const maxCanonicalAssetTotalBytes = 16 * 1024 * 1024;
 const maxCanonicalSnapshotBytes = 24 * 1024 * 1024;
+const defaultPartnerProgramDraft = {
+  mode: 'fixed',
+  fixedRateBps: 1000,
+  tiers: [],
+  eligibleTicketTypeIds: [],
+  attributionDays: 30,
+  settlementDelayDays: 7,
+  minimumPayoutAmount: 1000,
+  payoutCadence: 'weekly',
+  termsTitle: '大会合作伙伴推广规则',
+  termsContent:
+    '合作伙伴应使用本人专属链接开展真实推广。佣金按成功付款且符合资格的订单明细计算，退款与自购会按规则冲正。',
+  promotionPolicy:
+    '推广内容应真实、清晰，不得承诺大会未公开的权益。发现误导宣传、异常流量或套取佣金时，大会可暂停归因与结算。',
+  publicDirectoryEnabled: false,
+  homepageLimit: 12,
+} as const;
 const sensitiveKeyPattern =
   /(admin(?:istrator)?|authorization|cookie|credential|encrypted|password|private.?key|secret|token|api.?(?:key|url)|access.?key|endpoint|integration|webhook|created.?by|updated.?by|owner.?id|user.?id|member.?id)/iu;
 const sensitiveValuePatterns = [
@@ -51,6 +68,16 @@ const sensitiveValuePatterns = [
 ];
 
 type JsonRecord = Record<string, unknown>;
+
+export function canonicalSpeakerRoutes(
+  speakers: JsonRecord[],
+  routes: JsonRecord[],
+): JsonRecord[] {
+  // Public routes also reserve codes for speakers in historical releases.
+  const currentIds = new Set(speakers.map((speaker) => speaker.id));
+  return routes.filter((route) => currentIds.has(route.speakerId));
+}
+
 type CanonicalRenderer = {
   id: string;
   key: string;
@@ -448,6 +475,35 @@ function validatePublicProjection(snapshot: JsonRecord) {
   const releaseSnapshot = record(release.snapshot, 'canonical release snapshot');
   const releaseEvent = record(releaseSnapshot.event, 'canonical release event');
   const backend = record(snapshot.backend, 'canonical backend settings');
+  const partnerDistribution = record(
+    snapshot.partnerDistribution,
+    'canonical partner distribution settings',
+  );
+  const partnerHomepage = record(
+    partnerDistribution.homepage,
+    'canonical partner distribution homepage settings',
+  );
+  const partnerProgramDraft = record(
+    partnerDistribution.programDraft,
+    'canonical partner distribution program draft',
+  );
+  if (
+    typeof partnerHomepage.enabled !== 'boolean' ||
+    !Number.isInteger(partnerHomepage.limit) ||
+    Number(partnerHomepage.limit) < 1 ||
+    Number(partnerHomepage.limit) > 24 ||
+    partnerHomepage.enabled === true
+  ) {
+    throw new Error('Canonical partner distribution homepage must remain disabled before launch');
+  }
+  if (
+    partnerProgramDraft.publicDirectoryEnabled !== false ||
+    partnerProgramDraft.fixedRateBps !== 1000 ||
+    partnerProgramDraft.attributionDays !== 30 ||
+    partnerProgramDraft.minimumPayoutAmount !== 1000
+  ) {
+    throw new Error('Canonical partner distribution draft does not match the locked launch defaults');
+  }
   const backendEvent = record(backend.event, 'canonical backend event');
   assertCanonicalMatch(
     'Canonical public event identity',
@@ -578,7 +634,11 @@ function validatePublicProjection(snapshot: JsonRecord) {
     assertCanonicalMatch(
       `Canonical public session ${String(session.id)} content`,
       pick(session, ['day', 'title', 'summary', 'speaker', 'kind']),
-      pick(expected, ['day', 'title', 'summary', 'speaker', 'kind']),
+      {
+        ...pick(expected, ['day', 'title', 'kind']),
+        ...(expected.summary ? { summary: expected.summary } : {}),
+        ...(expected.speaker ? { speaker: expected.speaker } : {}),
+      },
     );
   });
   const releaseExperience = releaseSnapshot.experience
@@ -651,7 +711,10 @@ function validatePublicProjection(snapshot: JsonRecord) {
   }
 }
 
-export function validateCanonicalHomepageSnapshot(value: unknown) {
+export function validateCanonicalHomepageSnapshot(
+  value: unknown,
+  purpose: 'snapshot' | 'observation' = 'snapshot',
+) {
   const snapshot = record(value, 'canonical snapshot');
   if (snapshot.schemaVersion !== 1) throw new Error('canonical snapshot schemaVersion must be 1');
   const source = record(snapshot.source, 'canonical snapshot source');
@@ -694,12 +757,23 @@ export function validateCanonicalHomepageSnapshot(value: unknown) {
   if (speakerRouteIds.size !== backendSpeakerIds.size) {
     throw new Error('Every canonical backend speaker must have one public route');
   }
-  record(backend.registrationForm, 'canonical backend registration form');
+  const backendForm = record(backend.registrationForm, 'canonical backend registration form');
   if (!array(releaseSnapshot.tickets, 'canonical release tickets').length) {
     throw new Error('canonical release requires at least one ticket');
   }
   array(releaseSnapshot.speakers, 'canonical release speakers');
-  record(releaseSnapshot.registrationForm, 'canonical release registration form');
+  const activeForm = record(
+    releaseSnapshot.registrationForm,
+    'canonical release registration form',
+  );
+  if (purpose === 'snapshot') {
+    const formKeys = ['id', 'version', 'name', 'fields', 'termsVersion', 'termsContent'];
+    assertCanonicalMatch(
+      'Canonical registration form must match the active form',
+      pick(backendForm, formKeys),
+      pick(activeForm, formKeys),
+    );
+  }
   const template = record(snapshot.template, 'canonical template');
   const templateRoot = record(template.root, 'canonical template root');
   const templateVersion = record(template.version, 'canonical bound template version');
@@ -1339,6 +1413,21 @@ async function buildSnapshot() {
        from sessions where event_id = $1 order by day, sort_order, id`,
       [identity.eventId],
     );
+    const partnerProgramResult = await client.query<JsonRecord>(
+      `select mode, fixed_rate_bps as "fixedRateBps", tiers,
+              eligible_ticket_type_ids as "eligibleTicketTypeIds",
+              attribution_days as "attributionDays",
+              settlement_delay_days as "settlementDelayDays",
+              minimum_payout_amount as "minimumPayoutAmount",
+              payout_cadence as "payoutCadence", terms_title as "termsTitle",
+              terms_content as "termsContent", promotion_policy as "promotionPolicy",
+              public_directory_enabled as "publicDirectoryEnabled",
+              homepage_limit as "homepageLimit"
+       from event_partner_program_versions
+       where organization_id = $1 and event_id = $2 and status = 'draft'
+       order by version desc limit 1`,
+      [identity.organizationId, identity.eventId],
+    );
     const liveEvent = liveEventResult.rows[0];
     const liveForm = liveFormResult.rows[0];
     if (!liveEvent || !liveForm) {
@@ -1357,9 +1446,10 @@ async function buildSnapshot() {
         'termsContent',
       ]),
       speakers: liveSpeakerResult.rows.map(sanitizeSpeaker),
-      speakerRoutes: speakerRouteResult.rows,
+      speakerRoutes: canonicalSpeakerRoutes(liveSpeakerResult.rows, speakerRouteResult.rows),
       sessions: liveSessionResult.rows.map(sanitizeSession),
     };
+    const programDraft = partnerProgramResult.rows[0] ?? defaultPartnerProgramDraft;
 
     const ticketIds = new Set(
       backend.ticketTypes.map((ticket) =>
@@ -1578,6 +1668,13 @@ async function buildSnapshot() {
         changeScope: identity.releaseChangeScope,
         activationKind: identity.releaseActivationKind,
       },
+      partnerDistribution: {
+        homepage: {
+          enabled: false,
+          limit: Number(programDraft.homepageLimit ?? 12),
+        },
+        programDraft,
+      },
       backend,
       blueprint:
         blueprintResult.rows.find((blueprint) => blueprint.id === canonicalBlueprintId) ?? null,
@@ -1588,7 +1685,8 @@ async function buildSnapshot() {
       aiPrompts: promptResult.rows,
       assets,
     };
-    validateCanonicalHomepageSnapshot(canonicalSnapshot);
+    // Read-only production observations must describe drift so deployment can repair it.
+    validateCanonicalHomepageSnapshot(canonicalSnapshot, 'observation');
     await client.query('commit');
     transactionOpen = false;
     return canonicalSnapshot;
@@ -1645,6 +1743,7 @@ async function main() {
     process.stdout.write(generated);
     return;
   }
+  validateCanonicalHomepageSnapshot(snapshot);
   if (mode === '--write') {
     await writeAtomically(snapshotPath, generated);
     await writeAtomically(publicSnapshotPath, generatedPublic);

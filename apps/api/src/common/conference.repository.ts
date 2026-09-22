@@ -1,3 +1,11 @@
+import { syncLegacyOrderItemState } from '@conference/database';
+import { registrationOrderJoin } from './customer-order-ownership.js';
+import { guardRefundWrite } from './refund-write-guard.js';
+import type { PartnerReferralContext } from './partner-distribution.service.js';
+import { partnerAttributionForOrder } from './partner-attribution.js';
+import { BatchRegistrationService } from './batch-registration.service.js';
+import { BatchPaymentService } from './batch-payment.service.js';
+import { OrderItemsService } from './order-items.service.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { HttpStatus, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
@@ -45,13 +53,13 @@ import {
 import {
   ACTIVE_WECHAT_PAYMENT_STATUSES,
   activeInventoryReservationAt,
-  attendeeClaimTokens,
   auditLogs,
   checkinLists,
   checkinRecords,
   customerProfiles,
   customerUsers,
   eventFeishuDigestSubscriptions,
+  feishuDigestDeliveries,
   eventReleases,
   eventPublicMetricDays,
   eventPublicMetrics,
@@ -71,7 +79,6 @@ import {
   publicUserIds,
   refunds,
   registrations,
-  registrationPurchaseAttempts,
   registrationForms,
   sessions,
   speakerPublicRoutes,
@@ -101,12 +108,11 @@ import { nanoid } from 'nanoid';
 import { DatabaseService } from './database.service.js';
 import { createDemoOperationalState } from './demo-state.js';
 import { DomainError } from './domain-error.js';
-import { customerCanManageOrder } from './customer-order-ownership.js';
 import {
   normalizeRegistrationSettings,
   resolvePublishedRegistrationSettings,
 } from './purchase-registration-policy.js';
-import { postgresErrorCode, withPostgresTransactionRetry } from './transaction-retry.js';
+import { withPostgresTransactionRetry } from './transaction-retry.js';
 import {
   EventReleaseActivationService,
   type EventReleaseChangeContext,
@@ -135,6 +141,11 @@ export interface CustomerRegistrationActor {
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function singleRegistrationId(order: Pick<Order, 'registrationId'>): string {
+  if (!order.registrationId) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION, '请通过多人订单详情执行此操作', HttpStatus.CONFLICT);
+  return order.registrationId;
+}
 
 interface ReleaseEventSnapshot {
   name?: string;
@@ -230,7 +241,7 @@ export function effectiveReleasedCapacity(
   return releasedTicket?.capacity ?? liveCapacity;
 }
 
-interface PaymentConfirmation {
+export interface PaymentConfirmation {
   provider: string;
   externalId: string;
   amount?: number;
@@ -242,7 +253,7 @@ interface PaymentConfirmation {
   reason: string;
 }
 
-interface PaymentCompletion {
+export interface PaymentCompletion {
   order: Order;
   ticket?: Ticket;
   invoice?: {
@@ -407,6 +418,7 @@ export class ConferenceRepository {
   private orderFromRow(row: typeof orders.$inferSelect): Order {
     return {
       id: row.id,
+      modelVersion: row.modelVersion, quantity: row.quantity, version: row.version,
       orderNo: row.orderNo,
       registrationId: row.registrationId,
       status: row.status,
@@ -441,7 +453,7 @@ export class ConferenceRepository {
       );
     }
     const normalized: Record<string, string> = {};
-    for (const field of fields) {
+    for (const field of fields.filter((field) => field.enabled !== false)) {
       const value = String(submitted[field.key] ?? '').trim();
       if (field.required && !value) {
         throw new DomainError(
@@ -486,6 +498,20 @@ export class ConferenceRepository {
       normalized[field.key] = value;
     }
     return normalized;
+  }
+
+  private attendeeForRegistrationForm(
+    fields: RegistrationField[],
+    attendee: CreateRegistration['attendee'],
+  ) {
+    const visible = new Set(
+      fields.filter((field) => field.enabled !== false).map((field) => field.key),
+    );
+    const result = { ...attendee };
+    for (const key of ['name', 'email', 'company', 'title', 'city'] as const) {
+      if (!visible.has(key)) result[key] = '';
+    }
+    return result;
   }
 
   private waitlistFromRow(
@@ -1429,14 +1455,25 @@ export class ConferenceRepository {
           HttpStatus.CONFLICT,
         );
       }
+      const attendee = this.attendeeForRegistrationForm(
+        this.demoEvent.registrationForm?.fields ?? [],
+        {
+          name: input.name,
+          email: input.email,
+          mobile: customer?.mobile ?? input.mobile,
+          company: '',
+          title: '',
+          city: '',
+        },
+      );
       return {
         id: crypto.randomUUID(),
         eventId: input.eventId,
         ticketTypeId: input.ticketTypeId,
         ticketTypeName: ticket.name,
-        name: input.name || customer?.profile.realName || customer?.profile.nickname || '参会人',
-        email: input.email || customer?.profile.email || '',
-        mobile: customer?.mobile ?? input.mobile,
+        name: attendee.name,
+        email: attendee.email,
+        mobile: attendee.mobile,
         status: 'waiting',
         position: 1,
         invitedAt: null,
@@ -1446,7 +1483,7 @@ export class ConferenceRepository {
     }
 
     return db.transaction(async (tx) => {
-      const normalizedEmail = (input.email || customer?.profile.email || '').trim().toLowerCase();
+      let normalizedEmail = input.email.trim().toLowerCase();
       let normalizedMobile = customer?.mobile ?? '';
       if (!normalizedMobile && input.mobile) {
         try {
@@ -1529,6 +1566,25 @@ export class ConferenceRepository {
           API_ERROR_CODES.FORBIDDEN,
           '当前登录账号不属于本场大会',
           HttpStatus.FORBIDDEN,
+        );
+      }
+      const attendee = this.attendeeForRegistrationForm(
+        releaseSnapshot?.registrationForm?.fields ?? [],
+        {
+          name: input.name,
+          email: normalizedEmail,
+          mobile: normalizedMobile,
+          company: '',
+          title: '',
+          city: '',
+        },
+      );
+      normalizedEmail = attendee.email;
+      if (!normalizedEmail && !normalizedMobile) {
+        throw new DomainError(
+          API_ERROR_CODES.VALIDATION_ERROR,
+          '候补需要提供有效的手机号',
+          HttpStatus.BAD_REQUEST,
         );
       }
       const releasedTicket = releaseSnapshot?.tickets?.find((item) => item.id === ticket.id);
@@ -1638,8 +1694,7 @@ export class ConferenceRepository {
         ? await tx
             .update(waitlistEntries)
             .set({
-              name:
-                input.name || customer?.profile.realName || customer?.profile.nickname || '参会人',
+              name: attendee.name,
               customerUserId: customer?.customerUserId,
               email: normalizedEmail,
               mobileE164: normalizedMobile,
@@ -1664,8 +1719,7 @@ export class ConferenceRepository {
               customerUserId: customer?.customerUserId,
               email: normalizedEmail,
               mobileE164: normalizedMobile,
-              name:
-                input.name || customer?.profile.realName || customer?.profile.nickname || '参会人',
+              name: attendee.name,
               notificationChannel: normalizedEmail ? 'email' : 'sms',
               position,
             })
@@ -1720,6 +1774,7 @@ export class ConferenceRepository {
     input: CreateRegistration,
     idempotencyKey: string,
     customer?: CustomerRegistrationActor,
+    referralContext: PartnerReferralContext | null = null,
   ): Promise<RegistrationCheckout> {
     if (!customer) {
       throw new DomainError(
@@ -1795,6 +1850,10 @@ export class ConferenceRepository {
           HttpStatus.BAD_REQUEST,
         );
       }
+      const attendee = this.attendeeForRegistrationForm(
+        this.demoEvent.registrationForm?.fields ?? [],
+        { ...input.attendee, mobile: attendeeMobile },
+      );
       const purchaseRequestHash = this.hash({ input, customerUserId: customer.customerUserId });
       const intentMatch = [...this.memoryOrderPurchasers.entries()].find(
         ([, purchaser]) =>
@@ -1812,7 +1871,7 @@ export class ConferenceRepository {
         }
         const intentOrder = this.memory.orders.get(intentOrderId);
         const intentRegistration = intentOrder
-          ? this.memory.registrations.get(intentOrder.registrationId)
+          ? this.memory.registrations.get(singleRegistrationId(intentOrder))
           : undefined;
         const intentOrderNeedsResume =
           intentOrder &&
@@ -1993,31 +2052,11 @@ export class ConferenceRepository {
           const resumedRegistration: Registration = {
             ...existingRegistration,
             status: amount === 0 ? 'confirmed' : 'pending_payment',
-            attendee: {
-              name:
-                input.attendee.name ||
-                (input.purchaseFor === 'self'
-                  ? customer.profile.realName || customer.profile.nickname
-                  : null) ||
-                '参会人',
-              mobile: attendeeMobile,
-              email:
-                input.attendee.email ||
-                (input.purchaseFor === 'self' ? customer.profile.email : '') ||
-                '',
-              company:
-                input.attendee.company ||
-                (input.purchaseFor === 'self' ? customer.profile.company : '') ||
-                '',
-              title:
-                input.attendee.title ||
-                (input.purchaseFor === 'self' ? customer.profile.title : '') ||
-                '',
-              city:
-                input.attendee.city ||
-                (input.purchaseFor === 'self' ? customer.profile.city : '') ||
-                '',
-            },
+            attendee,
+            formAnswers: this.normalizeRegistrationAnswers(
+              this.demoEvent.registrationForm?.fields ?? [],
+              { ...input, attendee },
+            ),
           };
           const resumedOrder: Order = {
             ...existingOrder,
@@ -2123,29 +2162,6 @@ export class ConferenceRepository {
         );
       }
       const now = new Date();
-      const attendee = {
-        name:
-          input.attendee.name ||
-          (input.purchaseFor === 'self'
-            ? customer.profile.realName || customer.profile.nickname
-            : null) ||
-          '参会人',
-        mobile: attendeeMobile,
-        email:
-          input.attendee.email ||
-          (input.purchaseFor === 'self' ? customer.profile.email : '') ||
-          '',
-        company:
-          input.attendee.company ||
-          (input.purchaseFor === 'self' ? customer.profile.company : '') ||
-          '',
-        title:
-          input.attendee.title ||
-          (input.purchaseFor === 'self' ? customer.profile.title : '') ||
-          '',
-        city:
-          input.attendee.city || (input.purchaseFor === 'self' ? customer.profile.city : '') || '',
-      };
       const checkoutInput = { ...input, attendee };
       const formAnswers = this.normalizeRegistrationAnswers(
         this.demoEvent.registrationForm?.fields ?? [],
@@ -2244,1508 +2260,10 @@ export class ConferenceRepository {
       return response;
     }
 
-    const [attemptScope] = await db
-      .select({ organizationId: ticketTypes.organizationId })
-      .from(ticketTypes)
-      .where(and(eq(ticketTypes.id, input.ticketTypeId), eq(ticketTypes.eventId, input.eventId)))
-      .limit(1);
-    if (attemptScope?.organizationId === customer.organizationId) {
-      const [knownIntent] = await db
-        .select({ id: orders.id })
-        .from(orders)
-        .where(
-          and(
-            eq(orders.organizationId, attemptScope.organizationId),
-            eq(orders.eventId, input.eventId),
-            eq(orders.purchaserCustomerUserId, customer.customerUserId),
-            eq(orders.purchaseIntentId, input.purchaseIntentId),
-          ),
-        )
-        .limit(1);
-      if (!knownIntent) {
-        await db.transaction(async (attemptTx) => {
-          await attemptTx.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${`registration-attempt:${input.eventId}:${customer.customerUserId}`}, 0))`,
-          );
-          const [existingAttempt] = await attemptTx
-            .select({ id: registrationPurchaseAttempts.id })
-            .from(registrationPurchaseAttempts)
-            .where(
-              and(
-                eq(registrationPurchaseAttempts.organizationId, attemptScope.organizationId),
-                eq(registrationPurchaseAttempts.eventId, input.eventId),
-                eq(registrationPurchaseAttempts.purchaserCustomerUserId, customer.customerUserId),
-                eq(registrationPurchaseAttempts.purchaseIntentId, input.purchaseIntentId),
-              ),
-            )
-            .limit(1);
-          if (existingAttempt) return;
-          const attemptWindowStart = new Date(Date.now() - 10 * 60_000);
-          const [attemptCount] = await attemptTx
-            .select({ value: count() })
-            .from(registrationPurchaseAttempts)
-            .where(
-              and(
-                eq(registrationPurchaseAttempts.organizationId, attemptScope.organizationId),
-                eq(registrationPurchaseAttempts.eventId, input.eventId),
-                eq(registrationPurchaseAttempts.purchaserCustomerUserId, customer.customerUserId),
-                gt(registrationPurchaseAttempts.createdAt, attemptWindowStart),
-              ),
-            );
-          if (Number(attemptCount?.value ?? 0) >= 10) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名尝试过于频繁，请10分钟后再试',
-              HttpStatus.TOO_MANY_REQUESTS,
-            );
-          }
-          await attemptTx
-            .insert(registrationPurchaseAttempts)
-            .values({
-              organizationId: attemptScope.organizationId,
-              eventId: input.eventId,
-              purchaserCustomerUserId: customer.customerUserId,
-              purchaseIntentId: input.purchaseIntentId,
-            })
-            .onConflictDoNothing();
-        });
-      }
-    }
-
-    return withPostgresTransactionRetry(() =>
-      db.transaction(async (tx) => {
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`registration:${idempotencyKey}`}, 0))`,
-        );
-        const [existing] = await tx
-          .select()
-          .from(idempotencyKeys)
-          .where(
-            and(
-              eq(idempotencyKeys.scope, 'registration:create'),
-              eq(idempotencyKeys.key, idempotencyKey),
-            ),
-          )
-          .limit(1);
-        if (existing && existing.expiresAt <= new Date()) {
-          await tx.delete(idempotencyKeys).where(eq(idempotencyKeys.id, existing.id));
-        } else if (existing) {
-          if (existing.requestHash !== requestHash) {
-            throw new DomainError(
-              API_ERROR_CODES.IDEMPOTENCY_CONFLICT,
-              '相同幂等键对应了不同的报名内容',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const durableResponse = existing.responseBody as unknown as Omit<
-            RegistrationCheckout,
-            'orderAccessToken'
-          >;
-          const replayStateMatches = (
-            state:
-              | {
-                  registrationStatus: Registration['status'];
-                  orderStatus: Order['status'];
-                  orderExpiresAt: Date;
-                }
-              | undefined,
-          ) =>
-            Boolean(
-              state &&
-              state.registrationStatus === durableResponse.registration.status &&
-              state.orderStatus === durableResponse.order.status &&
-              state.orderExpiresAt.toISOString() === durableResponse.order.expiresAt &&
-              !(state.orderStatus === 'pending_payment' && state.orderExpiresAt <= new Date()),
-            );
-          const replayStateQuery = () =>
-            tx
-              .select({
-                registrationStatus: registrations.status,
-                orderStatus: orders.status,
-                orderExpiresAt: orders.expiresAt,
-              })
-              .from(orders)
-              .innerJoin(registrations, eq(registrations.id, orders.registrationId))
-              .where(
-                and(
-                  eq(orders.id, durableResponse.order.id),
-                  eq(registrations.id, durableResponse.registration.id),
-                  isNull(registrations.supersededAt),
-                ),
-              );
-          const [observedReplayState] = await replayStateQuery().limit(1);
-          const replayStateIsCurrent = replayStateMatches(observedReplayState);
-          if (replayStateIsCurrent) {
-            const replayAccessToken = randomBytes(32).toString('base64url');
-            await tx.insert(orderAccessTokens).values({
-              orderId: durableResponse.order.id,
-              tokenHash: this.tokenHash(replayAccessToken),
-              scopes: ['order:read', ...(!customer ? ['registration:claim'] : [])],
-              expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000),
-            });
-            const { ticket: replayTicket, ...replayResponse } = durableResponse;
-            return {
-              ...replayResponse,
-              isProxyPurchase: input.purchaseFor === 'other',
-              orderAccessToken: replayAccessToken,
-              ...(input.purchaseFor === 'self' && replayTicket ? { ticket: replayTicket } : {}),
-            };
-          }
-          await tx.delete(idempotencyKeys).where(eq(idempotencyKeys.id, existing.id));
-        }
-
-        const returnExistingCheckout = async (
-          currentRegistration: typeof registrations.$inferSelect,
-          currentOrder: typeof orders.$inferSelect,
-          currentTicketType: typeof ticketTypes.$inferSelect,
-          currentTicket: typeof tickets.$inferSelect | undefined,
-          eventName: string,
-          currentTicketTypeResult = this.ticketFromRow(currentTicketType),
-        ): Promise<RegistrationCheckout> => {
-          const registration: Registration = {
-            id: currentRegistration.id,
-            eventId: currentRegistration.eventId,
-            registrationCode: currentRegistration.registrationCode,
-            status: currentRegistration.status,
-            attendee: currentRegistration.attendee,
-            ticketType: currentTicketTypeResult,
-            formAnswers: currentRegistration.formAnswers,
-            createdAt: currentRegistration.createdAt.toISOString(),
-          };
-          const order: Order = {
-            id: currentOrder.id,
-            orderNo: currentOrder.orderNo,
-            registrationId: currentRegistration.id,
-            status: currentOrder.status,
-            amount: currentOrder.amount,
-            currency: currentOrder.currency,
-            paymentMethod: currentOrder.amount === 0 ? 'free' : 'wechat',
-            ...(['pending_payment', 'processing'].includes(currentOrder.status) &&
-            currentOrder.amount > 0
-              ? { paymentUrl: `/order/${currentOrder.id}` }
-              : {}),
-            expiresAt: currentOrder.expiresAt.toISOString(),
-            createdAt: currentOrder.createdAt.toISOString(),
-          };
-          const ticket: Ticket | undefined = currentTicket
-            ? {
-                id: currentTicket.id,
-                code: currentTicket.code,
-                registrationId: currentTicket.registrationId,
-                eventName,
-                attendeeName: currentRegistration.attendee.name,
-                ticketTypeName: currentTicketType.name,
-                qrPayload: `conference:${currentTicket.eventId}:${currentTicket.code}`,
-                status: currentTicket.status,
-                issuedAt: currentTicket.issuedAt.toISOString(),
-              }
-            : undefined;
-          const orderAccessToken = randomBytes(32).toString('base64url');
-          const now = new Date();
-          await tx.insert(orderAccessTokens).values({
-            orderId: currentOrder.id,
-            tokenHash: this.tokenHash(orderAccessToken),
-            scopes: ['order:read'],
-            expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60_000),
-          });
-          const response: RegistrationCheckout = {
-            isProxyPurchase: input.purchaseFor === 'other',
-            registration,
-            order,
-            orderAccessToken,
-            ...(input.purchaseFor === 'self' && ticket ? { ticket } : {}),
-          };
-          await tx.insert(idempotencyKeys).values({
-            scope: 'registration:create',
-            key: idempotencyKey,
-            requestHash,
-            responseCode: 200,
-            responseBody: {
-              registration: response.registration,
-              order: response.order,
-              ...(response.ticket ? { ticket: response.ticket } : {}),
-            },
-            expiresAt: new Date(now.getTime() + 24 * 60 * 60_000),
-          });
-          return response;
-        };
-
-        const [ticketRow] = await tx
-          .select()
-          .from(ticketTypes)
-          .where(
-            and(eq(ticketTypes.id, input.ticketTypeId), eq(ticketTypes.eventId, input.eventId)),
-          )
-          .for('update')
-          .limit(1);
-        if (!ticketRow) {
-          throw new DomainError(API_ERROR_CODES.NOT_FOUND, '所选票种不存在', HttpStatus.NOT_FOUND);
-        }
-        const [eventRow] = await tx
-          .select({ name: events.name, status: events.status, settings: events.settings })
-          .from(events)
-          .where(
-            and(eq(events.id, input.eventId), eq(events.organizationId, ticketRow.organizationId)),
-          )
-          .limit(1);
-        if (!eventRow) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前大会尚未开放报名或报名已经结束',
-            HttpStatus.CONFLICT,
-          );
-        }
-        if (customer.organizationId !== ticketRow.organizationId) {
-          throw new DomainError(
-            API_ERROR_CODES.FORBIDDEN,
-            '当前登录账号不属于本场大会',
-            HttpStatus.FORBIDDEN,
-          );
-        }
-        let normalizedLoginMobile: string;
-        let normalizedTargetMobile: string;
-        try {
-          normalizedLoginMobile = normalizeMainlandMobile(customer.mobile);
-          normalizedTargetMobile =
-            input.purchaseFor === 'self'
-              ? normalizedLoginMobile
-              : normalizeMainlandMobile(input.attendee.mobile);
-        } catch {
-          throw new DomainError(
-            API_ERROR_CODES.VALIDATION_ERROR,
-            input.purchaseFor === 'self' ? '当前登录手机号无效，请重新登录' : '参会人手机号无效',
-            HttpStatus.BAD_REQUEST,
-          );
-        }
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`registration-intent:${ticketRow.organizationId}:${input.eventId}:${customer.customerUserId}:${input.purchaseIntentId}`}, 0))`,
-        );
-        const [intentOrder] = await tx
-          .select()
-          .from(orders)
-          .where(
-            and(
-              eq(orders.organizationId, ticketRow.organizationId),
-              eq(orders.eventId, input.eventId),
-              eq(orders.purchaserCustomerUserId, customer.customerUserId),
-              eq(orders.purchaseIntentId, input.purchaseIntentId),
-            ),
-          )
-          .limit(1);
-        if (intentOrder) {
-          const intentSnapshot = intentOrder.pricingSnapshot as { purchaseRequestHash?: string };
-          if (intentSnapshot.purchaseRequestHash !== requestHash) {
-            throw new DomainError(
-              API_ERROR_CODES.IDEMPOTENCY_CONFLICT,
-              '相同购买意图对应了不同的报名内容',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const [intentRegistration] = await tx
-            .select()
-            .from(registrations)
-            .where(
-              and(
-                eq(registrations.id, intentOrder.registrationId),
-                isNull(registrations.supersededAt),
-              ),
-            )
-            .limit(1);
-          const [intentTicketType] = await tx
-            .select()
-            .from(ticketTypes)
-            .where(eq(ticketTypes.id, ticketRow.id))
-            .limit(1);
-          const [intentTicket] = await tx
-            .select()
-            .from(tickets)
-            .where(eq(tickets.registrationId, intentOrder.registrationId))
-            .limit(1);
-          const intentOrderNeedsResume =
-            intentOrder.status === 'closed' ||
-            (intentOrder.status === 'pending_payment' && intentOrder.expiresAt <= new Date());
-          if (intentRegistration && intentTicketType && !intentOrderNeedsResume) {
-            return returnExistingCheckout(
-              intentRegistration,
-              intentOrder,
-              intentTicketType,
-              intentTicket,
-              eventRow.name,
-            );
-          }
-        }
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`registration-customer:${input.eventId}:${customer.customerUserId}`}, 0))`,
-        );
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`registration-mobile:${input.eventId}:${normalizedTargetMobile}`}, 0))`,
-        );
-        const settledIdentityMatches = await tx
-          .select()
-          .from(registrations)
-          .where(
-            and(
-              eq(registrations.eventId, input.eventId),
-              isNull(registrations.supersededAt),
-              input.purchaseFor === 'self'
-                ? or(
-                    eq(registrations.customerUserId, customer.customerUserId),
-                    eq(registrations.attendeeMobileE164, normalizedTargetMobile),
-                  )
-                : eq(registrations.attendeeMobileE164, normalizedTargetMobile),
-            ),
-          );
-        if (settledIdentityMatches.length > 1) {
-          throw new DomainError(
-            API_ERROR_CODES.REGISTRATION_IDENTITY_CONFLICT,
-            '该报名身份存在多条历史记录，请联系大会管理员处理',
-            HttpStatus.CONFLICT,
-          );
-        }
-        let settledRegistration = settledIdentityMatches[0];
-        if (settledRegistration) {
-          const [settledOrder] = await tx
-            .select()
-            .from(orders)
-            .where(eq(orders.registrationId, settledRegistration.id))
-            .limit(1);
-          const [lockedSettledRegistration] = await tx
-            .select()
-            .from(registrations)
-            .where(
-              and(eq(registrations.id, settledRegistration.id), isNull(registrations.supersededAt)),
-            )
-            .limit(1);
-          if (!lockedSettledRegistration) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名记录已发生变化，请重新提交',
-              HttpStatus.CONFLICT,
-            );
-          }
-          settledRegistration = lockedSettledRegistration;
-          const settledIdentityStillMatches =
-            input.purchaseFor === 'self'
-              ? settledRegistration.customerUserId === customer.customerUserId ||
-                settledRegistration.attendeeMobileE164 === normalizedTargetMobile
-              : settledRegistration.attendeeMobileE164 === normalizedTargetMobile;
-          if (!settledIdentityStillMatches) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名身份已发生变化，请重新提交',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const [settledTicketType] = await tx
-            .select()
-            .from(ticketTypes)
-            .where(eq(ticketTypes.id, settledRegistration.ticketTypeId))
-            .limit(1);
-          const [settledTicket] = await tx
-            .select()
-            .from(tickets)
-            .where(eq(tickets.registrationId, settledRegistration.id))
-            .limit(1);
-          if (!settledOrder || !settledTicketType) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名记录缺少订单或票种，请联系大会管理员处理',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const canManageSettledOrder = customerCanManageOrder(
-            settledOrder.purchaserCustomerUserId,
-            settledOrder.purchaseIntentId,
-            settledRegistration.customerUserId,
-            customer.customerUserId,
-          );
-          if (!canManageSettledOrder) {
-            throw new DomainError(
-              API_ERROR_CODES.REGISTRATION_IDENTITY_CONFLICT,
-              '该参会人已有报名或订单归属其他购票人',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const shouldResumeSettled =
-            settledOrder.status === 'closed' ||
-            (settledOrder.status === 'pending_payment' && settledOrder.expiresAt <= new Date());
-          if (!shouldResumeSettled) {
-            const currentSettledRegistration =
-              input.purchaseFor === 'other' || settledRegistration.customerUserId
-                ? settledRegistration
-                : (
-                    await tx
-                      .update(registrations)
-                      .set({ customerUserId: customer.customerUserId, updatedAt: new Date() })
-                      .where(
-                        and(
-                          eq(registrations.id, settledRegistration.id),
-                          isNull(registrations.supersededAt),
-                        ),
-                      )
-                      .returning()
-                  )[0]!;
-            return returnExistingCheckout(
-              currentSettledRegistration,
-              settledOrder,
-              settledTicketType,
-              settledTicket,
-              eventRow.name,
-            );
-          }
-        }
-        if (eventRow.status !== 'registration_open') {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前大会尚未开放报名或报名已经结束',
-            HttpStatus.CONFLICT,
-          );
-        }
-        const eventSettings = eventRow.settings as {
-          currentReleaseId?: string;
-          registration?: PublicEvent['registration'];
-        };
-        if (!eventSettings.currentReleaseId) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前大会尚未生成可报名的发布版本',
-            HttpStatus.CONFLICT,
-          );
-        }
-        const [activeRelease] = await tx
-          .select({ snapshot: eventReleases.snapshot })
-          .from(eventReleases)
-          .where(
-            and(
-              eq(eventReleases.id, eventSettings.currentReleaseId),
-              eq(eventReleases.eventId, input.eventId),
-            ),
-          )
-          .limit(1);
-        const releaseSnapshot = activeRelease?.snapshot as EventReleaseSnapshot | undefined;
-        const manualReview =
-          releaseSnapshot?.experience?.registrationFlow.branches.manualReview === true;
-        const releasedRegistration = resolvePublishedRegistrationSettings(
-          eventSettings,
-          releaseSnapshot,
-        );
-        if (input.purchaseFor === 'other' && !releasedRegistration.additionalPurchaseEnabled) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前大会未开放代他人购票',
-            HttpStatus.CONFLICT,
-          );
-        }
-        if (input.purchaseFor === 'other' && input.waitlistOfferToken) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '候补购买资格仅限本人使用',
-            HttpStatus.CONFLICT,
-          );
-        }
-        const checkoutInput: CreateRegistration = {
-          ...input,
-          marketingConsent: input.purchaseFor === 'other' ? false : input.marketingConsent,
-          attendee: {
-            name:
-              input.attendee.name ||
-              (input.purchaseFor === 'self'
-                ? customer.profile.realName || customer.profile.nickname
-                : null) ||
-              '参会人',
-            mobile: normalizedTargetMobile,
-            email:
-              input.attendee.email ||
-              (input.purchaseFor === 'self' ? customer.profile.email : '') ||
-              '',
-            company:
-              input.attendee.company ||
-              (input.purchaseFor === 'self' ? customer.profile.company : '') ||
-              '',
-            title:
-              input.attendee.title ||
-              (input.purchaseFor === 'self' ? customer.profile.title : '') ||
-              '',
-            city:
-              input.attendee.city ||
-              (input.purchaseFor === 'self' ? customer.profile.city : '') ||
-              '',
-          },
-        };
-        const releasedTicket = releaseSnapshot?.tickets?.find(
-          (ticket) => ticket.id === input.ticketTypeId,
-        );
-        const releasedForm = releaseSnapshot?.registrationForm;
-        if (
-          !releasedTicket ||
-          !releasedForm?.version ||
-          !releasedForm.termsVersion ||
-          !releasedForm.fields?.length
-        ) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前发布版本缺少票种或报名表配置，请重新发布大会',
-            HttpStatus.CONFLICT,
-          );
-        }
-        const releasedFormVersion = releasedForm.version;
-        const releasedFormFields = releasedForm.fields;
-        if (!releasedRegistration.registrationOpen) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前发布版本尚未开放报名',
-            HttpStatus.CONFLICT,
-          );
-        }
-        if (
-          releasedRegistration.paymentMode === 'free' &&
-          (releasedTicket.price ?? ticketRow.price) !== 0
-        ) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            '当前免费发布版本包含非零票价，请管理员重新发布大会',
-            HttpStatus.CONFLICT,
-          );
-        }
-        const attendeeEmail = checkoutInput.attendee.email.trim().toLowerCase();
-        const attendeeMobile = normalizeMainlandMobile(checkoutInput.attendee.mobile);
-        const prepareCheckout = async (excludedOrderId?: string) => {
-          let waitlistOffer: typeof waitlistEntries.$inferSelect | undefined;
-          if (checkoutInput.waitlistOfferToken) {
-            [waitlistOffer] = await tx
-              .select()
-              .from(waitlistEntries)
-              .where(
-                and(
-                  eq(
-                    waitlistEntries.offerTokenHash,
-                    this.tokenHash(checkoutInput.waitlistOfferToken),
-                  ),
-                  eq(waitlistEntries.eventId, input.eventId),
-                  eq(waitlistEntries.ticketTypeId, input.ticketTypeId),
-                  or(
-                    attendeeEmail ? eq(waitlistEntries.email, attendeeEmail) : undefined,
-                    eq(waitlistEntries.mobileE164, attendeeMobile),
-                  ),
-                  eq(waitlistEntries.status, 'invited'),
-                ),
-              )
-              .for('update')
-              .limit(1);
-            if (
-              !waitlistOffer ||
-              !waitlistOffer.expiresAt ||
-              waitlistOffer.expiresAt <= new Date()
-            ) {
-              throw new DomainError(
-                API_ERROR_CODES.INVALID_STATE_TRANSITION,
-                '候补购买资格无效或已经过期',
-                HttpStatus.CONFLICT,
-              );
-            }
-          }
-          const [form] = await tx
-            .select()
-            .from(registrationForms)
-            .where(
-              and(
-                eq(registrationForms.eventId, input.eventId),
-                eq(registrationForms.version, releasedFormVersion),
-              ),
-            )
-            .limit(1);
-          if (
-            checkoutInput.formVersion !== releasedFormVersion ||
-            checkoutInput.termsVersion !== releasedForm.termsVersion ||
-            (!releasedForm.termsContent && !form?.termsContent)
-          ) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名表或服务条款版本已经更新，请刷新页面后重新确认',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const formAnswers = this.normalizeRegistrationAnswers(releasedFormFields, checkoutInput);
-          const [reservationCount] = await tx
-            .select({
-              quantity: sql<number>`coalesce(sum(${inventoryReservations.quantity}), 0)::int`,
-            })
-            .from(inventoryReservations)
-            .where(
-              and(
-                eq(inventoryReservations.ticketTypeId, ticketRow.id),
-                isNull(inventoryReservations.convertedAt),
-                isNull(inventoryReservations.releasedAt),
-                activeInventoryReservationAt(new Date()),
-                excludedOrderId
-                  ? sql`${inventoryReservations.orderId} <> ${excludedOrderId}`
-                  : undefined,
-              ),
-            );
-          const [waitlistHoldCount] = await tx
-            .select({ quantity: count() })
-            .from(waitlistEntries)
-            .where(
-              and(
-                eq(waitlistEntries.ticketTypeId, ticketRow.id),
-                eq(waitlistEntries.status, 'invited'),
-                gt(waitlistEntries.expiresAt, new Date()),
-              ),
-            );
-          const available =
-            effectiveReleasedCapacity(releasedTicket, ticketRow.capacity) -
-            ticketRow.sold -
-            (reservationCount?.quantity ?? 0) -
-            Number(waitlistHoldCount?.quantity ?? 0) +
-            (waitlistOffer ? 1 : 0);
-          if (available < 1) {
-            throw new DomainError(
-              API_ERROR_CODES.INVENTORY_UNAVAILABLE,
-              '所选票种暂时无可用名额',
-              HttpStatus.CONFLICT,
-            );
-          }
-          return { waitlistOffer, form, formAnswers, available };
-        };
-        const existingRegistrations = await tx
-          .select()
-          .from(registrations)
-          .where(
-            and(
-              eq(registrations.eventId, input.eventId),
-              isNull(registrations.supersededAt),
-              input.purchaseFor === 'self'
-                ? or(
-                    eq(registrations.customerUserId, customer.customerUserId),
-                    eq(registrations.attendeeMobileE164, attendeeMobile),
-                  )
-                : eq(registrations.attendeeMobileE164, attendeeMobile),
-            ),
-          );
-        if (existingRegistrations.length > 1) {
-          throw new DomainError(
-            API_ERROR_CODES.REGISTRATION_IDENTITY_CONFLICT,
-            '该报名身份存在多条历史记录，请联系大会管理员处理',
-            HttpStatus.CONFLICT,
-          );
-        }
-        let existingRegistration = existingRegistrations[0];
-        if (existingRegistration) {
-          const [observedExistingOrder] = await tx
-            .select({ id: orders.id })
-            .from(orders)
-            .where(eq(orders.registrationId, existingRegistration.id))
-            .limit(1);
-          if (observedExistingOrder) {
-            await tx.execute(
-              sql`select pg_advisory_xact_lock(hashtextextended(${`wechatpay:prepare:${observedExistingOrder.id}`}, 0))`,
-            );
-          }
-          const [existingOrder] = await tx
-            .select()
-            .from(orders)
-            .where(
-              and(
-                eq(orders.registrationId, existingRegistration.id),
-                observedExistingOrder ? eq(orders.id, observedExistingOrder.id) : undefined,
-              ),
-            )
-            .for('update')
-            .limit(1);
-          const [lockedExistingRegistration] = await tx
-            .select()
-            .from(registrations)
-            .where(
-              and(
-                eq(registrations.id, existingRegistration.id),
-                isNull(registrations.supersededAt),
-              ),
-            )
-            .for('update')
-            .limit(1);
-          if (!lockedExistingRegistration) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名记录已发生变化，请重新提交',
-              HttpStatus.CONFLICT,
-            );
-          }
-          existingRegistration = lockedExistingRegistration;
-          const existingIdentityStillMatches =
-            input.purchaseFor === 'self'
-              ? existingRegistration.customerUserId === customer.customerUserId ||
-                existingRegistration.attendeeMobileE164 === attendeeMobile
-              : existingRegistration.attendeeMobileE164 === attendeeMobile;
-          if (!existingIdentityStillMatches) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名身份已发生变化，请重新提交',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const [existingTicketType] = await tx
-            .select()
-            .from(ticketTypes)
-            .where(eq(ticketTypes.id, existingRegistration.ticketTypeId))
-            .limit(1);
-          const [existingTicket] = await tx
-            .select()
-            .from(tickets)
-            .where(eq(tickets.registrationId, existingRegistration.id))
-            .limit(1);
-          if (!existingOrder || !existingTicketType) {
-            throw new DomainError(
-              API_ERROR_CODES.INVALID_STATE_TRANSITION,
-              '报名记录缺少订单或票种，请联系大会管理员处理',
-              HttpStatus.CONFLICT,
-            );
-          }
-          const canManageExistingOrder = customerCanManageOrder(
-            existingOrder.purchaserCustomerUserId,
-            existingOrder.purchaseIntentId,
-            existingRegistration.customerUserId,
-            customer.customerUserId,
-          );
-          if (!canManageExistingOrder) {
-            throw new DomainError(
-              API_ERROR_CODES.REGISTRATION_IDENTITY_CONFLICT,
-              '该参会人已有报名或订单归属其他购票人',
-              HttpStatus.CONFLICT,
-            );
-          }
-          if (input.purchaseFor === 'self' && !existingRegistration.customerUserId) {
-            await tx
-              .update(registrations)
-              .set({ customerUserId: customer.customerUserId, updatedAt: new Date() })
-              .where(eq(registrations.id, existingRegistration.id));
-          }
-          let currentRegistration = existingRegistration;
-          let currentOrder = existingOrder;
-          let currentTicketType = existingTicketType;
-          let currentTicket = existingTicket;
-          let currentTicketTypeResult = this.ticketFromRow(existingTicketType);
-          const shouldResume =
-            existingOrder.status === 'closed' ||
-            (existingOrder.status === 'pending_payment' && existingOrder.expiresAt <= new Date());
-          if (shouldResume) {
-            if (existingTicket) {
-              throw new DomainError(
-                API_ERROR_CODES.INVALID_STATE_TRANSITION,
-                '该报名已经签发电子票，请在个人中心查看订单',
-                HttpStatus.CONFLICT,
-              );
-            }
-            const otherPurchaserOrders = await tx
-              .select({
-                orderNo: orders.orderNo,
-                status: orders.status,
-                expiresAt: orders.expiresAt,
-                hasActivePayment: sql<boolean>`exists (
-                  select 1 from ${payments}
-                  where ${payments.orderId} = ${orders.id}
-                    and ${payments.provider} = 'wechatpay'
-                    and ${inArray(payments.status, [...ACTIVE_WECHAT_PAYMENT_STATUSES])}
-                )`,
-              })
-              .from(orders)
-              .where(
-                and(
-                  eq(orders.organizationId, ticketRow.organizationId),
-                  eq(orders.eventId, input.eventId),
-                  eq(orders.purchaserCustomerUserId, customer.customerUserId),
-                  sql`${orders.id} <> ${existingOrder.id}`,
-                  inArray(orders.status, [
-                    'pending_review',
-                    'pending_payment',
-                    'processing',
-                    'paid',
-                    'partially_refunded',
-                  ]),
-                ),
-              )
-              .for('update');
-            const purchaserEvaluationAt = new Date();
-            const activeOtherPurchaserOrders = otherPurchaserOrders.filter(
-              (item) =>
-                item.status !== 'pending_payment' ||
-                item.expiresAt > purchaserEvaluationAt ||
-                item.hasActivePayment,
-            );
-            const otherPendingOrder = activeOtherPurchaserOrders.find((item) =>
-              ['pending_review', 'pending_payment', 'processing'].includes(item.status),
-            );
-            if (otherPendingOrder) {
-              throw new DomainError(
-                API_ERROR_CODES.INVALID_STATE_TRANSITION,
-                `您已有待处理订单 ${otherPendingOrder.orderNo}，请先完成或关闭原订单`,
-                HttpStatus.CONFLICT,
-              );
-            }
-            if (
-              activeOtherPurchaserOrders.length >= releasedRegistration.maxActiveSeatsPerPurchaser
-            ) {
-              throw new DomainError(
-                API_ERROR_CODES.INVALID_STATE_TRANSITION,
-                `本场大会每位购票人最多可持有 ${releasedRegistration.maxActiveSeatsPerPurchaser} 个有效名额`,
-                HttpStatus.CONFLICT,
-              );
-            }
-            const [activePayment] = await tx
-              .select({ id: payments.id })
-              .from(payments)
-              .where(
-                and(
-                  eq(payments.orderId, existingOrder.id),
-                  inArray(payments.status, [...ACTIVE_WECHAT_PAYMENT_STATUSES]),
-                ),
-              )
-              .limit(1);
-            if (activePayment) {
-              throw new DomainError(
-                API_ERROR_CODES.INVALID_STATE_TRANSITION,
-                '支付结果正在确认中，请稍后刷新订单状态',
-                HttpStatus.CONFLICT,
-              );
-            }
-            const { waitlistOffer, form, formAnswers, available } = await prepareCheckout(
-              existingOrder.id,
-            );
-            const resumedAt = new Date();
-            const expiresAt = new Date(
-              resumedAt.getTime() + (manualReview ? 30 * 24 * 60 * 60_000 : 15 * 60_000),
-            );
-            let resumedAttendeeClaimToken: string | undefined;
-            await tx
-              .update(orderAccessTokens)
-              .set({ revokedAt: resumedAt })
-              .where(
-                and(
-                  eq(orderAccessTokens.orderId, existingOrder.id),
-                  isNull(orderAccessTokens.revokedAt),
-                ),
-              );
-            if (input.purchaseFor === 'other' && existingRegistration.customerUserId === null) {
-              await tx
-                .update(attendeeClaimTokens)
-                .set({ revokedAt: resumedAt })
-                .where(
-                  and(
-                    eq(attendeeClaimTokens.registrationId, existingRegistration.id),
-                    isNull(attendeeClaimTokens.consumedAt),
-                    isNull(attendeeClaimTokens.revokedAt),
-                  ),
-                );
-              resumedAttendeeClaimToken = randomBytes(32).toString('base64url');
-              await tx.insert(attendeeClaimTokens).values({
-                registrationId: existingRegistration.id,
-                tokenHash: this.tokenHash(resumedAttendeeClaimToken),
-                mobileDigest: this.tokenHash(attendeeMobile),
-                expiresAt: new Date(resumedAt.getTime() + 30 * 24 * 60 * 60_000),
-              });
-            }
-            const amount =
-              releasedRegistration.paymentMode === 'free'
-                ? 0
-                : (releasedTicket.price ?? ticketRow.price);
-            const freeCheckout = amount === 0;
-            const registrationStatus = manualReview
-              ? ('pending_review' as const)
-              : freeCheckout
-                ? ('confirmed' as const)
-                : ('pending_payment' as const);
-            const orderStatus = manualReview
-              ? ('pending_review' as const)
-              : freeCheckout
-                ? ('paid' as const)
-                : ('pending_payment' as const);
-            await tx
-              .update(inventoryReservations)
-              .set({ releasedAt: resumedAt, updatedAt: resumedAt })
-              .where(
-                and(
-                  eq(inventoryReservations.orderId, existingOrder.id),
-                  isNull(inventoryReservations.convertedAt),
-                  isNull(inventoryReservations.releasedAt),
-                ),
-              );
-            const [updatedRegistration] = await tx
-              .update(registrations)
-              .set({
-                ticketTypeId: ticketRow.id,
-                customerUserId:
-                  input.purchaseFor === 'self'
-                    ? customer.customerUserId
-                    : existingRegistration.customerUserId,
-                status: registrationStatus,
-                attendee: checkoutInput.attendee,
-                attendeeMobileE164: attendeeMobile,
-                attendeeEmailNormalized: attendeeEmail,
-                invoiceRequired: false,
-                marketingConsent: checkoutInput.marketingConsent,
-                formVersion: checkoutInput.formVersion,
-                termsVersion: checkoutInput.termsVersion,
-                formAnswers,
-                consentSnapshot: {
-                  termsAccepted: checkoutInput.termsAccepted,
-                  marketingConsent: checkoutInput.marketingConsent,
-                  purchaseFor: input.purchaseFor,
-                  proxyAuthorizationAccepted: input.proxyAuthorizationAccepted,
-                  ...(checkoutInput.termsAccepted || checkoutInput.marketingConsent
-                    ? { acceptedAt: resumedAt.toISOString() }
-                    : {}),
-                  termsContent: releasedForm.termsContent ?? form!.termsContent,
-                  fieldDefinitions: releasedForm.fields,
-                },
-                updatedAt: resumedAt,
-              })
-              .where(eq(registrations.id, existingRegistration.id))
-              .returning();
-            if (!updatedRegistration) throw new Error('恢复报名记录失败');
-            currentRegistration = updatedRegistration;
-            const [updatedOrder] = await tx
-              .update(orders)
-              .set({
-                status: orderStatus,
-                amount,
-                currency: releasedRegistration.currency,
-                pricingSnapshot: {
-                  ticketTypeId: ticketRow.id,
-                  name: releasedTicket.name ?? ticketRow.name,
-                  amount,
-                  currency: releasedRegistration.currency,
-                  paymentMode: releasedRegistration.paymentMode,
-                  releaseId: eventSettings.currentReleaseId,
-                  purchaseRequestHash: requestHash,
-                },
-                purchaserCustomerUserId: customer.customerUserId,
-                purchaserSnapshot: {
-                  customerUserId: customer.customerUserId,
-                  mobile: normalizedLoginMobile,
-                  name: customer.profile.realName || customer.profile.nickname || '',
-                  email: customer.profile.email || '',
-                  company: customer.profile.company || '',
-                  title: customer.profile.title || '',
-                  city: customer.profile.city || '',
-                },
-                purchaseIntentId: input.purchaseIntentId,
-                expiresAt,
-                updatedAt: resumedAt,
-              })
-              .where(eq(orders.id, existingOrder.id))
-              .returning();
-            if (!updatedOrder) throw new Error('恢复报名订单失败');
-            currentOrder = updatedOrder;
-            await tx.insert(inventoryReservations).values({
-              eventId: input.eventId,
-              ticketTypeId: ticketRow.id,
-              orderId: existingOrder.id,
-              quantity: 1,
-              expiresAt,
-              ...(freeCheckout && !manualReview ? { convertedAt: resumedAt } : {}),
-            });
-            if (freeCheckout && !manualReview) {
-              await tx
-                .update(ticketTypes)
-                .set({ sold: sql`${ticketTypes.sold} + 1`, updatedAt: resumedAt })
-                .where(eq(ticketTypes.id, ticketRow.id));
-              await tx.insert(payments).values({
-                orderId: existingOrder.id,
-                provider: 'free',
-                externalId: `free:${existingOrder.id}`,
-                status: 'succeeded',
-                succeededAt: resumedAt,
-                amount: 0,
-                currency: releasedRegistration.currency,
-                payload: {
-                  source: 'registration-resume',
-                  releaseId: eventSettings.currentReleaseId,
-                },
-              });
-              [currentTicket] = await tx
-                .insert(tickets)
-                .values({
-                  eventId: input.eventId,
-                  registrationId: existingRegistration.id,
-                  ticketTypeId: ticketRow.id,
-                  code: createTicketCode(),
-                })
-                .returning();
-            }
-            await tx.insert(orderStateLogs).values({
-              orderId: existingOrder.id,
-              fromStatus: existingOrder.status,
-              toStatus: orderStatus,
-              reason: freeCheckout && !manualReview ? '订单恢复后自动完成' : '用户重新发起报名支付',
-              metadata: {
-                source: 'registration-resume',
-                releaseId: eventSettings.currentReleaseId,
-                previousExpiresAt: existingOrder.expiresAt.toISOString(),
-              },
-            });
-            if (resumedAttendeeClaimToken) {
-              await tx.insert(outboxEvents).values({
-                organizationId: ticketRow.organizationId,
-                eventId: input.eventId,
-                eventType: 'AttendeeClaimInvitationRequested',
-                correlationId: `attendee-claim:${existingRegistration.id}:${input.purchaseIntentId}`,
-                payload: {
-                  registrationId: existingRegistration.id,
-                  recipientRole: 'attendee',
-                  recipient: checkoutInput.attendee.email || checkoutInput.attendee.mobile,
-                  sealedAttendeeClaimToken: this.sealNotificationSecret(resumedAttendeeClaimToken),
-                },
-              });
-            }
-            if (waitlistOffer) {
-              await tx
-                .update(waitlistEntries)
-                .set({ status: 'claimed', claimedAt: resumedAt, updatedAt: resumedAt })
-                .where(eq(waitlistEntries.id, waitlistOffer.id));
-              await tx.insert(outboxEvents).values({
-                organizationId: ticketRow.organizationId,
-                eventId: input.eventId,
-                eventType: 'WaitlistOfferClaimed',
-                correlationId: `waitlist:claimed:${waitlistOffer.id}`,
-                payload: {
-                  waitlistEntryId: waitlistOffer.id,
-                  registrationId: existingRegistration.id,
-                  orderId: existingOrder.id,
-                },
-              });
-            }
-            await tx
-              .update(customerUsers)
-              .set({ lastRegistrationAt: resumedAt, updatedAt: resumedAt })
-              .where(
-                and(
-                  eq(customerUsers.id, customer.customerUserId),
-                  eq(customerUsers.organizationId, ticketRow.organizationId),
-                ),
-              );
-            currentTicketType = ticketRow;
-            currentTicketTypeResult = {
-              ...this.ticketFromRow(ticketRow),
-              name: releasedTicket.name ?? ticketRow.name,
-              description: releasedTicket.description ?? ticketRow.description,
-              price: releasedTicket.price ?? ticketRow.price,
-              currency: releasedTicket.currency ?? ticketRow.currency,
-              benefits: releasedTicket.benefits ?? ticketRow.benefits,
-              recommended: releasedTicket.recommended ?? ticketRow.recommended,
-              remaining: available - 1,
-            };
-          }
-          return returnExistingCheckout(
-            currentRegistration,
-            currentOrder,
-            currentTicketType,
-            currentTicket,
-            releaseSnapshot?.event?.name ?? eventRow.name,
-            currentTicketTypeResult,
-          );
-        }
-        const purchaserOrders = await tx
-          .select({
-            orderNo: orders.orderNo,
-            status: orders.status,
-            expiresAt: orders.expiresAt,
-            hasActivePayment: sql<boolean>`exists (
-              select 1 from ${payments}
-              where ${payments.orderId} = ${orders.id}
-                and ${payments.provider} = 'wechatpay'
-                and ${inArray(payments.status, [...ACTIVE_WECHAT_PAYMENT_STATUSES])}
-            )`,
-          })
-          .from(orders)
-          .where(
-            and(
-              eq(orders.organizationId, ticketRow.organizationId),
-              eq(orders.eventId, input.eventId),
-              eq(orders.purchaserCustomerUserId, customer.customerUserId),
-              inArray(orders.status, [
-                'pending_review',
-                'pending_payment',
-                'processing',
-                'paid',
-                'partially_refunded',
-              ]),
-            ),
-          )
-          .for('update');
-        const purchaserEvaluationAt = new Date();
-        const activePurchaserOrders = purchaserOrders.filter(
-          (item) =>
-            item.status !== 'pending_payment' ||
-            item.expiresAt > purchaserEvaluationAt ||
-            item.hasActivePayment,
-        );
-        const pendingPurchaserOrder = activePurchaserOrders.find((item) =>
-          ['pending_review', 'pending_payment', 'processing'].includes(item.status),
-        );
-        if (pendingPurchaserOrder) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            `您已有待处理订单 ${pendingPurchaserOrder.orderNo}，请先完成或关闭原订单`,
-            HttpStatus.CONFLICT,
-          );
-        }
-        if (activePurchaserOrders.length >= releasedRegistration.maxActiveSeatsPerPurchaser) {
-          throw new DomainError(
-            API_ERROR_CODES.INVALID_STATE_TRANSITION,
-            `本场大会每位购票人最多可持有 ${releasedRegistration.maxActiveSeatsPerPurchaser} 个有效名额`,
-            HttpStatus.CONFLICT,
-          );
-        }
-        const { waitlistOffer, form, formAnswers, available } = await prepareCheckout();
-
-        const now = new Date();
-        const expiresAt = new Date(
-          now.getTime() + (manualReview ? 30 * 24 * 60 * 60_000 : 15 * 60_000),
-        );
-        const orderAmount =
-          releasedRegistration.paymentMode === 'free'
-            ? 0
-            : (releasedTicket.price ?? ticketRow.price);
-        const freeCheckout = orderAmount === 0;
-        const [registrationRow] = await tx
-          .insert(registrations)
-          .values({
-            organizationId: ticketRow.organizationId,
-            eventId: checkoutInput.eventId,
-            ticketTypeId: ticketRow.id,
-            customerUserId: input.purchaseFor === 'self' ? customer.customerUserId : null,
-            registrationCode: `TOK-R-${nanoid(8).toUpperCase()}`,
-            status: manualReview
-              ? 'pending_review'
-              : freeCheckout
-                ? 'confirmed'
-                : 'pending_payment',
-            attendee: checkoutInput.attendee,
-            attendeeMobileE164: attendeeMobile,
-            attendeeEmailNormalized: attendeeEmail,
-            invoiceRequired: false,
-            marketingConsent: checkoutInput.marketingConsent,
-            formVersion: checkoutInput.formVersion,
-            termsVersion: checkoutInput.termsVersion,
-            formAnswers,
-            consentSnapshot: {
-              termsAccepted: checkoutInput.termsAccepted,
-              marketingConsent: checkoutInput.marketingConsent,
-              purchaseFor: input.purchaseFor,
-              proxyAuthorizationAccepted: input.proxyAuthorizationAccepted,
-              ...(checkoutInput.termsAccepted || checkoutInput.marketingConsent
-                ? { acceptedAt: now.toISOString() }
-                : {}),
-              termsContent: releasedForm.termsContent ?? form!.termsContent,
-              fieldDefinitions: releasedForm.fields,
-            },
-          })
-          .returning();
-        const [orderRow] = await tx
-          .insert(orders)
-          .values({
-            organizationId: ticketRow.organizationId,
-            eventId: input.eventId,
-            registrationId: registrationRow!.id,
-            orderNo: `TOK${now.getFullYear()}${nanoid(10).toUpperCase()}`,
-            status: manualReview ? 'pending_review' : freeCheckout ? 'paid' : 'pending_payment',
-            amount: orderAmount,
-            currency: releasedRegistration.currency,
-            pricingSnapshot: {
-              ticketTypeId: ticketRow.id,
-              name: releasedTicket.name ?? ticketRow.name,
-              amount: orderAmount,
-              currency: releasedRegistration.currency,
-              paymentMode: releasedRegistration.paymentMode,
-              releaseId: eventSettings.currentReleaseId,
-              purchaseRequestHash: requestHash,
-            },
-            purchaserCustomerUserId: customer.customerUserId,
-            purchaserSnapshot: {
-              customerUserId: customer.customerUserId,
-              mobile: normalizedLoginMobile,
-              name: customer.profile.realName || customer.profile.nickname || '',
-              email: customer.profile.email || '',
-              company: customer.profile.company || '',
-              title: customer.profile.title || '',
-              city: customer.profile.city || '',
-            },
-            purchaseIntentId: input.purchaseIntentId,
-            expiresAt,
-          })
-          .returning();
-        let attendeeClaimToken: string | undefined;
-        if (input.purchaseFor === 'other') {
-          attendeeClaimToken = randomBytes(32).toString('base64url');
-          await tx.insert(attendeeClaimTokens).values({
-            registrationId: registrationRow!.id,
-            tokenHash: this.tokenHash(attendeeClaimToken),
-            mobileDigest: this.tokenHash(attendeeMobile),
-            expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60_000),
-          });
-        }
-        await tx.insert(inventoryReservations).values({
-          eventId: input.eventId,
-          ticketTypeId: ticketRow.id,
-          orderId: orderRow!.id,
-          quantity: 1,
-          expiresAt,
-          ...(freeCheckout && !manualReview ? { convertedAt: now } : {}),
-        });
-        let issuedTicketRow: typeof tickets.$inferSelect | undefined;
-        if (freeCheckout && !manualReview) {
-          await tx
-            .update(ticketTypes)
-            .set({ sold: sql`${ticketTypes.sold} + 1`, updatedAt: now })
-            .where(eq(ticketTypes.id, ticketRow.id));
-          await tx.insert(payments).values({
-            orderId: orderRow!.id,
-            provider: 'free',
-            externalId: `free:${orderRow!.id}`,
-            status: 'succeeded',
-            succeededAt: now,
-            amount: 0,
-            currency: releasedRegistration.currency,
-            payload: {
-              paymentMode: releasedRegistration.paymentMode,
-              releaseId: eventSettings.currentReleaseId,
-            },
-          });
-          [issuedTicketRow] = await tx
-            .insert(tickets)
-            .values({
-              eventId: input.eventId,
-              registrationId: registrationRow!.id,
-              ticketTypeId: ticketRow.id,
-              code: createTicketCode(),
-            })
-            .returning();
-          await tx.insert(orderStateLogs).values({
-            orderId: orderRow!.id,
-            fromStatus: null,
-            toStatus: 'paid',
-            reason: '零元订单创建后自动完成',
-            metadata: {
-              paymentProvider: 'free',
-              releaseId: eventSettings.currentReleaseId,
-            },
-          });
-        }
-        if (waitlistOffer) {
-          await tx
-            .update(waitlistEntries)
-            .set({ status: 'claimed', claimedAt: now, updatedAt: now })
-            .where(eq(waitlistEntries.id, waitlistOffer.id));
-          await tx.insert(outboxEvents).values({
-            organizationId: ticketRow.organizationId,
-            eventId: input.eventId,
-            eventType: 'WaitlistOfferClaimed',
-            correlationId: `waitlist:claimed:${waitlistOffer.id}`,
-            payload: {
-              waitlistEntryId: waitlistOffer.id,
-              registrationId: registrationRow!.id,
-              orderId: orderRow!.id,
-            },
-          });
-        }
-        if (customer) {
-          await tx
-            .update(customerUsers)
-            .set({
-              lastRegistrationAt: sql`greatest(
-              coalesce(${customerUsers.lastRegistrationAt}, '-infinity'::timestamptz),
-              ${now}
-            )`,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(customerUsers.id, customer.customerUserId),
-                eq(customerUsers.organizationId, ticketRow.organizationId),
-              ),
-            );
-        }
-
-        const ticketType = {
-          ...this.ticketFromRow(ticketRow),
-          name: releasedTicket.name ?? ticketRow.name,
-          description: releasedTicket.description ?? ticketRow.description,
-          price: releasedTicket.price ?? ticketRow.price,
-          currency: releasedTicket.currency ?? ticketRow.currency,
-          benefits: releasedTicket.benefits ?? ticketRow.benefits,
-          recommended: releasedTicket.recommended ?? ticketRow.recommended,
-          remaining: available - 1,
-        };
-        const registration: Registration = {
-          id: registrationRow!.id,
-          eventId: registrationRow!.eventId,
-          registrationCode: registrationRow!.registrationCode,
-          status: registrationRow!.status,
-          attendee: registrationRow!.attendee,
-          ticketType,
-          formAnswers: registrationRow!.formAnswers,
-          createdAt: registrationRow!.createdAt.toISOString(),
-        };
-        const order: Order = {
-          id: orderRow!.id,
-          orderNo: orderRow!.orderNo,
-          registrationId: registration.id,
-          status: orderRow!.status,
-          amount: orderRow!.amount,
-          currency: orderRow!.currency,
-          paymentMethod: orderRow!.amount === 0 ? 'free' : 'wechat',
-          ...(!freeCheckout && !manualReview ? { paymentUrl: `/order/${orderRow!.id}` } : {}),
-          expiresAt: orderRow!.expiresAt.toISOString(),
-          createdAt: orderRow!.createdAt.toISOString(),
-        };
-        const issuedTicket: Ticket | undefined = issuedTicketRow
-          ? {
-              id: issuedTicketRow.id,
-              code: issuedTicketRow.code,
-              registrationId: issuedTicketRow.registrationId,
-              eventName: releaseSnapshot?.event?.name ?? eventRow.name,
-              attendeeName: registration.attendee.name,
-              ticketTypeName: ticketType.name,
-              qrPayload: `conference:${issuedTicketRow.eventId}:${issuedTicketRow.code}`,
-              status: issuedTicketRow.status,
-              issuedAt: issuedTicketRow.issuedAt.toISOString(),
-            }
-          : undefined;
-        const orderAccessToken = randomBytes(32).toString('base64url');
-        const orderAccessExpiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60_000);
-        await tx.insert(orderAccessTokens).values({
-          orderId: order.id,
-          tokenHash: this.tokenHash(orderAccessToken),
-          scopes: ['order:read', ...(!customer ? ['registration:claim'] : [])],
-          expiresAt: orderAccessExpiresAt,
-        });
-        const response: RegistrationCheckout = {
-          isProxyPurchase: input.purchaseFor === 'other',
-          registration,
-          order,
-          orderAccessToken,
-          ...(input.purchaseFor === 'self' && issuedTicket ? { ticket: issuedTicket } : {}),
-        };
-
-        await tx.insert(outboxEvents).values([
-          {
-            organizationId: ticketRow.organizationId,
-            eventId: input.eventId,
-            eventType: 'RegistrationSubmitted',
-            correlationId: idempotencyKey,
-            payload: {
-              registrationId: registration.id,
-              orderId: order.id,
-              recipient: customer.profile.email || normalizedLoginMobile,
-              recipientRole: 'purchaser',
-              expiresAt: orderAccessExpiresAt.toISOString(),
-            },
-          },
-          ...(attendeeClaimToken
-            ? [
-                {
-                  organizationId: ticketRow.organizationId,
-                  eventId: input.eventId,
-                  eventType: 'AttendeeClaimInvitationRequested',
-                  correlationId: `attendee-claim:${registration.id}`,
-                  payload: {
-                    registrationId: registration.id,
-                    recipientRole: 'attendee',
-                    recipient: registration.attendee.email || registration.attendee.mobile,
-                    sealedAttendeeClaimToken: this.sealNotificationSecret(attendeeClaimToken),
-                  },
-                },
-              ]
-            : []),
-          ...(manualReview
-            ? [
-                {
-                  organizationId: ticketRow.organizationId,
-                  eventId: input.eventId,
-                  eventType: 'RegistrationReviewRequested',
-                  correlationId: `registration:review-requested:${registration.id}`,
-                  payload: { registrationId: registration.id, orderId: order.id },
-                },
-              ]
-            : []),
-          ...(issuedTicket
-            ? [
-                {
-                  organizationId: ticketRow.organizationId,
-                  eventId: input.eventId,
-                  eventType: 'FreeOrderCompleted',
-                  correlationId: idempotencyKey,
-                  payload: { registrationId: registration.id, orderId: order.id },
-                },
-                {
-                  organizationId: ticketRow.organizationId,
-                  eventId: input.eventId,
-                  eventType: 'TicketIssued',
-                  correlationId: idempotencyKey,
-                  payload: {
-                    ticketId: issuedTicket.id,
-                    registrationId: registration.id,
-                  },
-                },
-              ]
-            : []),
-        ]);
-        await tx.insert(auditLogs).values({
-          organizationId: ticketRow.organizationId,
-          eventId: input.eventId,
-          actorId: customer?.customerUserId,
-          actorType: customer ? 'customer' : 'anonymous',
-          action: 'registration.create',
-          resourceType: 'registration',
-          resourceId: registration.id,
-          after: {
-            registrationCode: registration.registrationCode,
-            status: registration.status,
-            orderId: order.id,
-            orderStatus: order.status,
-            ticketId: issuedTicket?.id ?? null,
-          },
-          traceId: idempotencyKey,
-        });
-        await tx.insert(idempotencyKeys).values({
-          scope: 'registration:create',
-          key: idempotencyKey,
-          requestHash,
-          responseCode: 201,
-          responseBody: {
-            registration: response.registration,
-            order: response.order,
-            ...(response.ticket ? { ticket: response.ticket } : {}),
-          },
-          expiresAt: new Date(now.getTime() + 24 * 60 * 60_000),
-        });
-        return response;
-      }),
-    ).catch(async (error: unknown) => {
-      if (postgresErrorCode(error) !== '23503') throw error;
-      const [activeCustomer] = await db
-        .select({ id: customerUsers.id })
-        .from(customerUsers)
-        .where(
-          and(
-            eq(customerUsers.id, customer.customerUserId),
-            eq(customerUsers.organizationId, customer.organizationId),
-            eq(customerUsers.status, 'active'),
-          ),
-        )
-        .limit(1);
-      if (!activeCustomer) {
-        throw new DomainError(
-          API_ERROR_CODES.UNAUTHORIZED,
-          '用户会话已经失效，请重新登录',
-          HttpStatus.UNAUTHORIZED,
-        );
-      }
-      throw new DomainError(
-        API_ERROR_CODES.INVALID_STATE_TRANSITION,
-        '购票人账号状态已变化，请重新提交',
-        HttpStatus.CONFLICT,
-      );
-    });
+    return new BatchRegistrationService(
+      this.database,
+      new OrderItemsService(this.database),
+    ).createSingle(input, idempotencyKey, customer, referralContext);
   }
 
   async confirmMockPayment(orderId: string, idempotencyKey: string): Promise<PaymentCompletion> {
@@ -3768,8 +2286,8 @@ export class ConferenceRepository {
 
     const db = this.database.db;
     if (!db) {
-      const registration = this.memory.registrations.get(order.registrationId);
-      const customerUserId = this.memoryRegistrationCustomers.get(order.registrationId);
+      const registration = this.memory.registrations.get(singleRegistrationId(order));
+      const customerUserId = this.memoryRegistrationCustomers.get(singleRegistrationId(order));
       if (!registration || !customerUserId) return false;
       try {
         return allowed.has(normalizeMainlandMobile(registration.attendee.mobile));
@@ -3778,6 +2296,10 @@ export class ConferenceRepository {
       }
     }
 
+    if (order.modelVersion === 2) {
+      const [buyer] = await db.select({ mobile: customerUsers.mobileE164 }).from(customerUsers).where(and(eq(customerUsers.id, sql`(select purchaser_customer_user_id from orders where id = ${order.id})`), eq(customerUsers.status, 'active'))).limit(1);
+      return Boolean(buyer && allowed.has(buyer.mobile));
+    }
     const [owner] = await db
       .select({
         attendeeMobileE164: registrations.attendeeMobileE164,
@@ -3828,6 +2350,10 @@ export class ConferenceRepository {
     idempotencyKey: string,
     confirmation: PaymentConfirmation,
   ): Promise<PaymentCompletion> {
+    if (this.database.db) {
+      const [current] = await this.database.db.select({ modelVersion: orders.modelVersion }).from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (current?.modelVersion === 2) return new BatchPaymentService(new OrderItemsService(this.database)).confirm(orderId, confirmation);
+    }
     const requestHash = this.hash({
       orderId,
       provider: confirmation.provider,
@@ -3855,7 +2381,7 @@ export class ConferenceRepository {
       if (!current) {
         throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单不存在', HttpStatus.NOT_FOUND);
       }
-      const registration = this.memory.registrations.get(current.registrationId)!;
+      const registration = this.memory.registrations.get(singleRegistrationId(current))!;
       if (registration.status === 'pending_review') {
         throw new DomainError(
           API_ERROR_CODES.INVALID_STATE_TRANSITION,
@@ -4004,6 +2530,7 @@ export class ConferenceRepository {
             HttpStatus.CONFLICT,
           );
         }
+        if (!orderRow.registrationId) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION, '订单报名关系需要核验', HttpStatus.CONFLICT);
         const [registrationRow] = await tx
           .select()
           .from(registrations)
@@ -4147,6 +2674,7 @@ export class ConferenceRepository {
                   ),
                 )
                 .limit(1);
+        let settledPaymentId = preparedPayment?.id;
         if (preparedPayment) {
           await tx
             .update(payments)
@@ -4162,8 +2690,10 @@ export class ConferenceRepository {
             })
             .where(eq(payments.id, preparedPayment.id));
         } else {
-          await tx.insert(payments).values({
+          const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderRow.id);
+          const [receivedPayment] = await tx.insert(payments).values({
             orderId: orderRow.id,
+            partnerAttributionRevisionId,
             provider: confirmation.provider,
             externalId: confirmation.externalId,
             status: 'succeeded',
@@ -4173,8 +2703,11 @@ export class ConferenceRepository {
             outTradeNo,
             wechatTradeState: confirmation.provider === 'wechatpay' ? 'SUCCESS' : null,
             payload: confirmation.payload,
-          });
+          }).returning({ id: payments.id });
+          settledPaymentId = receivedPayment!.id;
         }
+        await tx.update(orders).set({ settledPaymentId }).where(eq(orders.id, orderRow.id));
+        await syncLegacyOrderItemState(tx, orderRow, 'active', now);
         const [ticketRow] = await tx
           .insert(tickets)
           .values({
@@ -4343,7 +2876,7 @@ export class ConferenceRepository {
           HttpStatus.UNAUTHORIZED,
         );
       }
-      const registrationCustomerUserId = this.memoryRegistrationCustomers.get(order.registrationId);
+      const registrationCustomerUserId = this.memoryRegistrationCustomers.get(singleRegistrationId(order));
       const purchaserCustomerUserId = this.memoryOrderPurchasers.get(order.id)?.customerUserId;
       return {
         ...order,
@@ -4358,16 +2891,16 @@ export class ConferenceRepository {
       : eq(orders.orderNo, identifier);
     const [row] = await db.select().from(orders).where(condition).limit(1);
     if (!row) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单不存在', HttpStatus.NOT_FOUND);
-    const [activeRegistration] = await db
+    const [activeRegistration] = row.registrationId ? await db
       .select({
         id: registrations.id,
         customerUserId: registrations.customerUserId,
         consentSnapshot: registrations.consentSnapshot,
       })
       .from(registrations)
-      .where(and(eq(registrations.id, row.registrationId), isNull(registrations.supersededAt)))
-      .limit(1);
-    if (!activeRegistration) {
+      .where(eq(registrations.id, row.registrationId))
+      .limit(1) : [];
+    if (row.modelVersion === 1 && !activeRegistration) {
       throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单不存在', HttpStatus.NOT_FOUND);
     }
     const [token] = await db
@@ -4415,8 +2948,11 @@ export class ConferenceRepository {
         : undefined;
     return {
       id: row.id,
+      modelVersion: row.modelVersion,
+      quantity: row.quantity,
+      version: row.version,
       isProxyPurchase:
-        activeRegistration.consentSnapshot.purchaseFor === 'other' ||
+        !activeRegistration || activeRegistration.consentSnapshot.purchaseFor === 'other' ||
         Boolean(
           row.purchaserCustomerUserId &&
           activeRegistration.customerUserId !== row.purchaserCustomerUserId,
@@ -4536,6 +3072,9 @@ export class ConferenceRepository {
       this.memory.idempotency.set(memoryKey, { requestHash, response });
       return response;
     }
+
+    const [batch] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.organizationId, organizationId), eq(orders.eventId, eventId), eq(orders.modelVersion, 2), sql`exists (select 1 from order_items oi where oi.order_id = ${orders.id} and oi.registration_id = ${registrationId})`)).limit(1);
+    if (batch) throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION, '请刷新页面，在订单详情统一审核全部名额', HttpStatus.CONFLICT, { orderId: batch.id, reason: 'batch_review_required' });
 
     return withPostgresTransactionRetry(() =>
       db.transaction(async (tx) => {
@@ -4684,6 +3223,8 @@ export class ConferenceRepository {
           .update(orders)
           .set({ status: nextOrderStatus, expiresAt: nextExpiresAt, updatedAt: now })
           .where(eq(orders.id, orderRow.id));
+        await syncLegacyOrderItemState(tx, orderRow,
+          approved ? (freeCheckout ? 'active' : 'pending') : 'cancelled', now);
 
         if (approved) {
           await tx
@@ -4709,12 +3250,14 @@ export class ConferenceRepository {
 
         let issuedTicketRow: typeof tickets.$inferSelect | undefined;
         if (approved && freeCheckout) {
+          const partnerAttributionRevisionId = await partnerAttributionForOrder(tx, orderRow.id);
           await tx
             .update(ticketTypes)
             .set({ sold: sql`${ticketTypes.sold} + 1`, updatedAt: now })
             .where(eq(ticketTypes.id, ticketTypeRow.id));
-          await tx.insert(payments).values({
+          const [freePayment] = await tx.insert(payments).values({
             orderId: orderRow.id,
+            partnerAttributionRevisionId,
             provider: 'free',
             externalId: `free:${orderRow.id}`,
             status: 'succeeded',
@@ -4722,7 +3265,8 @@ export class ConferenceRepository {
             amount: 0,
             currency: orderRow.currency,
             payload: { source: 'registration-review', actorId },
-          });
+          }).returning({ id: payments.id });
+          await tx.update(orders).set({ settledPaymentId: freePayment!.id }).where(eq(orders.id, orderRow.id));
           [issuedTicketRow] = await tx
             .insert(tickets)
             .values({
@@ -4917,12 +3461,15 @@ export class ConferenceRepository {
       ticketTypeName: ticketTypeRow[0]!.name,
       qrPayload: `conference:${row.eventId}:${row.code}`,
       status: row.status,
+      refundPending: Boolean(row.refundPausedBy),
       issuedAt: row.issuedAt.toISOString(),
     };
   }
 
   async getOrderTicket(identifier: string, accessToken: string): Promise<Ticket> {
     const order = await this.getOrder(identifier, accessToken);
+    if (order.modelVersion === 2) throw new DomainError(API_ERROR_CODES.FORBIDDEN, '请登录参会人账号查看电子票', HttpStatus.FORBIDDEN);
+    if (!order.registrationId) throw new DomainError(API_ERROR_CODES.NOT_FOUND, '订单报名关系需要核验', HttpStatus.NOT_FOUND);
     if (order.isProxyPurchase) {
       throw new DomainError(
         API_ERROR_CODES.FORBIDDEN,
@@ -5052,23 +3599,33 @@ export class ConferenceRepository {
       order by ${payments.createdAt} desc, ${payments.id} desc
       limit 1
     )`;
-    const paidAmountExpression = sql<number>`coalesce((
+    const orderPaidAmountExpression = sql<number>`coalesce((
       select max(${payments.amount})
       from ${payments}
       where ${payments.orderId} = ${orders.id}
         and ${payments.status} in ('succeeded', 'refunded')
+        and (${orders.modelVersion} = 1 or ${payments.id} = ${orders.settledPaymentId})
     ), 0)::int`;
-    const refundedAmountExpression = sql<number>`coalesce((
+    const orderRefundedAmountExpression = sql<number>`coalesce((
       select sum(${refunds.amount})
       from ${refunds}
       where ${refunds.orderId} = ${orders.id}
         and ${refunds.status} = 'succeeded'
+        and (${orders.modelVersion} = 1 or ${refunds.paymentId} = ${orders.settledPaymentId})
     ), 0)::int`;
+    const itemAmountExpression = sql<number>`coalesce((select oi.allocated_amount from order_items oi where oi.order_id = ${orders.id} and oi.registration_id = ${registrations.id}),0)::int`;
+    const paidAmountExpression = sql<number>`case when ${orders.modelVersion} = 2 then case when ${orders.settledPaymentId} is not null then ${itemAmountExpression} else 0 end else ${orderPaidAmountExpression} end`;
+    const refundedAmountExpression = sql<number>`case when ${orders.modelVersion} = 2 then coalesce((select sum(a.amount) from refund_item_allocations a join order_items oi on oi.id = a.order_item_id where oi.order_id = ${orders.id} and oi.registration_id = ${registrations.id}),0)::int else ${orderRefundedAmountExpression} end`;
     const businessStatusExpression = sql<RegistrationBusinessStatus>`case
+      when ${orders.modelVersion} = 2 and exists (select 1 from order_items oi where oi.registration_id = ${registrations.id} and oi.state = 'cancelled') then case when ${refundedAmountExpression} > 0 then 'refunded' else 'closed' end
+      when ${orders.modelVersion} = 2 and ${orders.settledPaymentId} is not null then case
+        when ${paidAmountExpression} > 0 and ${refundedAmountExpression} >= ${paidAmountExpression} then 'refunded'
+        when ${refundedAmountExpression} > 0 then 'partially_refunded'
+        when ${paidAmountExpression} = 0 then 'confirmed' else 'paid' end
       when ${orders.status} = 'refunded'
-        or ((${paidAmountExpression}) > 0 and (${refundedAmountExpression}) >= (${paidAmountExpression}))
+        or ((${orderPaidAmountExpression}) > 0 and (${orderRefundedAmountExpression}) >= (${orderPaidAmountExpression}))
         then 'refunded'
-      when ${orders.status} = 'partially_refunded' or (${refundedAmountExpression}) > 0
+      when ${orders.status} = 'partially_refunded' or (${orderRefundedAmountExpression}) > 0
         then 'partially_refunded'
       when ${orders.status} = 'paid' and ${orders.amount} = 0 then 'confirmed'
       when ${orders.status} = 'paid' then 'paid'
@@ -5084,7 +3641,7 @@ export class ConferenceRepository {
     const invoiceStatusExpression = sql<AdminRegistrationRow['invoiceSummary']['status']>`case
       when ${invoiceRequests.id} is not null then ${invoiceRequests.status}::text
       when ${orders.status} in ('paid', 'partially_refunded')
-        and (${paidAmountExpression}) > (${refundedAmountExpression})
+        and (${orderPaidAmountExpression}) > (${orderRefundedAmountExpression})
         then 'eligible'
       else 'not_eligible'
     end`;
@@ -5124,8 +3681,8 @@ export class ConferenceRepository {
     const [totalRow] = await db
       .select({ value: count() })
       .from(registrations)
-      .leftJoin(orders, eq(orders.registrationId, registrations.id))
-      .leftJoin(invoiceRequests, eq(invoiceRequests.registrationId, registrations.id))
+      .leftJoin(orders, registrationOrderJoin())
+      .leftJoin(invoiceRequests, eq(invoiceRequests.orderId, orders.id))
       .where(and(...conditions));
     const total = Number(totalRow?.value ?? 0);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -5145,8 +3702,8 @@ export class ConferenceRepository {
       })
       .from(registrations)
       .innerJoin(ticketTypes, eq(registrations.ticketTypeId, ticketTypes.id))
-      .leftJoin(orders, eq(orders.registrationId, registrations.id))
-      .leftJoin(invoiceRequests, eq(invoiceRequests.registrationId, registrations.id))
+      .leftJoin(orders, registrationOrderJoin())
+      .leftJoin(invoiceRequests, eq(invoiceRequests.orderId, orders.id))
       .where(and(...conditions))
       .orderBy(desc(registrations.createdAt), desc(registrations.id))
       .limit(pageSize)
@@ -5238,7 +3795,7 @@ export class ConferenceRepository {
       })
       .from(registrations)
       .innerJoin(ticketTypes, eq(registrations.ticketTypeId, ticketTypes.id))
-      .leftJoin(orders, eq(orders.registrationId, registrations.id))
+      .leftJoin(orders, registrationOrderJoin())
       .leftJoin(customerUsers, eq(registrations.customerUserId, customerUsers.id))
       .leftJoin(customerProfiles, eq(customerUsers.id, customerProfiles.customerUserId))
       .leftJoin(
@@ -5329,10 +3886,10 @@ export class ConferenceRepository {
     if (!db) {
       const query = filters.q?.trim().toLowerCase();
       const matching = [...this.memory.orders.values()]
-        .filter((order) => this.memory.registrations.get(order.registrationId)?.eventId === eventId)
+        .filter((order) => this.memory.registrations.get(singleRegistrationId(order))?.eventId === eventId)
         .filter((order) => !filters.status || order.status === filters.status)
         .map((order): AdminOrderRow => {
-          const registration = this.memory.registrations.get(order.registrationId)!;
+          const registration = this.memory.registrations.get(singleRegistrationId(order))!;
           const purchaser = this.memoryOrderPurchasers.get(order.id)?.snapshot;
           const ticket = [...this.memory.tickets.values()].find(
             (item) => item.registrationId === registration.id,
@@ -5387,7 +3944,6 @@ export class ConferenceRepository {
     const conditions = [
       eq(orders.eventId, eventId),
       eq(orders.organizationId, organizationId),
-      isNull(registrations.supersededAt),
     ];
     if (filters.status) conditions.push(eq(orders.status, filters.status as any));
     if (filters.q) {
@@ -5399,6 +3955,7 @@ export class ConferenceRepository {
           sql`${registrations.attendee}->>'company' ilike ${pattern}`,
           sql`${registrations.attendee}->>'mobile' ilike ${pattern}`,
           ilike(registrations.attendeeMobileE164, pattern),
+          sql`exists (select 1 from order_items oi join registrations attendee on attendee.id = oi.registration_id where oi.order_id = ${orders.id} and (attendee.attendee->>'name' ilike ${pattern} or attendee.attendee->>'company' ilike ${pattern} or attendee.attendee_mobile_e164 ilike ${pattern}))`,
           sql`${orders.purchaserSnapshot}->>'name' ilike ${pattern}`,
           sql`${orders.purchaserSnapshot}->>'mobile' ilike ${pattern}`,
         )!,
@@ -5407,7 +3964,7 @@ export class ConferenceRepository {
     const [totalRow] = await db
       .select({ value: count() })
       .from(orders)
-      .innerJoin(registrations, eq(orders.registrationId, registrations.id))
+      .leftJoin(registrations, sql`${registrations.id} = coalesce(${orders.registrationId}, (select first_item.registration_id from order_items first_item where first_item.order_id = ${orders.id} order by first_item.position limit 1))`)
       .where(and(...conditions));
     const total = Number(totalRow?.value ?? 0);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -5420,8 +3977,8 @@ export class ConferenceRepository {
         ticket: tickets,
       })
       .from(orders)
-      .innerJoin(registrations, eq(orders.registrationId, registrations.id))
-      .innerJoin(ticketTypes, eq(registrations.ticketTypeId, ticketTypes.id))
+      .leftJoin(registrations, sql`${registrations.id} = coalesce(${orders.registrationId}, (select first_item.registration_id from order_items first_item where first_item.order_id = ${orders.id} order by first_item.position limit 1))`)
+      .leftJoin(ticketTypes, eq(registrations.ticketTypeId, ticketTypes.id))
       .leftJoin(tickets, eq(tickets.registrationId, registrations.id))
       .where(and(...conditions))
       .orderBy(desc(orders.createdAt), desc(orders.id))
@@ -5430,6 +3987,7 @@ export class ConferenceRepository {
 
     const items = rows.map(({ order, registration, ticketType, ticket }): AdminOrderRow => ({
       id: order.id,
+      modelVersion: order.modelVersion, quantity: order.quantity, version: order.version,
       orderNo: order.orderNo,
       registrationId: order.registrationId,
       status: order.status,
@@ -5438,20 +3996,20 @@ export class ConferenceRepository {
       paymentMethod: order.amount === 0 ? 'free' : 'wechat',
       expiresAt: order.expiresAt.toISOString(),
       createdAt: order.createdAt.toISOString(),
-      purchaserName: order.purchaserSnapshot?.name || registration.attendee.name,
-      purchaserMobile: order.purchaserSnapshot?.mobile || registration.attendee.mobile,
-      attendeeName: registration.attendee.name,
-      attendeeMobile: registration.attendee.mobile,
-      attendeeCompany: registration.attendee.company,
-      ticketTypeName: ticketType.name,
+      purchaserName: order.purchaserSnapshot?.name || (registration?.attendee.name ?? ''),
+      purchaserMobile: order.purchaserSnapshot?.mobile || (registration?.attendee.mobile ?? ''),
+      attendeeName: order.quantity > 1 ? `${registration?.attendee.name ?? ''} 等 ${order.quantity} 位` : registration?.attendee.name ?? '',
+      attendeeMobile: (registration?.attendee.mobile ?? ''),
+      attendeeCompany: (registration?.attendee.company ?? ''),
+      ticketTypeName: (ticketType?.name ?? String(order.pricingSnapshot.name ?? '大会门票')),
       isProxyPurchase:
-        registration.consentSnapshot.purchaseFor === 'other' ||
+        registration?.consentSnapshot.purchaseFor === 'other' ||
         Boolean(
           order.purchaserSnapshot?.mobile &&
-          order.purchaserSnapshot.mobile !== registration.attendee.mobile,
+          order.purchaserSnapshot.mobile !== (registration?.attendee.mobile ?? ''),
         ),
       fullRefundBlockedReason:
-        registration.status === 'checked_in'
+        registration?.status === 'checked_in'
           ? '参会人已签到，无法整单退款'
           : ticket?.status === 'used'
             ? '电子票已使用，无法整单退款'
@@ -5476,10 +4034,11 @@ export class ConferenceRepository {
       const paidOrders = orderRows.filter((order) =>
         ['paid', 'partially_refunded'].includes(order.status),
       );
+      const refundedOrders = orderRows.filter((order) => order.status === 'refunded');
       const paidRegistrationIds = new Set(
         paidOrders
           .filter((order) => {
-            const registration = this.memory.registrations.get(order.registrationId);
+            const registration = this.memory.registrations.get(singleRegistrationId(order));
             return registration && registration.status !== 'cancelled';
           })
           .map((order) => order.registrationId),
@@ -5490,7 +4049,7 @@ export class ConferenceRepository {
       const purchaserKeys = new Set(
         paidOrders.map((order) => {
           const purchaser = this.memoryOrderPurchasers.get(order.id);
-          const registration = this.memory.registrations.get(order.registrationId);
+          const registration = this.memory.registrations.get(singleRegistrationId(order));
           return (
             purchaser?.customerUserId ||
             registration?.attendee.mobile ||
@@ -5512,6 +4071,8 @@ export class ConferenceRepository {
           confirmedAttendees,
           purchasers: purchaserKeys.size,
           revenue: paidOrders.reduce((total, order) => total + order.amount, 0),
+          refundedOrders: refundedOrders.length,
+          refundedAmount: refundedOrders.reduce((total, order) => total + order.amount, 0),
           checkedIn: this.memory.checkins.size,
           conversionRate: registrationRows.length
             ? Number(((paidRegistrationIds.size / registrationRows.length) * 100).toFixed(1))
@@ -5548,27 +4109,28 @@ export class ConferenceRepository {
         HttpStatus.NOT_FOUND,
       );
     }
-    const [[registrationMetric], [orderMetric], [checkinMetric], ticketRows] = await Promise.all([
-      db
-        .select({
-          registrations: count(),
-          activeSubmitted: sql<number>`count(*) filter (where ${registrations.status} in ('pending_review', 'pending_payment', 'confirmed', 'checked_in', 'completed'))::int`,
-          confirmedAttendees: sql<number>`count(*) filter (where ${registrations.status} in ('confirmed', 'checked_in', 'completed'))::int`,
-          pendingReview: sql<number>`count(*) filter (where ${registrations.status} = 'pending_review')::int`,
-        })
-        .from(registrations)
-        .where(
-          and(
-            eq(registrations.organizationId, organizationId),
-            eq(registrations.eventId, eventId),
-            isNull(registrations.supersededAt),
+    const [[registrationMetric], [orderMetric], [refundMetric], [checkinMetric], ticketRows] =
+      await Promise.all([
+        db
+          .select({
+            registrations: count(),
+            activeSubmitted: sql<number>`count(*) filter (where ${registrations.status} in ('pending_review', 'pending_payment', 'confirmed', 'checked_in', 'completed'))::int`,
+            confirmedAttendees: sql<number>`count(*) filter (where ${registrations.status} in ('confirmed', 'checked_in', 'completed'))::int`,
+            pendingReview: sql<number>`count(*) filter (where ${registrations.status} = 'pending_review')::int`,
+          })
+          .from(registrations)
+          .where(
+            and(
+              eq(registrations.organizationId, organizationId),
+              eq(registrations.eventId, eventId),
+              isNull(registrations.supersededAt),
+            ),
           ),
-        ),
-      db
-        .select({
-          paidOrders: sql<number>`count(*) filter (where ${orders.status} in ('paid', 'partially_refunded'))::int`,
-          paidSeats: sql<number>`count(*) filter (where ${orders.status} in ('paid', 'partially_refunded') and ${registrations.status} <> 'cancelled' and ${registrations.supersededAt} is null)::int`,
-          purchasers: sql<number>`count(distinct case
+        db
+          .select({
+            paidOrders: sql<number>`count(*) filter (where ${orders.status} in ('paid', 'partially_refunded', 'refunded'))::int`,
+            paidSeats: sql<number>`coalesce(sum(case when ${orders.modelVersion} = 2 then (select count(*) from order_items oi where oi.order_id = ${orders.id} and oi.state = 'active') when ${orders.status} in ('paid', 'partially_refunded') and ${registrations.status} <> 'cancelled' and ${registrations.supersededAt} is null then 1 else 0 end),0)::int`,
+            purchasers: sql<number>`count(distinct case
               when ${orders.status} in ('paid', 'partially_refunded') then coalesce(
                 case when ${orders.purchaserCustomerUserId} is not null then 'customer:' || ${orders.purchaserCustomerUserId}::text end,
                 case when nullif(${orders.purchaserSnapshot}->>'customerUserId', '') is not null then 'customer:' || (${orders.purchaserSnapshot}->>'customerUserId') end,
@@ -5578,7 +4140,7 @@ export class ConferenceRepository {
                 'order:' || ${orders.id}::text
               )
           end)::int`,
-          revenue: sql<number>`coalesce(sum(
+            revenue: sql<number>`coalesce(sum(
               case when ${orders.status} in ('paid', 'partially_refunded', 'refunded')
                 then greatest(
                   ${orders.amount} - coalesce((
@@ -5586,26 +4148,40 @@ export class ConferenceRepository {
                     from ${refunds} successful_refund
                     where successful_refund.order_id = ${orders.id}
                       and successful_refund.status = 'succeeded'
+                      and (${orders.modelVersion} = 1 or successful_refund.payment_id = ${orders.settledPaymentId})
                   ), 0),
                   0
                 )
                 else 0
               end
           ), 0)::int`,
-        })
-        .from(orders)
-        .innerJoin(registrations, eq(registrations.id, orders.registrationId))
-        .where(and(eq(orders.organizationId, organizationId), eq(orders.eventId, eventId))),
-      db
-        .select({ value: count() })
-        .from(checkinRecords)
-        .where(and(eq(checkinRecords.eventId, eventId), eq(checkinRecords.result, 'accepted'))),
-      db
-        .select()
-        .from(ticketTypes)
-        .where(eq(ticketTypes.eventId, eventId))
-        .orderBy(asc(ticketTypes.price)),
-    ]);
+          })
+          .from(orders)
+          .leftJoin(registrations, eq(registrations.id, orders.registrationId))
+          .where(and(eq(orders.organizationId, organizationId), eq(orders.eventId, eventId))),
+        db
+          .select({
+            refundedOrders: sql<number>`count(distinct ${refunds.orderId})::int`,
+            refundedAmount: sql<number>`coalesce(sum(${refunds.amount}), 0)::int`,
+          })
+          .from(refunds)
+          .where(
+            and(
+              eq(refunds.organizationId, organizationId),
+              eq(refunds.eventId, eventId),
+              eq(refunds.status, 'succeeded'),
+            ),
+          ),
+        db
+          .select({ value: count() })
+          .from(checkinRecords)
+          .where(and(eq(checkinRecords.eventId, eventId), eq(checkinRecords.result, 'accepted'))),
+        db
+          .select()
+          .from(ticketTypes)
+          .where(eq(ticketTypes.eventId, eventId))
+          .orderBy(asc(ticketTypes.price)),
+      ]);
     const registrationTotal = Number(registrationMetric?.registrations ?? 0);
     const activeSubmitted = Number(registrationMetric?.activeSubmitted ?? 0);
     const paidSeats = Number(orderMetric?.paidSeats ?? 0);
@@ -5621,6 +4197,8 @@ export class ConferenceRepository {
         confirmedAttendees: Number(registrationMetric?.confirmedAttendees ?? 0),
         purchasers: Number(orderMetric?.purchasers ?? 0),
         revenue: Number(orderMetric?.revenue ?? 0),
+        refundedOrders: Number(refundMetric?.refundedOrders ?? 0),
+        refundedAmount: Number(refundMetric?.refundedAmount ?? 0),
         checkedIn: Number(checkinMetric?.value ?? 0),
         conversionRate: activeSubmitted
           ? Number(((paidSeats / activeSubmitted) * 100).toFixed(1))
@@ -5753,7 +4331,7 @@ export class ConferenceRepository {
       this.memory.checkins.set(key, { ticketCode, checkedInAt, deviceId: input.deviceId });
       const usedTicket: Ticket = { ...ticket, status: 'used' };
       this.memory.tickets.set(ticketCode, usedTicket);
-      const registration = this.memory.registrations.get(ticket.registrationId);
+      const registration = this.memory.registrations.get(singleRegistrationId(ticket));
       if (registration) {
         this.memory.registrations.set(registration.id, { ...registration, status: 'checked_in' });
       }
@@ -5773,13 +4351,42 @@ export class ConferenceRepository {
           HttpStatus.NOT_FOUND,
         );
       }
+      // Rights checks lock the order and its items before registration and ticket rows.
+      const [ticketIdentity] = await tx
+        .select({ registrationId: tickets.registrationId })
+        .from(tickets)
+        .where(and(eq(tickets.eventId, input.eventId), eq(tickets.code, ticketCode)))
+        .limit(1);
+      const [ticketOrder] = ticketIdentity
+        ? await tx
+            .select()
+            .from(orders)
+            .where(
+              and(
+                or(eq(orders.registrationId, ticketIdentity.registrationId), sql`exists (select 1 from order_items oi where oi.order_id = ${orders.id} and oi.registration_id = ${ticketIdentity.registrationId})`),
+                eq(orders.organizationId, organizationId),
+                eq(orders.eventId, input.eventId),
+              ),
+            )
+            .for('update')
+            .limit(1)
+        : [];
+      if (ticketOrder) {
+        try {
+          if (ticketOrder.modelVersion === 1 && ticketOrder.status === 'refunded') throw new DomainError(API_ERROR_CODES.INVALID_STATE_TRANSITION, '原订单已退款', HttpStatus.CONFLICT);
+          await guardRefundWrite(tx, ticketOrder.id, false, { purpose: 'admission', registrationId: ticketIdentity!.registrationId });
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          return { result: 'invalid' as const, checkedInAt: new Date().toISOString(), message: '该名额正在退款或权益核验，暂不能核销，请联系工作人员' };
+        }
+      }
       const [ticketRow] = await tx
         .select()
         .from(tickets)
         .where(and(eq(tickets.eventId, input.eventId), eq(tickets.code, ticketCode)))
         .for('update')
         .limit(1);
-      if (!ticketRow || ticketRow.status === 'cancelled') {
+      if (!ticketRow || ticketRow.status === 'cancelled' || ticketRow.refundPausedBy) {
         return {
           result: 'invalid' as const,
           checkedInAt: new Date().toISOString(),
@@ -6062,12 +4669,15 @@ export class ConferenceRepository {
             ? '更新大会状态与基本信息'
             : '更新大会基本信息与报名方式';
         }
-        const nextSettings = registrationChanged
-          ? {
-              ...current.settings,
-              registration: nextRegistration,
-            }
-          : current.settings;
+        const refundSettingsChanged = patch.settings?.refunds !== undefined;
+        const nextSettings =
+          registrationChanged || refundSettingsChanged
+            ? {
+                ...current.settings,
+                registration: nextRegistration,
+                ...(patch.settings?.refunds ? { refunds: patch.settings.refunds } : {}),
+              }
+            : current.settings;
         const updateFields = Object.fromEntries(
           Object.entries(patch).filter(
             ([key, value]) =>
@@ -6082,7 +4692,7 @@ export class ConferenceRepository {
             ...updateFields,
             ...(patch.startsAt ? { startsAt } : {}),
             ...(patch.endsAt ? { endsAt } : {}),
-            ...(registrationChanged ? { settings: nextSettings } : {}),
+            ...(registrationChanged || refundSettingsChanged ? { settings: nextSettings } : {}),
             updatedAt: changedAt,
           })
           .where(and(eq(events.id, eventId), eq(events.organizationId, organizationId)))
@@ -6098,7 +4708,7 @@ export class ConferenceRepository {
               ),
             );
         }
-        if (row && (patch.timezone !== undefined || nextStatus === 'archived')) {
+        if (row && (row.timezone !== current.timezone || (nextStatus === 'archived' && current.status !== 'archived'))) {
           const [digest] = await tx
             .select({
               id: eventFeishuDigestSubscriptions.id,
@@ -6124,10 +4734,13 @@ export class ConferenceRepository {
                   archived || !digest.enabled
                     ? null
                     : nextFeishuDigestRun(changedAt, row.timezone, digest.sendLocalTime),
+                configVersion: sql`${eventFeishuDigestSubscriptions.configVersion} + 1`,
+                pauseReason: archived ? 'event_archived' : null,
                 revision: sql`${eventFeishuDigestSubscriptions.revision} + 1`,
                 updatedAt: changedAt,
               })
               .where(eq(eventFeishuDigestSubscriptions.id, digest.id));
+            await tx.update(feishuDigestDeliveries).set({ status: 'cancelled', leaseToken: null, leaseUntil: null, lastErrorCode: archived ? 'EVENT_ARCHIVED' : 'EVENT_TIMEZONE_CHANGED', lastError: '大会状态或时区已变化，原发送任务已取消', updatedAt: changedAt }).where(and(eq(feishuDigestDeliveries.organizationId, organizationId), eq(feishuDigestDeliveries.eventId, eventId), inArray(feishuDigestDeliveries.status, ['queued', 'generating', 'retrying'])));
           }
         }
         await tx.insert(auditLogs).values({

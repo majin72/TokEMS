@@ -1,0 +1,1145 @@
+import { Client } from 'pg';
+import {
+  createCipheriv,
+  createSign,
+  generateKeyPairSync,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  auditLogs,
+  customerUsers,
+  events,
+  orders,
+  organizations,
+  organizationIntegrations,
+  paymentNotificationInbox,
+  payments,
+  refundNotificationInbox,
+  refundRequests,
+  refunds,
+  registrations,
+  tickets,
+  ticketTypes,
+  users,
+} from '@conference/database';
+import type { UpdateWeChatPayConfiguration } from '@conference/contracts';
+import { eq, sql } from 'drizzle-orm';
+import { DatabaseService } from './database.service.js';
+import { WeChatPayService } from './wechat-pay.service.js';
+import { RefundWorkflowService } from './refund-workflow.service.js';
+import { encryptIntegrationCredentials } from './integration-credentials.js';
+import { lockWeChatConfiguration } from './wechat-configuration-lock.js';
+
+const persistent = process.env.DATABASE_URL ? describe : describe.skip;
+
+function latch() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+persistent('WeChat configuration changes and refund creation serialize in PostgreSQL', () => {
+  // The scheduler scans every tenant; keep other suites' fixtures outside its run.
+  const fixtureLock = new Client({ connectionString: process.env.DATABASE_URL });
+  const database = new DatabaseService();
+  const db = database.db!;
+  const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const merchantPrivateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const platformPublicKey = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const owners: Array<{ organizationId: string; actorId: string; eventId: number }> = [];
+
+  beforeAll(async () => {
+    await fixtureLock.connect();
+    await fixtureLock.query(
+      "select pg_advisory_lock(hashtextextended('tokems:refund-integration-fixtures', 0))",
+    );
+    vi.stubEnv('INTEGRATION_ENCRYPTION_KEY', randomBytes(32).toString('base64'));
+    vi.stubEnv('INTEGRATION_ENCRYPTION_KEY_VERSION', '1');
+  }, 60_000);
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+  afterAll(async () => {
+    try {
+      for (const owner of owners) {
+        await db
+          .update(tickets)
+          .set({ refundPausedBy: null })
+          .where(eq(tickets.eventId, owner.eventId));
+        await db
+          .delete(refundNotificationInbox)
+          .where(eq(refundNotificationInbox.organizationId, owner.organizationId));
+        await db.delete(refunds).where(eq(refunds.organizationId, owner.organizationId));
+        await db
+          .delete(refundRequests)
+          .where(eq(refundRequests.organizationId, owner.organizationId));
+        await db.delete(organizations).where(eq(organizations.id, owner.organizationId));
+        await db.delete(users).where(eq(users.id, owner.actorId));
+      }
+      vi.unstubAllEnvs();
+    } finally {
+      await fixtureLock.end();
+      await database.onModuleDestroy();
+    }
+  });
+
+  async function fixture() {
+    const organizationId = randomUUID(),
+      actorId = randomUUID(),
+      customerUserId = randomUUID();
+    const orderId = randomUUID(),
+      registrationId = randomUUID(),
+      ticketTypeId = randomUUID();
+    const apiV3Key = randomBytes(16).toString('hex');
+    const config: UpdateWeChatPayConfiguration = {
+      enabled: true,
+      appId: 'wx-refund-race',
+      mchId: '1900000109',
+      merchantCertificateSerial: 'TEST_SERIAL',
+      platformPublicKeyId: 'PUB_KEY_ID_REFUND_RACE',
+      refundFunding: 'default',
+      oauthEnabled: false,
+      channels: { native: true, jsapi: false, h5: false },
+    };
+    const policy = { enabled: true, version: 'seven-day-v1', windowDays: 7 as const };
+    await db.insert(organizations).values({
+      id: organizationId,
+      slug: `refund-race-${organizationId}`,
+      name: '退款配置并发验收',
+    });
+    await db
+      .insert(users)
+      .values({ id: actorId, email: `${actorId}@example.test`, name: '并发验收' });
+    await db
+      .insert(customerUsers)
+      .values({ id: customerUserId, organizationId, mobileE164: '+8613900000042' });
+    const [event] = await db
+      .insert(events)
+      .values({
+        organizationId,
+        slug: `refund-race-${organizationId}`,
+        name: '退款配置验收',
+        shortName: '验收',
+        tagline: '验收',
+        description: '验收',
+        status: 'registration_open',
+        startsAt: new Date('2027-11-01T01:00:00Z'),
+        endsAt: new Date('2027-11-01T10:00:00Z'),
+        timezone: 'Asia/Shanghai',
+        venue: '测试',
+        city: '深圳',
+        address: '测试',
+        settings: { refunds: policy },
+      })
+      .returning();
+    const eventId = event!.id;
+    owners.push({ organizationId, actorId, eventId });
+    await db.insert(ticketTypes).values({
+      id: ticketTypeId,
+      organizationId,
+      eventId,
+      code: 'RACE',
+      name: '测试票',
+      description: '测试',
+      price: 39900,
+      capacity: 10,
+      sold: 1,
+    });
+    await db.insert(registrations).values({
+      id: registrationId,
+      organizationId,
+      eventId,
+      ticketTypeId,
+      registrationCode: `R${randomUUID().slice(0, 24)}`,
+      status: 'confirmed',
+      attendee: {
+        name: '测试',
+        mobile: '13900000042',
+        email: 'race@example.test',
+        company: '测试',
+        title: '测试',
+        city: '深圳',
+      },
+      attendeeMobileE164: '+8613900000042',
+    });
+    await db.insert(orders).values({
+      id: orderId,
+      organizationId,
+      eventId,
+      registrationId,
+      purchaserCustomerUserId: customerUserId,
+      orderNo: `T${randomUUID().replaceAll('-', '').slice(0, 25)}`,
+      status: 'paid',
+      amount: 39900,
+      currency: 'CNY',
+      pricingSnapshot: { refundPolicy: policy },
+      expiresAt: new Date(),
+    });
+    const [payment] = await db
+      .insert(payments)
+      .values({
+        orderId,
+        provider: 'wechatpay',
+        channel: 'native',
+        merchantId: config.mchId,
+        status: 'succeeded',
+        succeededAt: new Date(),
+        amount: 39900,
+        currency: 'CNY',
+        outTradeNo: `T${randomUUID().replaceAll('-', '').slice(0, 25)}`,
+        externalId: randomUUID(),
+      })
+      .returning();
+    await db
+      .insert(tickets)
+      .values({ eventId, registrationId, ticketTypeId, code: `R${randomUUID()}`, status: 'valid' });
+    await db.insert(organizationIntegrations).values({
+      organizationId,
+      provider: 'wechatpay',
+      status: 'verified',
+      config,
+      encryptedCredentials: encryptIntegrationCredentials(organizationId, 'wechatpay', {
+        merchantPrivateKey,
+        apiV3Key,
+        platformPublicKey,
+      }),
+    });
+    const gateway = new WeChatPayService(database);
+    vi.spyOn(gateway, 'verifyRefundPayment').mockResolvedValue({
+      merchantId: config.mchId,
+      paidAt: payment!.succeededAt!,
+    });
+    return {
+      organizationId,
+      actorId,
+      eventId,
+      orderId,
+      config,
+      apiV3Key,
+      payment: payment!,
+      gateway,
+      workflow: new RefundWorkflowService(database, gateway),
+      customer: { organizationId, customerUserId },
+      policy,
+    };
+  }
+
+  it.each([
+    [undefined, 'default'],
+    [null, 'default'],
+    ['default', 'available'],
+    ['available', null],
+  ] as const)(
+    'preserves payment verification when refund funding changes from %s to %s',
+    async (previous, next) => {
+      const f = await fixture();
+      const verifiedAt = new Date('2026-09-08T00:00:00Z');
+      await db
+        .update(organizationIntegrations)
+        .set({
+          config: { ...f.config, refundFunding: previous },
+          lastVerifiedAt: verifiedAt,
+        })
+        .where(eq(organizationIntegrations.organizationId, f.organizationId));
+      await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+        ...f.config,
+        refundFunding: next,
+      });
+      const configuration = await f.gateway.getConfiguration(f.organizationId);
+      expect(configuration.status).toBe('verified');
+      expect(configuration.lastVerifiedAt).toBe(verifiedAt.toISOString());
+      expect(configuration.refundFunding).toBe(next);
+      const required = Reflect.get(f.gateway, 'requiredIntegration').bind(f.gateway);
+      await expect(required(f.organizationId, { requireVerified: true })).resolves.toBeDefined();
+      if (next) {
+        await expect(f.gateway.refundConfiguration(f.organizationId)).resolves.toMatchObject({
+          funding: next,
+        });
+      } else {
+        await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+          code: 'REFUND_NOT_CONFIGURED',
+        });
+      }
+    },
+  );
+
+  it.each(['configured', 'error'] as const)(
+    'keeps a %s merchant unverified after selecting refund funding',
+    async (status) => {
+      const f = await fixture();
+      await db
+        .update(organizationIntegrations)
+        .set({ status })
+        .where(eq(organizationIntegrations.organizationId, f.organizationId));
+      await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+        ...f.config,
+        refundFunding: 'available',
+      });
+      expect((await f.gateway.getConfiguration(f.organizationId)).status).toBe(status);
+      await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+        code: 'REFUND_NOT_CONFIGURED',
+      });
+      const required = Reflect.get(f.gateway, 'requiredIntegration').bind(f.gateway);
+      await expect(required(f.organizationId, { requireVerified: true })).rejects.toThrow(
+        '尚未验证通过',
+      );
+    },
+  );
+
+  it.each([
+    'appId',
+    'mchId',
+    'merchantCertificateSerial',
+    'platformPublicKeyId',
+    'merchantPrivateKey',
+    'apiV3Key',
+    'platformPublicKey',
+    'appSecret',
+    'channels',
+    'oauthEnabled',
+  ] as const)('still requires verification when funding and %s change together', async (field) => {
+    const f = await fixture();
+    const rotated = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const changes: UpdateWeChatPayConfiguration = {
+      ...f.config,
+      appId: 'wx-changed',
+      mchId: '1900000110',
+      merchantCertificateSerial: 'CHANGED_SERIAL',
+      platformPublicKeyId: 'PUB_KEY_ID_CHANGED',
+      merchantPrivateKey: rotated.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      apiV3Key: randomBytes(16).toString('hex'),
+      platformPublicKey: rotated.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      appSecret: 'changed-test-app-secret',
+      channels: { native: true, jsapi: true, h5: false },
+      oauthEnabled: true,
+    };
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      refundFunding: 'available',
+      [field]: changes[field],
+    });
+    expect((await f.gateway.getConfiguration(f.organizationId)).status).toBe('configured');
+    const required = Reflect.get(f.gateway, 'requiredIntegration').bind(f.gateway);
+    await expect(required(f.organizationId, { requireVerified: true })).rejects.toThrow(
+      '尚未验证通过',
+    );
+    await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+      code: 'REFUND_NOT_CONFIGURED',
+    });
+  });
+
+  it('keeps queued refund instructions immutable when the funding strategy changes', async () => {
+    const f = await fixture();
+    await f.workflow.createAdmin(f.organizationId, f.orderId, f.actorId, randomUUID(), {
+      amount: 39900,
+      reason: '出资策略验收',
+    });
+    const [before] = await db.select().from(refunds).where(eq(refunds.orderId, f.orderId));
+    expect(before?.requestSnapshot).toMatchObject({
+      amount: { refund: 39900, total: 39900, currency: 'CNY' },
+    });
+    expect(before!.requestSnapshot).not.toHaveProperty('funds_account');
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      refundFunding: 'available',
+    });
+    const [after] = await db.select().from(refunds).where(eq(refunds.id, before!.id));
+    expect(after?.requestSnapshot).toEqual(before!.requestSnapshot);
+    expect(after?.outRefundNo).toBe(before!.outRefundNo);
+    await expect(f.gateway.refundConfiguration(f.organizationId)).resolves.toMatchObject({
+      funding: 'available',
+    });
+  });
+
+  it('rejects a stale successful verification after funding and credentials have changed', async () => {
+    const f = await fixture();
+    const inside = latch(),
+      release = latch();
+    Reflect.set(
+      f.gateway,
+      'request',
+      async (_method: string, _url: string, body: { echo_message: string }) => {
+        inside.resolve();
+        await release.promise;
+        return { echo_message: body.echo_message };
+      },
+    );
+    const verifying = f.gateway.testConnection(f.organizationId, f.actorId);
+    try {
+      await inside.promise;
+      await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+        ...f.config,
+        refundFunding: 'available',
+        apiV3Key: randomBytes(16).toString('hex'),
+      });
+    } finally {
+      release.resolve();
+    }
+    expect(await verifying).toMatchObject({ ok: false });
+    expect((await f.gateway.getConfiguration(f.organizationId)).status).toBe('configured');
+  });
+
+  it.each([
+    ['verified', true],
+    ['verified', false],
+    ['configured', true],
+    ['configured', false],
+    ['error', true],
+    ['error', false],
+  ] as const)(
+    'uses the latest concurrent verification outcome (initial: %s, success: %s)',
+    async (initialStatus, success) => {
+      const f = await fixture();
+      await db
+        .update(organizationIntegrations)
+        .set({ status: initialStatus })
+        .where(eq(organizationIntegrations.organizationId, f.organizationId));
+      const inside = latch(),
+        release = latch();
+      const integration = Reflect.get(f.gateway, 'integration').bind(f.gateway);
+      Reflect.set(f.gateway, 'integration', async (organizationId: string, reader?: unknown) => {
+        const row = await integration(organizationId, reader);
+        if (reader) {
+          inside.resolve();
+          await release.promise;
+        }
+        return row;
+      });
+      Reflect.set(
+        f.gateway,
+        'request',
+        async (_method: string, _url: string, body: { echo_message: string }) => {
+          if (!success) throw new Error('TEST_VERIFY_FAILED');
+          return { echo_message: body.echo_message };
+        },
+      );
+      const saving = f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+        ...f.config,
+        refundFunding: 'available',
+      });
+      let verifiedAt: string | null;
+      try {
+        await inside.promise;
+        expect(await f.gateway.testConnection(f.organizationId, f.actorId)).toMatchObject({
+          ok: success,
+        });
+        const current = await f.gateway.getConfiguration(f.organizationId);
+        expect(current.status).toBe(success ? 'verified' : 'error');
+        verifiedAt = current.lastVerifiedAt;
+      } finally {
+        release.resolve();
+      }
+      const status = success ? 'verified' : 'error';
+      expect(await saving).toMatchObject({ status, lastVerifiedAt: verifiedAt });
+      const [audit] = await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.organizationId, f.organizationId));
+      expect(audit?.after).toMatchObject({ status });
+      if (!success) {
+        await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+          code: 'REFUND_NOT_CONFIGURED',
+        });
+      }
+    },
+  );
+
+  it.each([
+    ['verified', true],
+    ['verified', false],
+    ['configured', true],
+    ['configured', false],
+    ['legacy', false],
+  ] as const)(
+    'records a %s merchant verification returning after a funding save (success: %s)',
+    async (status, success) => {
+      const f = await fixture();
+      await db
+        .update(organizationIntegrations)
+        .set({
+          status: status === 'legacy' ? 'verified' : status,
+          ...(status === 'legacy'
+            ? {
+                config: {
+                  ...f.config,
+                  refundFunding: undefined,
+                  channels: undefined,
+                  oauthEnabled: undefined,
+                },
+              }
+            : {}),
+        })
+        .where(eq(organizationIntegrations.organizationId, f.organizationId));
+      const inside = latch(),
+        release = latch();
+      Reflect.set(
+        f.gateway,
+        'request',
+        async (_method: string, _url: string, body: { echo_message: string }) => {
+          inside.resolve();
+          await release.promise;
+          if (!success) throw new Error('TEST_VERIFY_FAILED_AFTER_FUNDING_SAVE');
+          return { echo_message: body.echo_message };
+        },
+      );
+      const verifying = f.gateway.testConnection(f.organizationId, f.actorId);
+      try {
+        await inside.promise;
+        await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+          ...f.config,
+          refundFunding: 'available',
+        });
+      } finally {
+        release.resolve();
+      }
+      const result = await verifying;
+      expect(result.ok).toBe(success);
+      expect(await f.gateway.getConfiguration(f.organizationId)).toMatchObject({
+        status: success ? 'verified' : 'error',
+        refundFunding: 'available',
+        lastVerifiedAt: result.verifiedAt,
+        lastError: success ? null : 'TEST_VERIFY_FAILED_AFTER_FUNDING_SAVE',
+      });
+      if (!success) {
+        await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+          code: 'REFUND_NOT_CONFIGURED',
+        });
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'keeps a newer verification result after a funding save (older success: %s)',
+    async (success) => {
+      const f = await fixture();
+      const inside = latch(),
+        release = latch();
+      let calls = 0;
+      Reflect.set(
+        f.gateway,
+        'request',
+        async (_method: string, _url: string, body: { echo_message: string }) => {
+          if (++calls === 1) {
+            inside.resolve();
+            await release.promise;
+            if (!success) throw new Error('STALE_VERIFY_FAILED');
+          }
+          return { echo_message: body.echo_message };
+        },
+      );
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const now = Date.now();
+      const older = f.gateway.testConnection(f.organizationId, f.actorId);
+      try {
+        await inside.promise;
+        await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+          ...f.config,
+          refundFunding: 'available',
+        });
+        vi.setSystemTime(now + 1_000);
+        const latest = await f.gateway.testConnection(f.organizationId, f.actorId);
+        expect(latest.ok).toBe(true);
+        release.resolve();
+        expect(await older).toMatchObject({ ok: false });
+        expect(await f.gateway.getConfiguration(f.organizationId)).toMatchObject({
+          status: 'verified',
+          lastVerifiedAt: latest.verifiedAt,
+          lastError: null,
+          refundFunding: 'available',
+        });
+      } finally {
+        release.resolve();
+        await older;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    [true, false],
+    [false, true],
+    [true, true],
+    [false, false],
+  ])(
+    'records the newer verification after the older result (older: %s, newer: %s)',
+    async (olderSuccess, newerSuccess) => {
+      const f = await fixture();
+      const firstStarted = latch(),
+        secondStarted = latch(),
+        releaseFirst = latch(),
+        releaseSecond = latch();
+      let calls = 0;
+      Reflect.set(
+        f.gateway,
+        'request',
+        async (_method: string, _url: string, body: { echo_message: string }) => {
+          const first = ++calls === 1;
+          (first ? firstStarted : secondStarted).resolve();
+          await (first ? releaseFirst : releaseSecond).promise;
+          if (!(first ? olderSuccess : newerSuccess)) throw new Error('TEST_ORDERED_VERIFY_FAILED');
+          return { echo_message: body.echo_message };
+        },
+      );
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const now = Date.now();
+      const older = f.gateway.testConnection(f.organizationId, f.actorId);
+      let newer: ReturnType<typeof f.gateway.testConnection> | undefined;
+      try {
+        await firstStarted.promise;
+        vi.setSystemTime(now + 1_000);
+        newer = f.gateway.testConnection(f.organizationId, f.actorId);
+        await secondStarted.promise;
+        releaseFirst.resolve();
+        expect(await older).toMatchObject({ ok: olderSuccess });
+        releaseSecond.resolve();
+        const result = await newer;
+        expect(result.ok).toBe(newerSuccess);
+        expect(await f.gateway.getConfiguration(f.organizationId)).toMatchObject({
+          status: newerSuccess ? 'verified' : 'error',
+          lastVerifiedAt: result.verifiedAt,
+          lastError: newerSuccess ? null : 'TEST_ORDERED_VERIFY_FAILED',
+        });
+      } finally {
+        releaseFirst.resolve();
+        releaseSecond.resolve();
+        await Promise.all([older, newer]);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('does not restore an older verification after a failed verification and a funding save', async () => {
+    const f = await fixture();
+    await db
+      .update(organizationIntegrations)
+      .set({ status: 'configured' })
+      .where(eq(organizationIntegrations.organizationId, f.organizationId));
+    const inside = latch(),
+      release = latch();
+    let calls = 0;
+    Reflect.set(
+      f.gateway,
+      'request',
+      async (_method: string, _url: string, body: { echo_message: string }) => {
+        if (++calls > 1) throw new Error('NEWER_VERIFY_FAILED');
+        inside.resolve();
+        await release.promise;
+        return { echo_message: body.echo_message };
+      },
+    );
+    const older = f.gateway.testConnection(f.organizationId, f.actorId);
+    try {
+      await inside.promise;
+      const latest = await f.gateway.testConnection(f.organizationId, f.actorId);
+      expect(latest.ok).toBe(false);
+      await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+        ...f.config,
+        refundFunding: 'available',
+      });
+      release.resolve();
+      expect(await older).toMatchObject({ ok: false });
+      expect(await f.gateway.getConfiguration(f.organizationId)).toMatchObject({
+        status: 'error',
+        lastVerifiedAt: latest.verifiedAt,
+        lastError: 'NEWER_VERIFY_FAILED',
+        refundFunding: 'available',
+      });
+      await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+        code: 'REFUND_NOT_CONFIGURED',
+      });
+    } finally {
+      release.resolve();
+      await older;
+    }
+  });
+
+  it('requires a new verification when a funding save migrates the encryption key version', async () => {
+    const f = await fixture();
+    const previousKey = process.env.INTEGRATION_ENCRYPTION_KEY!;
+    const previousKeys = process.env.INTEGRATION_ENCRYPTION_PREVIOUS_KEYS;
+    const inside = latch(),
+      release = latch();
+    Reflect.set(f.gateway, 'request', async () => {
+      inside.resolve();
+      await release.promise;
+      throw new Error('OLD_ENCRYPTION_SNAPSHOT_VERIFY_FAILED');
+    });
+    const verifying = f.gateway.testConnection(f.organizationId, f.actorId);
+    try {
+      await inside.promise;
+      vi.stubEnv('INTEGRATION_ENCRYPTION_KEY', randomBytes(32).toString('base64'));
+      vi.stubEnv('INTEGRATION_ENCRYPTION_KEY_VERSION', '2');
+      vi.stubEnv('INTEGRATION_ENCRYPTION_PREVIOUS_KEYS', JSON.stringify({ 1: previousKey }));
+      const saved = await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+        ...f.config,
+        refundFunding: 'available',
+      });
+      release.resolve();
+      expect(await verifying).toMatchObject({ ok: false });
+      expect(saved).toMatchObject({ status: 'configured', refundFunding: 'available' });
+      expect((await f.gateway.getConfiguration(f.organizationId)).status).toBe('configured');
+      const [current] = await db
+        .select()
+        .from(organizationIntegrations)
+        .where(eq(organizationIntegrations.organizationId, f.organizationId));
+      expect(current?.keyVersion).toBe(2);
+      await expect(f.gateway.refundConfiguration(f.organizationId)).rejects.toMatchObject({
+        code: 'REFUND_NOT_CONFIGURED',
+      });
+    } finally {
+      release.resolve();
+      await verifying;
+      vi.stubEnv('INTEGRATION_ENCRYPTION_KEY', previousKey);
+      vi.stubEnv('INTEGRATION_ENCRYPTION_KEY_VERSION', '1');
+      vi.stubEnv('INTEGRATION_ENCRYPTION_PREVIOUS_KEYS', previousKeys);
+    }
+  });
+
+  it('preserves verified credentials when disabling new payments and rejects an unverified key change', async () => {
+    const f = await fixture();
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      enabled: false,
+    });
+    const [disabled] = await db
+      .select()
+      .from(organizationIntegrations)
+      .where(eq(organizationIntegrations.organizationId, f.organizationId));
+    expect(disabled?.status).toBe('verified');
+    const required = Reflect.get(f.gateway, 'requiredIntegration').bind(f.gateway);
+    await expect(required(f.organizationId, { requireVerified: true })).rejects.toThrow();
+    await expect(
+      required(f.organizationId, { reconcileExisting: true, merchantId: f.config.mchId }),
+    ).resolves.toBeDefined();
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      enabled: false,
+      apiV3Key: randomBytes(16).toString('hex'),
+    });
+    const [changed] = await db
+      .select()
+      .from(organizationIntegrations)
+      .where(eq(organizationIntegrations.organizationId, f.organizationId));
+    expect(changed?.status).toBe('configured');
+    await expect(
+      required(f.organizationId, { reconcileExisting: true, merchantId: f.config.mchId }),
+    ).rejects.toThrow('微信支付连接尚未验证通过');
+    await expect(
+      f.gateway.parseNotification(f.organizationId, Buffer.from('{}'), {
+        timestamp: undefined,
+        nonce: undefined,
+        signature: undefined,
+        serial: undefined,
+      }),
+    ).rejects.toThrow('微信支付连接尚未验证通过');
+  });
+
+  it('rejects a forged payment callback signed with newly configured, unverified credentials', async () => {
+    const f = await fixture();
+    const injectedKey = randomBytes(16).toString('hex');
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      apiV3Key: injectedKey,
+    });
+    const nonce = randomBytes(6).toString('hex');
+    const cipher = createCipheriv('aes-256-gcm', Buffer.from(injectedKey), Buffer.from(nonce));
+    const associated = 'transaction';
+    cipher.setAAD(Buffer.from(associated));
+    const ciphertext = Buffer.concat([
+      cipher.update(
+        JSON.stringify({
+          appid: f.config.appId,
+          mchid: f.config.mchId,
+          out_trade_no: f.payment.outTradeNo,
+          transaction_id: randomUUID(),
+          trade_state: 'SUCCESS',
+          success_time: new Date().toISOString(),
+          amount: { total: f.payment.amount, currency: f.payment.currency },
+        }),
+      ),
+      cipher.final(),
+      cipher.getAuthTag(),
+    ]);
+    const notificationId = randomUUID();
+    const body = JSON.stringify({
+      id: notificationId,
+      event_type: 'TRANSACTION.SUCCESS',
+      resource: {
+        algorithm: 'AEAD_AES_256_GCM',
+        nonce,
+        associated_data: associated,
+        ciphertext: ciphertext.toString('base64'),
+      },
+    });
+    await expect(
+      f.gateway.parseNotification(f.organizationId, Buffer.from(body), signed(body, f)),
+    ).rejects.toThrow('微信支付连接尚未验证通过');
+    expect(
+      await db
+        .select()
+        .from(paymentNotificationInbox)
+        .where(eq(paymentNotificationInbox.notificationId, notificationId)),
+    ).toHaveLength(0);
+  });
+
+  it('can verify changed credentials while collection remains disabled', async () => {
+    const f = await fixture();
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      enabled: false,
+      apiV3Key: randomBytes(16).toString('hex'),
+    });
+    Reflect.set(
+      f.gateway,
+      'request',
+      async (_method: string, _url: string, body: { echo_message: string }) => ({
+        echo_message: body.echo_message,
+      }),
+    );
+    await expect(f.gateway.testConnection(f.organizationId, f.actorId)).resolves.toMatchObject({
+      ok: true,
+      status: 'verified',
+    });
+    const required = Reflect.get(f.gateway, 'requiredIntegration').bind(f.gateway);
+    await expect(required(f.organizationId, { requireVerified: true })).rejects.toThrow();
+    await expect(required(f.organizationId, { reconcileExisting: true })).resolves.toBeDefined();
+  });
+
+  async function waitForBlockedConfigurationTransactions(organizationId: string, count: number) {
+    await expect
+      .poll(
+        async () => {
+          const result = await db.execute(sql`select count(*)::int as blocked from pg_locks
+        where locktype = 'advisory' and not granted
+          and classid = ((hashtextextended(${`wechat-configuration:${organizationId}`}, 0) >> 32) & 4294967295)::oid
+          and objid = (hashtextextended(${`wechat-configuration:${organizationId}`}, 0) & 4294967295)::oid`);
+          return Number(result.rows[0]?.blocked);
+        },
+        { timeout: 5000 },
+      )
+      .toBe(count);
+  }
+
+  const changes = ['merchant', 'apiV3Key'] as const;
+  function changedConfig(f: Awaited<ReturnType<typeof fixture>>, kind: (typeof changes)[number]) {
+    return {
+      ...f.config,
+      ...(kind === 'merchant'
+        ? { mchId: '1900000110' }
+        : { apiV3Key: randomBytes(16).toString('hex') }),
+    };
+  }
+
+  it.each(changes)(
+    'rejects a concurrent %s change after an approved refund acquires the lock',
+    async (kind) => {
+      const f = await fixture();
+      const inside = latch(),
+        release = latch();
+      const original = f.gateway.refundConfiguration.bind(f.gateway);
+      vi.spyOn(f.gateway, 'refundConfiguration').mockImplementation(
+        async (organizationId, reader) => {
+          const result = await original(organizationId, reader);
+          if (reader) {
+            inside.resolve();
+            await release.promise;
+          }
+          return result;
+        },
+      );
+      const creating = f.workflow.createAdmin(
+        f.organizationId,
+        f.orderId,
+        f.actorId,
+        randomUUID(),
+        { amount: 39900, reason: '测试退款' },
+      );
+      let changing: Promise<unknown> | undefined;
+      try {
+        await inside.promise;
+        changing = f.gateway
+          .updateConfiguration(f.organizationId, f.actorId, changedConfig(f, kind))
+          .then(
+            (value) => ({ value }),
+            (error) => ({ error }),
+          );
+        await waitForBlockedConfigurationTransactions(f.organizationId, 1);
+      } finally {
+        release.resolve();
+      }
+      expect(await creating).toMatchObject({ status: 'queued' });
+      expect(await changing).toMatchObject({
+        error: { message: expect.stringContaining('未结清退款') },
+      });
+      expect(await f.gateway.refundConfiguration(f.organizationId)).toMatchObject({
+        merchantId: f.config.mchId,
+      });
+    },
+  );
+
+  it.each(changes)(
+    'rechecks a stale refund preflight when %s configuration commits first',
+    async (kind) => {
+      const f = await fixture();
+      const held = latch(),
+        release = latch();
+      const gate = db.transaction(async (tx) => {
+        await lockWeChatConfiguration(tx, f.organizationId);
+        held.resolve();
+        await release.promise;
+      });
+      await held.promise;
+      const changing = f.gateway.updateConfiguration(
+        f.organizationId,
+        f.actorId,
+        changedConfig(f, kind),
+      );
+      let creating: Promise<unknown> | undefined;
+      try {
+        await waitForBlockedConfigurationTransactions(f.organizationId, 1);
+        creating = f.workflow
+          .createAdmin(f.organizationId, f.orderId, f.actorId, randomUUID(), {
+            amount: 39900,
+            reason: '测试退款',
+          })
+          .then(
+            (value) => ({ value }),
+            (error) => ({ error }),
+          );
+        await waitForBlockedConfigurationTransactions(f.organizationId, 2);
+      } finally {
+        release.resolve();
+        await gate;
+      }
+      await changing;
+      expect(await creating).toMatchObject({ error: { code: 'REFUND_NOT_CONFIGURED' } });
+      expect(
+        await db.select().from(refundRequests).where(eq(refundRequests.orderId, f.orderId)),
+      ).toHaveLength(0);
+      expect(await db.select().from(refunds).where(eq(refunds.orderId, f.orderId))).toHaveLength(0);
+    },
+  );
+
+  it('rejects an old merchant preflight even after the new merchant has been verified', async () => {
+    const f = await fixture(),
+      preflight = latch(),
+      release = latch();
+    const original = f.gateway.refundConfiguration.bind(f.gateway);
+    vi.spyOn(f.gateway, 'refundConfiguration').mockImplementationOnce(
+      async (organizationId, reader) => {
+        const result = await original(organizationId, reader);
+        preflight.resolve();
+        await release.promise;
+        return result;
+      },
+    );
+    const creating = f.workflow
+      .createAdmin(f.organizationId, f.orderId, f.actorId, randomUUID(), {
+        amount: 39900,
+        reason: '旧配置预读',
+      })
+      .then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+    try {
+      await preflight.promise;
+      await f.gateway.updateConfiguration(
+        f.organizationId,
+        f.actorId,
+        changedConfig(f, 'merchant'),
+      );
+      await db
+        .update(organizationIntegrations)
+        .set({ status: 'verified' })
+        .where(eq(organizationIntegrations.organizationId, f.organizationId));
+    } finally {
+      release.resolve();
+    }
+    expect(await creating).toMatchObject({
+      error: { message: expect.stringContaining('微信支付配置已变化') },
+    });
+    expect(await db.select().from(refunds).where(eq(refunds.orderId, f.orderId))).toHaveLength(0);
+  });
+
+  it('also serializes a customer application before a merchant update', async () => {
+    const f = await fixture(),
+      inside = latch(),
+      release = latch();
+    const original = f.gateway.refundConfiguration.bind(f.gateway);
+    vi.spyOn(f.gateway, 'refundConfiguration').mockImplementationOnce(
+      async (organizationId, reader) => {
+        const result = await original(organizationId, reader);
+        inside.resolve();
+        await release.promise;
+        return result;
+      },
+    );
+    const creating = f.workflow.createCustomer(f.customer, f.orderId, randomUUID(), {
+      amount: 39900,
+      policyVersion: f.policy.version,
+      reason: '',
+    });
+    let changing: Promise<unknown> | undefined;
+    try {
+      await inside.promise;
+      changing = f.gateway
+        .updateConfiguration(f.organizationId, f.actorId, changedConfig(f, 'merchant'))
+        .then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+      await waitForBlockedConfigurationTransactions(f.organizationId, 1);
+    } finally {
+      release.resolve();
+    }
+    expect(await creating).toMatchObject({ reviewStatus: 'pending_review' });
+    expect(await changing).toMatchObject({
+      error: { message: expect.stringContaining('未结清退款') },
+    });
+  });
+
+  function signed(body: string, f: Awaited<ReturnType<typeof fixture>>) {
+    const timestamp = String(Math.floor(Date.now() / 1000)),
+      nonce = randomBytes(8).toString('hex');
+    const signer = createSign('RSA-SHA256');
+    signer.update(`${timestamp}\n${nonce}\n${body}\n`);
+    signer.end();
+    return {
+      timestamp,
+      nonce,
+      serial: f.config.platformPublicKeyId,
+      signature: signer.sign(keys.privateKey, 'base64'),
+    };
+  }
+  function callback(f: Awaited<ReturnType<typeof fixture>>) {
+    const nonce = randomBytes(6).toString('hex'),
+      associated = 'refund';
+    const cipher = createCipheriv('aes-256-gcm', Buffer.from(f.apiV3Key), Buffer.from(nonce));
+    cipher.setAAD(Buffer.from(associated));
+    const ciphertext = Buffer.concat([
+      cipher.update(
+        JSON.stringify({
+          mchid: f.config.mchId,
+          out_refund_no: `RF${randomUUID().replaceAll('-', '')}`,
+        }),
+      ),
+      cipher.final(),
+      cipher.getAuthTag(),
+    ]);
+    const body = JSON.stringify({
+      id: randomUUID(),
+      event_type: 'REFUND.SUCCESS',
+      resource: {
+        algorithm: 'AEAD_AES_256_GCM',
+        nonce,
+        associated_data: associated,
+        ciphertext: ciphertext.toString('base64'),
+      },
+    });
+    return { body: Buffer.from(body), headers: signed(body, f) };
+  }
+
+  it.each(changes)(
+    'keeps a newly received callback durable before a concurrent %s change',
+    async (kind) => {
+      const f = await fixture(),
+        n = callback(f),
+        held = latch(),
+        release = latch();
+      const gate = db.transaction(async (tx) => {
+        await lockWeChatConfiguration(tx, f.organizationId);
+        held.resolve();
+        await release.promise;
+      });
+      await held.promise;
+      const receiving = f.gateway.receiveRefundNotification(f.organizationId, n.body, n.headers);
+      let changing: Promise<unknown> | undefined;
+      try {
+        await waitForBlockedConfigurationTransactions(f.organizationId, 1);
+        changing = f.gateway
+          .updateConfiguration(f.organizationId, f.actorId, changedConfig(f, kind))
+          .then(
+            (value) => ({ value }),
+            (error) => ({ error }),
+          );
+        await waitForBlockedConfigurationTransactions(f.organizationId, 2);
+      } finally {
+        release.resolve();
+        await gate;
+      }
+      await receiving;
+      expect(await changing).toMatchObject({
+        error: { message: expect.stringContaining('未结清退款') },
+      });
+      expect(
+        await db
+          .select()
+          .from(refundNotificationInbox)
+          .where(eq(refundNotificationInbox.organizationId, f.organizationId)),
+      ).toHaveLength(1);
+    },
+  );
+
+  it('keeps signed historical queries available while a configuration lock is held and collection is disabled', async () => {
+    const f = await fixture();
+    await f.gateway.updateConfiguration(f.organizationId, f.actorId, {
+      ...f.config,
+      enabled: false,
+      apiV3Key: randomBytes(16).toString('hex'),
+    });
+    const body = JSON.stringify({
+      refund_id: 'WX_RACE_HISTORY',
+      out_refund_no: 'RF_RACE_HISTORY',
+      transaction_id: f.payment.externalId,
+      out_trade_no: f.payment.outTradeNo,
+      status: 'SUCCESS',
+      channel: 'ORIGINAL',
+      user_received_account: '支付用户零钱',
+      create_time: new Date().toISOString(),
+      success_time: new Date().toISOString(),
+      amount: { total: 39900, refund: 39900, currency: 'CNY' },
+    });
+    const headers = signed(body, f);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(body, {
+          status: 200,
+          headers: {
+            'wechatpay-timestamp': headers.timestamp,
+            'wechatpay-nonce': headers.nonce,
+            'wechatpay-serial': headers.serial,
+            'wechatpay-signature': headers.signature,
+          },
+        }),
+      ),
+    );
+    const held = latch(),
+      release = latch();
+    const gate = db.transaction(async (tx) => {
+      await lockWeChatConfiguration(tx, f.organizationId);
+      held.resolve();
+      await release.promise;
+    });
+    await held.promise;
+    let settled = false;
+    const query = f.gateway
+      .queryRefund(f.organizationId, f.config.mchId, 'RF_RACE_HISTORY')
+      .finally(() => {
+        settled = true;
+      });
+    try {
+      await expect.poll(() => settled, { timeout: 2000 }).toBe(true);
+      expect(await query).toMatchObject({ status: 'SUCCESS' });
+    } finally {
+      release.resolve();
+      await gate;
+    }
+  });
+});

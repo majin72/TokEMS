@@ -25,6 +25,7 @@ describe('public analytics route scope', () => {
     '/faq',
     '/faq/',
     '/members/member-1',
+    '/partners/partner-1',
     '/speakers/0d647797-fc67-43f5-9257-e2b4a9212646',
     '/speakers/tyzb',
     '/s/tyzb',
@@ -36,11 +37,17 @@ describe('public analytics route scope', () => {
 
   it.each([
     '/register',
+    '/register/tokems26',
+    '/register/tokems26?ticket=one',
     '/account/profile',
     '/order/123',
     '/invoice/123',
+    '/invoice/file/TestFileToken000000000000',
+    '/api/v1/invoice-files/TestFileToken000000000000',
     '/ticket/123',
     '/pay/hui/123',
+    '/payout/123',
+    '/r/REFERRAL01',
     '/REGISTER',
     '/Account/profile',
     '/admin',
@@ -55,6 +62,12 @@ describe('public analytics route scope', () => {
 
   it('uses a new document whenever navigation crosses the sensitive-page boundary', () => {
     expect(requiresAnalyticsDocumentBoundary(googleSettings, '/faq', '/register')).toBe(true);
+    expect(
+      requiresAnalyticsDocumentBoundary(googleSettings, '/tokems26', '/register/tokems26'),
+    ).toBe(true);
+    expect(
+      requiresAnalyticsDocumentBoundary(googleSettings, '/register/tokems26', '/tokems26'),
+    ).toBe(true);
     expect(requiresAnalyticsDocumentBoundary(googleSettings, '/account', '/tokems26')).toBe(true);
     expect(requiresAnalyticsDocumentBoundary(googleSettings, '/account', '/order/123')).toBe(false);
     expect(requiresAnalyticsDocumentBoundary(googleSettings, '/faq', '/speakers/123')).toBe(false);

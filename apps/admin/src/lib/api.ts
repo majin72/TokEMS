@@ -1,4 +1,21 @@
+import type { RegistrationBatchCheckout, ReviewBatchOrder, ReviewBatchOrderResult, AdminItemRefund } from '@conference/contracts';
+import type { InvoiceSmsTestStatus } from '@conference/contracts';
 import { computed, ref } from 'vue';
+import type {
+  FeishuBotConfiguration,
+  UpdateFeishuBotConfiguration,
+  FeishuBotVerification,
+  FeishuChatList,
+  FeishuDigestSubscription,
+  UpdateFeishuDigestSubscription,
+  FeishuDigestSnapshot,
+  FeishuDigestDelivery,
+  FeishuDigestDeliveryDetail,
+  FeishuDigestTestMessage,
+  FeishuDigestSendResult,
+  FeishuDigestRecoveryRequest,
+  AdminRefundApplicationView,
+} from '@conference/contracts';
 import {
   type AccountProfile,
   type AcceptOrganizationInvitation,
@@ -544,7 +561,7 @@ const baseURL =
   import.meta.env.VITE_API_BASE ??
   (import.meta.env.DEV ? 'http://localhost:4100/api/v1' : '/api/v1');
 
-function apiResourceUrl(path: string | null | undefined) {
+export function apiResourceUrl(path: string | null | undefined) {
   if (!path) return null;
   if (/^https?:\/\//u.test(path)) return path;
   return `${baseURL.replace(/\/$/u, '')}/${path.replace(/^\//u, '')}`;
@@ -558,6 +575,17 @@ function normalizeAdminSpeaker<T extends AdminSpeakerSummary>(speaker: T): T {
   };
 }
 
+export class AdminApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'AdminApiError';
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${baseURL}${path}`, {
     ...init,
@@ -567,10 +595,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...init.headers,
     },
   });
-  const body = (await response.json().catch(() => ({}))) as T & { message?: string };
+  const body = (await response.json().catch(() => ({}))) as T & { message?: string; details?: Record<string, unknown> };
   if (!response.ok) {
     if (response.status === 401) session.clear();
-    throw new Error(body.message ?? `请求失败（${response.status}）`);
+    throw new AdminApiError(body.message ?? `请求失败（${response.status}）`, response.status, body.details);
   }
   return body;
 }
@@ -590,6 +618,107 @@ const adminPreferenceWriter = createLatestPreferenceWriter(async (lastEventId) =
 });
 
 export const conferenceApi = {
+  getFeishuBotConfiguration: () =>
+    request<FeishuBotConfiguration>('/admin/integrations/feishu-bot'),
+  updateFeishuBotConfiguration: (input: UpdateFeishuBotConfiguration) =>
+    request<FeishuBotConfiguration>('/admin/integrations/feishu-bot', {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+  verifyFeishuBot: () =>
+    request<FeishuBotVerification>('/admin/integrations/feishu-bot/verify', { method: 'POST' }),
+  getFeishuChats: () => request<FeishuChatList>('/admin/integrations/feishu-bot/chats'),
+  refreshFeishuChats: () =>
+    request<FeishuChatList>('/admin/integrations/feishu-bot/chats/refresh', { method: 'POST' }),
+  getFeishuDigestSubscription: (eventId: EventId) =>
+    request<FeishuDigestSubscription>(`/admin/events/${eventId}/feishu-digest`),
+  updateFeishuDigestSubscription: (eventId: EventId, input: UpdateFeishuDigestSubscription) =>
+    request<FeishuDigestSubscription>(`/admin/events/${eventId}/feishu-digest`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+  previewFeishuDigest: (eventId: EventId) =>
+    request<{ snapshot: FeishuDigestSnapshot; card: Record<string, unknown> }>(
+      `/admin/events/${eventId}/feishu-digest/preview`,
+    ),
+  getFeishuDeliveries: (eventId: EventId) =>
+    request<FeishuDigestDelivery[]>(`/admin/events/${eventId}/feishu-digest/deliveries`),
+  getFeishuDelivery: (eventId: EventId, id: string) =>
+    request<FeishuDigestDeliveryDetail>(`/admin/events/${eventId}/feishu-digest/deliveries/${id}`),
+  sendFeishuTest: (eventId: EventId, input: FeishuDigestTestMessage, key: string) =>
+    request<FeishuDigestSendResult>(`/admin/events/${eventId}/feishu-digest/send-test`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+      body: JSON.stringify(input),
+    }),
+  recoverFeishuDelivery: (
+    eventId: EventId,
+    id: string,
+    action: 'resend' | 'regenerate' | 'resolve',
+    input: FeishuDigestRecoveryRequest,
+    key: string,
+  ) =>
+    request<FeishuDigestSendResult>(
+      `/admin/events/${eventId}/feishu-digest/deliveries/${id}/${action}`,
+      { method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(input) },
+    ),
+
+  refundExceptions(eventId: number) {
+    return request<
+      Array<{ orderId: string; registrationId: string; orderNo: string; reason: string | null }>
+    >(`/admin/events/${eventId}/refund-exceptions`);
+  },
+  unmatchedRefundNotifications() {
+    return request<
+      Array<{ id: string; outRefundNo: string; lastError: string | null; createdAt: string }>
+    >('/admin/integrations/wechat-pay/refund-notifications');
+  },
+  getRefundPolicy(eventId?: EventId) {
+    return request<import('@conference/contracts').EventRefundPolicy>(
+      `/admin/events/${eventScope(eventId)}/refund-policy`,
+    );
+  },
+  refundApplications(
+    eventId: number,
+    query: { orderId?: string; status?: string; offset?: number } = {},
+  ) {
+    const params = new URLSearchParams(
+      Object.entries(query).map(([key, value]) => [key, String(value)]),
+    );
+    return request<AdminRefundApplicationView[]>(
+      `/admin/events/${eventId}/refund-requests?${params}`,
+    );
+  },
+  refundApplicationAction(
+    eventId: number,
+    requestId: string,
+    action: 'approve' | 'reject' | 'retry' | 'reconcile' | 'continue',
+    version: number,
+    reason?: string,
+  ) {
+    return request(`/admin/events/${eventId}/refund-requests/${requestId}/${action}`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({ version, ...(reason ? { reason } : {}) }),
+    });
+  },
+  refundExecutionMode(orderId: string, mode: 'automatic' | 'external_hold', reason: string) {
+    return request<{ mode: string; externalReady: boolean }>(
+      `/admin/orders/${orderId}/refund-execution-mode`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify({ mode, reason }),
+      },
+    );
+  },
+  verifyExternalRefund(orderId: string, outRefundNo: string) {
+    return request(`/admin/orders/${orderId}/external-refunds/verify`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({ outRefundNo }),
+    });
+  },
   getAgentAuthorization(authorizationId: string) {
     return request<AgentAuthorizationDetail>(
       `/admin/agent-authorizations/${encodeURIComponent(authorizationId)}`,
@@ -912,6 +1041,18 @@ export const conferenceApi = {
   getWaitlist(eventId?: EventId) {
     return request<WaitlistEntry[]>(`/admin/events/${eventScope(eventId)}/waitlist`);
   },
+  getBatchOrder(orderId: string, eventId?: EventId) {
+    return request<RegistrationBatchCheckout>(`/admin/events/${eventScope(eventId)}/orders/${orderId}/items`);
+  },
+  reviewBatchOrder(orderId: string, input: ReviewBatchOrder, eventId?: EventId, key: string = crypto.randomUUID()) {
+    return request<ReviewBatchOrderResult>(`/admin/events/${eventScope(eventId)}/orders/${orderId}/review`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(input) });
+  },
+  getItemRefundContext(orderId: string, eventId?: EventId) {
+    return request<{ orderId: string; quantity: number; contextVersion: string; currency: string; remaining: number; items: Array<{ id: string; registrationId: string; name: string; ticketName: string; refundableAmount: number; version: number; canRetain: boolean; canRevoke: boolean; blockedReason: string | null }> }>(`/admin/events/${eventScope(eventId)}/orders/${orderId}/item-refund-context`);
+  },
+  refundOrderItems(orderId: string, input: AdminItemRefund, key: string, eventId?: EventId) {
+    return request(`/admin/events/${eventScope(eventId)}/orders/${orderId}/item-refunds`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(input) });
+  },
   reviewRegistration(registrationId: string, input: ReviewRegistration, eventId?: EventId) {
     return request<RegistrationCheckout>(
       `/admin/events/${eventScope(eventId)}/registrations/${registrationId}/review`,
@@ -928,6 +1069,16 @@ export const conferenceApi = {
     if (filters.status) query.set('status', filters.status);
     if (filters.page) query.set('page', String(filters.page));
     return request<AdminOrderList>(`/admin/orders?${query}`);
+  },
+  closeUnpaidOrder(
+    orderId: string,
+    input: { reason: string; expectedExpiresAt: string },
+    eventId: EventId,
+  ) {
+    return request<{ orderId: string; status: 'closed' }>(
+      `/admin/events/${eventScope(eventId)}/orders/${encodeURIComponent(orderId)}/close`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
   },
   checkIn(payload: Omit<CheckInRequest, 'eventId' | 'checkInListId'>, eventId?: EventId) {
     return request<CheckInResult>('/checkins', {
@@ -1800,14 +1951,22 @@ export const conferenceApi = {
       },
     );
   },
-  sendInvoice(invoiceId: string, eventId?: EventId) {
-    return request<{ queued: boolean }>(
+  sendInvoice(invoiceId: string, eventId?: EventId, input:{forceAfterUncertain?:boolean;reason?:string}={}) {
+    return request<{ queued: boolean; alreadyQueued: boolean; maskedRecipient: string }>(
       `/admin/events/${eventScope(eventId)}/invoices/${invoiceId}/send`,
       {
         method: 'POST',
         headers: { 'Idempotency-Key': `invoice-send-${crypto.randomUUID()}` },
+        body:JSON.stringify(input),
       },
     );
+  },
+  revokeInvoiceAccess(invoiceId:string,input:{expectedUpdatedAt:string;reason:string;resend:boolean},eventId?:EventId) {
+    return request(`/admin/events/${eventScope(eventId)}/invoices/${invoiceId}/revoke-access`,{method:'POST',
+      headers:{'Idempotency-Key':`invoice-revoke-${crypto.randomUUID()}`},body:JSON.stringify(input)});
+  },
+  getInvoiceSmsTestStatus(deliveryId:string) {
+    return request<InvoiceSmsTestStatus>(`/admin/integrations/aliyun-sms/invoice-ready/tests/${deliveryId}`);
   },
   requestInvoiceDetailsReminder(invoiceId: string, eventId?: EventId) {
     return request<{ queued: boolean; alreadyQueued: boolean }>(
@@ -1975,6 +2134,216 @@ export const conferenceApi = {
     return request<Array<Record<string, unknown>>>(
       `/admin/audit-logs?eventId=${eventScope(eventId)}`,
     );
+  },
+  getPartnerDistributionOverview(eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/overview`,
+    );
+  },
+  getEventPartners(eventId?: EventId) {
+    return request<{ items: import('@conference/contracts').AdminPartnerRelationshipView[] }>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners`,
+    );
+  },
+  enableEventPartner(input: import('@conference/contracts').AdminEnablePartner, eventId?: EventId) {
+    return request<import('@conference/contracts').AdminEnablePartnerResult>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  batchEnableEventPartners(
+    input: {
+      customerUserIds?: string[];
+      customerPublicUserIds?: number[];
+      personalRateBps: number | null;
+      sendInvitation: boolean;
+    },
+    eventId?: EventId,
+  ) {
+    return request<{ items: import('@conference/contracts').PartnerRelationshipView[]; count: number }>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners/batch`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  updateEventPartner(
+    partnerId: string,
+    input: import('@conference/contracts').AdminUpdatePartner,
+    eventId?: EventId,
+  ) {
+    return request<import('@conference/contracts').PartnerRelationshipView>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners/${encodeURIComponent(partnerId)}`,
+      { method: 'PATCH', body: JSON.stringify(input) },
+    );
+  },
+  updateEventPartnerDetails(
+    partnerId: string,
+    input: import('@conference/contracts').AdminEditPartnerDetails,
+    eventId?: EventId,
+  ) {
+    return request<import('@conference/contracts').PartnerRelationshipView>(
+      `/admin/events/${eventScope(eventId)}/distribution/partners/${encodeURIComponent(partnerId)}/details`,
+      { method: 'PATCH', body: JSON.stringify(input) },
+    );
+  },
+  publishPartnerProgram(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/programs`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  getPartnerCommissions(eventId?: EventId) {
+    return request<{ items: Array<Record<string, unknown>> }>(
+      `/admin/events/${eventScope(eventId)}/distribution/commissions`,
+    );
+  },
+  createPartnerCommissionAdjustment(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/commission-adjustments`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  getPartnerCommissionInquiries(eventId?: EventId) {
+    return request<{ items: Array<Record<string, unknown>> }>(
+      `/admin/events/${eventScope(eventId)}/distribution/commission-inquiries`,
+    );
+  },
+  getPartnerPayouts(eventId?: EventId) {
+    return request<{
+      requests: Array<Record<string, unknown>>;
+      batches: Array<Record<string, unknown>>;
+      inquiries: Array<Record<string, unknown>>;
+      recipients: Array<Record<string, unknown>>;
+      documents: Array<Record<string, unknown>>;
+      reconciliations: Array<Record<string, unknown>>;
+    }>(`/admin/events/${eventScope(eventId)}/distribution/payouts`);
+  },
+  async uploadPartnerPayoutDocument(
+    payoutRequestId: string,
+    kind: 'settlement_statement' | 'tax_document' | 'manual_receipt' | 'wechat_receipt',
+    file: File,
+    eventId?: EventId,
+  ) {
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+    const prepared = await request<{
+      uploadToken: string;
+      uploadUrl: string;
+      headers: Record<string, string>;
+    }>(`/admin/events/${eventScope(eventId)}/distribution/payout-documents/uploads`, {
+      method: 'POST',
+      body: JSON.stringify({
+        payoutRequestId,
+        kind,
+        fileName: file.name,
+        mediaType: file.type,
+        size: file.size,
+        contentDigest: digest,
+      }),
+    });
+    const uploaded = await fetch(prepared.uploadUrl, {
+      method: 'PUT',
+      headers: prepared.headers,
+      body: file,
+    });
+    if (!uploaded.ok) throw new Error('结算文件上传失败');
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-documents/confirmations`,
+      { method: 'POST', body: JSON.stringify({ uploadToken: prepared.uploadToken }) },
+    );
+  },
+  resolvePartnerReconciliation(
+    reconciliationId: string,
+    reason: string,
+    eventId?: EventId,
+  ) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/reconciliations/${encodeURIComponent(reconciliationId)}/resolve`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    );
+  },
+  createPartnerReconciliation(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/reconciliations`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  async exportPartnerPayouts(eventId?: EventId) {
+    const scopedEventId = eventScope(eventId);
+    const response = await fetch(
+      `${baseURL}/admin/events/${scopedEventId}/distribution/payouts/export`,
+      { headers: { Authorization: `Bearer ${token.value}` } },
+    );
+    if (!response.ok) throw new Error('提现与对账导出失败');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `partner-payouts-${scopedEventId}-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    return Number(response.headers.get('X-Export-Row-Count') ?? 0);
+  },
+  reviewPartnerPayout(requestId: string, input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payouts/${encodeURIComponent(requestId)}/review`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  createPartnerPayoutBatch(input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-batches`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  reviewPartnerPayoutBatch(batchId: string, input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-batches/${encodeURIComponent(batchId)}/review`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  executePartnerPayoutBatch(batchId: string, expectedVersion: number, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payout-batches/${encodeURIComponent(batchId)}/execute`,
+      { method: 'POST', body: JSON.stringify({ expectedVersion }) },
+    );
+  },
+  completeManualPartnerPayout(
+    requestId: string,
+    input: Record<string, unknown>,
+    eventId?: EventId,
+  ) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/payouts/${encodeURIComponent(requestId)}/manual-completion`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  resolvePartnerInquiry(inquiryId: string, input: Record<string, unknown>, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/inquiries/${encodeURIComponent(inquiryId)}/resolve`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+  getPartnerRecipientDetails(recipientId: string, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/recipients/${encodeURIComponent(recipientId)}/details`,
+      { method: 'POST' },
+    );
+  },
+  verifyPartnerRecipient(recipientId: string, eventId?: EventId) {
+    return request<Record<string, unknown>>(
+      `/admin/events/${eventScope(eventId)}/distribution/recipients/${encodeURIComponent(recipientId)}/verify`,
+      { method: 'POST' },
+    );
+  },
+  getPartnerPayoutSettings() {
+    return request<Record<string, unknown>>('/admin/organization/payout-settings');
+  },
+  updatePartnerPayoutSettings(input: Record<string, unknown>) {
+    return request<Record<string, unknown>>('/admin/organization/payout-settings', {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
   },
   async exportRegistrations(eventId?: EventId) {
     const scopedEventId = eventScope(eventId);

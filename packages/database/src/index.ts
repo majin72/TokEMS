@@ -26,3 +26,9 @@ export * from './schema.js';
 export * from './migration-status.js';
 export * from './feishu-digest.js';
 export * from './inventory-reservation-policy.js';
+export * from './refund-reporting-policy.js';
+
+export * from "./invoice-sms.js";
+export { eraseUnavailableClaimInvitationReplays } from './claim-invitation-replay.js';
+
+export { syncLegacyOrderItemState } from './legacy-order-items.js';
