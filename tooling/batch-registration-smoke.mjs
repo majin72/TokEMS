@@ -28,6 +28,10 @@ async function fixture(options = {}) {
     viewport: { width: options.width ?? 1280, height: 900 },
   });
   const page = await context.newPage();
+  // Keep fixture screenshots independent of the external font service.
+  await page.route('https://fonts.googleapis.com/**', (route) =>
+    route.fulfill({ contentType: 'text/css', body: '' }),
+  );
   page.setDefaultTimeout(12_000);
   // Interaction assertions keep their strict 12s budget. Page loads get a navigation-only
   // budget so that a slow or saturated runner cannot turn a healthy render into a failure.
@@ -920,6 +924,59 @@ test('proxy-only purchase leaves all participant identities separate from the pu
     assert.equal(f.submissions[0].body.attendees.filter((item) => item.isSelf).length, 0);
     assert.ok(f.submissions[0].body.attendees.every((item) => item.marketingConsent === false));
   } finally {
+    await f.context.close();
+  }
+});
+
+test('a queued quote refresh cannot interrupt a purchase submission', async (t) => {
+  const f = await fixture();
+  const clockStart = Date.now();
+  const quoteRequests = [];
+  let releaseQuote;
+  const heldQuote = new Promise((resolve) => {
+    releaseQuote = resolve;
+  });
+  try {
+    await f.page.clock.install({ time: clockStart });
+    const initialQuote = f.page.waitForResponse('**/registration-batches/quote');
+    await f.open(`/register/${f.event.slug}?purchaseFor=other`);
+    await initialQuote;
+    await f.page.clock.pauseAt(clockStart + 60_000);
+    await f.fill(3);
+    await f.page
+      .locator('.attendee-card')
+      .first()
+      .locator('input[id$="-mobile"]')
+      .fill('13900139000');
+    await f.page.locator('#batch-terms-accepted').check();
+    await f.page.route('**/registration-batches/quote', async (route) => {
+      quoteRequests.push(route.request().postDataJSON());
+      if (quoteRequests.length === 1) await heldQuote;
+      await route.fallback();
+    });
+    const submittingQuote = f.page.waitForRequest('**/registration-batches/quote');
+    await f.page.locator('.batch-submit button').click();
+    await submittingQuote;
+    // Let the quantity-change debounce expire while the submit quote is in flight.
+    await f.page.clock.runFor(200);
+    releaseQuote();
+    await f.page.getByRole('alert').filter({ hasText: '已记录模拟报名请求' }).waitFor();
+    assert.equal(quoteRequests.length, 1, 'submission owns the quote refresh');
+    assert.equal(f.submissions.length, 1);
+    assert.equal(f.submissions[0].body.quantity, 3);
+    assert.ok(f.submissions[0].body.attendees.every((item) => !item.isSelf));
+    assert.deepEqual(f.errors, []);
+  } catch (error) {
+    t.diagnostic(
+      JSON.stringify({
+        quoteQuantities: quoteRequests.map((input) => input.quantity),
+        submissions: f.submissions.length,
+        alerts: await f.page.getByRole('alert').allTextContents(),
+      }),
+    );
+    throw error;
+  } finally {
+    releaseQuote();
     await f.context.close();
   }
 });
