@@ -506,7 +506,11 @@ async function refreshQuote(explicit = false) {
 }
 function scheduleQuote() {
   if (quoteTimer) clearTimeout(quoteTimer);
-  quoteTimer = setTimeout(() => void refreshQuote(), 180);
+  quoteTimer = setTimeout(() => {
+    quoteTimer = undefined;
+    // Submission owns its quote until the purchase attempt finishes.
+    if (!pending.value) void refreshQuote();
+  }, 180);
 }
 async function submit() {
   errorMessage.value = '';

@@ -18,6 +18,10 @@ async function fixture(options = {}) {
     options.userAgent ? { userAgent: options.userAgent } : {},
   );
   const page = await context.newPage();
+  // Keep fixture navigation independent of the external font service.
+  await page.route('https://fonts.googleapis.com/**', (route) =>
+    route.fulfill({ contentType: 'text/css', body: '' }),
+  );
   page.setDefaultTimeout(8_000);
   const event = structuredClone(DEMO_EVENT);
   const orderId = '11111111-1111-4111-8111-111111111111';
@@ -404,6 +408,32 @@ async function fixture(options = {}) {
     },
   };
 }
+
+test('payment editor loads when the external font service is unavailable', async (t) => {
+  const f = await fixture();
+  let externalFontRequests = 0;
+  let releaseFont;
+  const unavailableFont = new Promise((resolve) => {
+    releaseFont = resolve;
+  });
+  await f.context.route('https://fonts.googleapis.com/**', async (route) => {
+    externalFontRequests += 1;
+    await unavailableFont;
+    await route.abort().catch(() => {});
+  });
+  try {
+    await f.page.goto(`${base}/account/registrations/${f.registrationId}/edit`);
+    await f.page.getByLabel('公司', { exact: true }).fill('字体服务不可用时仍可修改');
+    assert.equal(externalFontRequests, 0, 'the fixture supplies its own font stylesheet');
+    assert.deepEqual(f.errors, []);
+  } catch (error) {
+    t.diagnostic(`External font requests: ${externalFontRequests}`);
+    throw error;
+  } finally {
+    releaseFont();
+    await f.context.close();
+  }
+});
 
 test('registration detail lets the purchaser correct company information and continue paying', async () => {
   const f = await fixture();
