@@ -45,3 +45,10 @@ peerDependencyRules:
 
 patchedDependencies:
   '@nuxt/devtools@3.4.2': patches/@nuxt__devtools@3.4.2.patch
+
+# Approved temporary exceptions; expiry is enforced by test:tooling.
+# Scope and removal conditions: docs/security-audit-exceptions.md
+auditConfig:
+  ignoreGhsas:
+    - GHSA-86w9-cpqp-85rv
+    - GHSA-vfj7-8cjw-p6xm
