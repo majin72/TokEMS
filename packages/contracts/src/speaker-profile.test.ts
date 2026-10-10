@@ -41,6 +41,7 @@ describe('speaker profile contracts', () => {
       '玉伯',
       '岳琦',
       '余一',
+      '张莹莹',
     ]);
 
     for (const speaker of DEMO_EVENT.speakers) {
